@@ -1,12 +1,15 @@
-@php $present = \Paymenter\Extensions\Servers\Enom\Services\DomainPresentation::class; @endphp
-<div class="enom-ui space-y-3 p-4">
+{{-- Shown on the native service page. Management lives on the domain page. --}}
+<div class="enom" style="max-width:none">
     @include('enom::partials.styles')
-    <h2 class="text-xl font-semibold">{{ $snapshot['domain'] }}</h2>
-    <dl class="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div><dt class="text-sm">Status</dt><dd class="font-semibold">{{ $snapshot['progress']['label'] ?? $present::progress($snapshot['status'] ?? null, null) }}</dd></div>
-        <div><dt class="text-sm">Expires</dt><dd class="font-semibold">{{ $present::day($snapshot['provider_expires_at'] ?? null) ?? 'Not confirmed yet' }}</dd></div>
-        <div><dt class="text-sm">Renewal</dt><dd class="font-semibold">{{ ($snapshot['renewal_enabled'] ?? true) ? 'On' : 'Off' }}</dd></div>
-    </dl>
-    <a class="enom-link underline" href="{{ route('enom.domains.show', $snapshot['id']) }}">Manage domain</a>
-    @include('enom::partials.automation-info')
+    <div class="enom-panel enom-section enom-row" style="justify-content:space-between">
+        <div style="min-width:0">
+            <p class="enom-domain" style="font-size:1.125rem">{{ $snapshot['domain'] }}</p>
+            <div class="enom-dhead__meta" style="margin-top:.25rem">
+                @include('enom::partials.badge', ['status' => $snapshot['status'] ?? null, 'progress' => $snapshot['progress'] ?? null])
+                @if (!empty($snapshot['provider_expires_at']))<span>Expires <strong>@include('enom::partials.date', ['date' => $snapshot['provider_expires_at']])</strong></span>@endif
+                @if (($snapshot['status'] ?? null) === 'active')<span>Auto-renew <strong>{{ ($snapshot['renewal_enabled'] ?? true) ? 'on' : 'off' }}</strong></span>@endif
+            </div>
+        </div>
+        <a class="enom-btn enom-btn--primary" href="{{ route('enom.domains.show', $snapshot['id']) }}">Manage domain</a>
+    </div>
 </div>

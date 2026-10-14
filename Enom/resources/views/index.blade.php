@@ -1,68 +1,121 @@
 @component('layouts.app', ['title' => 'Domains', 'sidebar' => true])
 @php
-    $present = \Paymenter\Extensions\Servers\Enom\Services\DomainPresentation::class;
-    // Native check for the quote field, used when the page script does not run. Laravel's TrimStrings removes
-    // Unicode whitespace and Str::INVISIBLE_CHARACTERS at both ends before the controller sees the value, so the
-    // pattern allows them there. The core is one ASCII label of 1 to 63 characters plus .com: no leading or trailing
-    // hyphen, no hyphens as third and fourth characters (this also rejects xn--). Hyphens inside classes are escaped for the v flag.
-    $invisible = preg_replace_callback('/\\\\x\{([0-9A-Fa-f]+)\}/', fn ($match) => '\u{'.$match[1].'}', \Illuminate\Support\Str::INVISIBLE_CHARACTERS);
-    $invisible = is_string($invisible) && preg_match('/\A(?:\\\\u\{[0-9A-Fa-f]{1,6}\})*\z/', $invisible) ? $invisible : '';
-    $domainEdge = '[\p{White_Space}\u{0}'.$invisible.']*';
-    $domainPattern = $domainEdge.'(?![A-Za-z0-9\-]{2}--)[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?\.[Cc][Oo][Mm]'.$domainEdge;
+    $controller = \Paymenter\Extensions\Servers\Enom\Http\Controllers\DomainController::class;
+    $params = array_filter(['q' => $search, 'status' => $filter, 'sort' => $sort === 'expiry' ? null : $sort]);
+    $url = fn (array $changes) => route('enom.domains.index', array_filter([...$params, ...$changes], fn ($v) => $v !== null && $v !== ''));
+    $sortLink = fn (string $column) => $url(['sort' => $sort === $column ? '-'.$column : ($column === 'expiry' ? null : $column), 'page' => null]);
+    $sortIcon = fn (string $column) => $sort === $column ? 'ri-arrow-up-s-line' : ($sort === '-'.$column ? 'ri-arrow-down-s-line' : null);
+    $total = $filterCounts[''] ?? 0;
 @endphp
-<div class="enom-ui container mt-14 space-y-6">
+<div class="container mt-14 mb-10">
+<div class="enom">
     @include('enom::partials.styles')
-    <div class="flex flex-wrap justify-between items-center gap-4">
-        <h1 class="text-2xl font-semibold">Domains</h1>
-        @include('enom::partials.help-link', ['route' => 'enom.help', 'topic' => null, 'label' => 'Domain help'])
+    @include('enom::partials.test-banner', ['test' => $testEnvironment])
+    <div class="enom-head">
+        <div>
+            <h1 class="enom-title">Domains</h1>
+            @if ($total > 0)<p class="enom-lede">{{ $total }} {{ $total === 1 ? 'domain' : 'domains' }} in your account.</p>@endif
+        </div>
+        <div class="enom-row">
+            <a class="enom-btn enom-btn--secondary" href="{{ route('enom.domains.transfer') }}"><x-ri-arrow-left-right-line class="enom-i" aria-hidden="true" />Transfer a domain</a>
+            <a class="enom-btn enom-btn--primary" href="{{ route('enom.domains.search') }}"><x-ri-add-line class="enom-i" aria-hidden="true" />Register a domain</a>
+        </div>
     </div>
-    @include('enom::partials.messages')
-    <section class="bg-background-secondary border border-neutral p-5 rounded-lg space-y-4" aria-labelledby="enom-order-heading">
-        <h2 id="enom-order-heading" class="text-xl font-semibold">Register or transfer a domain</h2>
-        <p class="text-sm">Only .com domains, one year at a time, priced in USD. Premium domains are not available. Availability can change before you pay.</p>
-        <form method="POST" action="{{ route('enom.domains.quote') }}" data-enom-validate class="space-y-4">
-            @include('enom::partials.validation-feedback')
-            @csrf
-            <input type="hidden" name="_request_key" value="{{ $searchKey }}">
-            {{-- One grid cell per control, holding its own feedback, so errors never push the next control to another row. --}}
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
-                <div class="min-w-0">
-                    <x-form.input name="domain" :value="old('domain', '')" label="Domain name" placeholder="example.com" required maxlength="253" autocomplete="off"
-                        autocapitalize="none" spellcheck="false" :pattern="$domainPattern" aria-describedby="enom-domain-hint"
-                        title="Enter a .com name such as example.com. Use letters a to z, digits and hyphens, without www or http://."
-                        data-enom-supported-domain="ordinary-com" data-enom-pattern-message="Enter a .com name such as example.com, using only letters a to z, digits and hyphens." />
-                    <p data-enom-client-error data-enom-client-for="domain" class="text-red-500 text-xs mt-1" hidden></p>
-                    <p id="enom-domain-hint" class="text-xs mt-1">Enter the full name ending in .com, such as example.com. Use letters a to z, digits 0 to 9 and hyphens. Leave out www and http://.</p>
-                </div>
-                <div class="min-w-0">
-                    <x-form.select name="action" label="Register or transfer" required><option value="register" @selected(old('action', 'register') === 'register')>Register a new domain</option><option value="transfer" @selected(old('action') === 'transfer')>Transfer from another registrar</option></x-form.select>
-                    <p data-enom-client-error data-enom-client-for="action" class="text-red-500 text-xs mt-1" hidden></p>
-                </div>
+    @include('enom::partials.notices')
+
+    @if ($total === 0)
+        <section class="enom-panel enom-empty" aria-labelledby="enom-empty-heading">
+            <span class="enom-empty__mark"><x-ri-global-line aria-hidden="true" /></span>
+            <h2 id="enom-empty-heading" class="enom-h2" style="font-size:1.25rem">Find your domain name</h2>
+            <p>Search for a new name, or move a domain you already own from another registrar.</p>
+            <form method="GET" action="{{ route('enom.domains.search') }}" class="enom-searchbar" role="search" style="max-width:34rem;margin-inline:auto">
+                <label for="enom-empty-q" class="enom-sr">Domain name</label>
+                <input id="enom-empty-q" name="name" type="text" placeholder="Search for a name" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="253" required>
+                <button type="submit" class="enom-btn enom-btn--primary">Search</button>
+            </form>
+            <p class="enom-small" style="margin:1rem auto 0">Already own a domain elsewhere? <a class="enom-a" href="{{ route('enom.domains.transfer') }}">Transfer it here</a></p>
+        </section>
+    @else
+        <section class="enom-panel" aria-labelledby="enom-list-heading">
+            <h2 id="enom-list-heading" class="enom-sr">Your domains</h2>
+            <div class="enom-toolbar">
+                <nav class="enom-chips" aria-label="Filter by status">
+                    <a class="enom-chip" href="{{ $url(['status' => null, 'page' => null]) }}" @if ($filter === '') aria-current="true" @endif>All <small>{{ $total }}</small></a>
+                    @foreach ($controller::FILTERS as $key => [$label])
+                        @if (($filterCounts[$key] ?? 0) > 0 || $filter === $key)
+                            <a class="enom-chip" href="{{ $url(['status' => $key, 'page' => null]) }}" @if ($filter === $key) aria-current="true" @endif>{{ $label }} <small>{{ $filterCounts[$key] ?? 0 }}</small></a>
+                        @endif
+                    @endforeach
+                </nav>
+                <form method="GET" action="{{ route('enom.domains.index') }}" class="enom-filter" role="search">
+                    @if ($filter !== '')<input type="hidden" name="status" value="{{ $filter }}">@endif
+                    <div class="enom-search-mini">
+                        <x-ri-search-line class="enom-i" aria-hidden="true" />
+                        <label for="enom-q" class="enom-sr">Search your domains</label>
+                        <input id="enom-q" class="enom-input" type="search" name="q" value="{{ $search }}" placeholder="Search domains" maxlength="253" autocomplete="off">
+                    </div>
+                    <label for="enom-sort" class="enom-sr">Sort by</label>
+                    <select id="enom-sort" name="sort" class="enom-input" data-enom-autosubmit>
+                        <option value="expiry" @selected($sort === 'expiry')>Expiry, soonest first</option>
+                        <option value="-expiry" @selected($sort === '-expiry')>Expiry, latest first</option>
+                        <option value="name" @selected($sort === 'name')>Name, A to Z</option>
+                        <option value="-name" @selected($sort === '-name')>Name, Z to A</option>
+                    </select>
+                    <button type="submit" class="enom-btn enom-btn--secondary enom-btn--sm" data-nojs-only>Apply</button>
+                </form>
             </div>
-            <div class="max-w-[300px]"><x-button.primary type="submit">Check availability</x-button.primary></div>
-        </form>
-        @include('enom::partials.help-link', ['route' => 'enom.help', 'topic' => 'ordering', 'label' => 'How ordering and transfers work'])
-    </section>
-    <section class="space-y-4" aria-labelledby="enom-list-heading">
-        <h2 id="enom-list-heading" class="text-xl font-semibold">Your domains</h2>
-        <form method="GET" action="{{ route('enom.domains.index') }}" class="flex flex-wrap items-end gap-3">
-            <div class="flex-1"><x-form.input name="search" label="Filter your domains" :value="$search" maxlength="253" /></div>
-            <div class="max-w-[300px]"><x-button.secondary type="submit">Filter</x-button.secondary></div>
-        </form>
-        @forelse ($domains as $domain)
-            <a class="block bg-background-secondary border border-neutral p-4 rounded-lg hover:bg-background-secondary/80" href="{{ route('enom.domains.show', $domain->id) }}">
-                <div class="flex flex-wrap items-center justify-between gap-3">
-                    <span class="font-semibold">{{ $domain->domain }}</span>
-                    <span class="text-sm">{{ $progress[$domain->id]['label'] ??$present::progress($domain->status, null) }}</span>
+            @if ($domains->isEmpty())
+                <div class="enom-empty" style="padding-block:2.5rem">
+                    <p style="margin-bottom:.75rem">No domains match {{ $search !== '' ? '“'.$search.'”' : 'this filter' }}.</p>
+                    <a class="enom-a" href="{{ route('enom.domains.index') }}">Show all domains</a>
                 </div>
-                <p class="text-sm mt-2">Expires: {{ $present::day($domain->provider_expires_at) ?? 'Not confirmed yet' }}</p>
-            </a>
-        @empty
-            <p class="border border-neutral p-4 rounded-lg">{{ $search !== '' ? 'No domains match this filter.' : 'You have no domains yet. Use the form above to register or transfer one.' }}</p>
-        @endforelse
-        {{ $domains->links() }}
-    </section>
-    @include('enom::partials.sandbox')
+            @else
+                <div class="enom-tablewrap">
+                    <table class="enom-tbl enom-stackable">
+                        <thead>
+                            <tr>
+                                <th scope="col"><a href="{{ $sortLink('name') }}" @if ($sortIcon('name')) aria-current="true" @endif>Domain @if ($sortIcon('name'))<x-dynamic-component :component="$sortIcon('name')" class="enom-i" aria-hidden="true" />@endif</a></th>
+                                <th scope="col">Status</th>
+                                <th scope="col"><a href="{{ $sortLink('expiry') }}" @if ($sortIcon('expiry')) aria-current="true" @endif>Expires @if ($sortIcon('expiry'))<x-dynamic-component :component="$sortIcon('expiry')" class="enom-i" aria-hidden="true" />@endif</a></th>
+                                <th scope="col">Auto-renew</th>
+                                <th scope="col" class="enom-end"><span class="enom-sr">Actions</span></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach ($domains as $domain)
+                                @php
+                                    $row = $progress[$domain->id] ?? null;
+                                    $pending = in_array($domain->status, ['registration_pending', 'transfer_pending'], true);
+                                    $renews = !$domain->service?->cancellation;
+                                    $payInvoice = !empty($row['awaiting_payment']) && !empty($row['invoice_id']) ? $row['invoice_id'] : null;
+                                @endphp
+                                <tr>
+                                    <td><a class="enom-domain" href="{{ route('enom.domains.show', $domain->id) }}">{{ $domain->domain }}</a></td>
+                                    <td>@include('enom::partials.badge', ['status' => $domain->status, 'progress' => $row])</td>
+                                    <td class="enom-num" data-label="Expires">@include('enom::partials.date', ['date' => $domain->provider_expires_at, 'fallback' => '—'])</td>
+                                    <td data-label="Auto-renew">
+                                        @if ($pending || $domain->status !== 'active')<span class="enom-muted">—</span>
+                                        @elseif ($renews)On
+                                        @else<span class="enom-muted">Off</span>@endif
+                                    </td>
+                                    <td class="enom-end enom-cell-wide">
+                                        @if ($payInvoice)
+                                            <a class="enom-btn enom-btn--primary enom-btn--sm" href="{{ route('invoices.show', $payInvoice) }}">Pay invoice</a>
+                                        @else
+                                            <a class="enom-btn enom-btn--secondary enom-btn--sm" href="{{ route('enom.domains.show', $domain->id) }}" aria-label="Manage {{ $domain->domain }}">Manage</a>
+                                        @endif
+                                    </td>
+                                </tr>
+                            @endforeach
+                        </tbody>
+                    </table>
+                </div>
+            @endif
+        </section>
+        @if ($domains->hasPages())<div>{{ $domains->links() }}</div>@endif
+    @endif
+    <p class="enom-small enom-muted">Questions about domains? <a class="enom-a" href="{{ route('enom.help') }}">Read domain help</a></p>
 </div>
-@include('enom::partials.form-validation')
+</div>
+@include('enom::partials.client-script')
 @endcomponent
