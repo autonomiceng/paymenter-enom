@@ -82,6 +82,14 @@ class TldResource extends Resource
                     ->sortable()
                     ->action(Action::make('toggleSale')
                         ->action(fn (Tld $record) => self::setEnabled($record, !$record->enabled))),
+                TextColumn::make('term')
+                    ->label('Term')
+                    ->state(fn (Tld $record) => self::termRange($record))
+                    ->description(fn (Tld $record) => ($needs = self::registryNeeds($record)) ? 'Needs '.self::shortList($needs) : null)
+                    ->tooltip(fn (Tld $record) => ($needs = self::registryNeeds($record)) ? 'Orders ask for: '.implode(', ', $needs).'.' : null)
+                    ->wrap()
+                    ->extraAttributes(['style' => 'max-width: 13rem'])
+                    ->toggleable(),
                 self::priceColumn('register', 'Register', $costs),
                 self::priceColumn('renew', 'Renew', $costs),
                 self::priceColumn('transfer', 'Transfer', $costs),
@@ -117,6 +125,11 @@ class TldResource extends Resource
                         ->whereColumn('register_price', '<', 'cost_register')
                         ->orWhereColumn('renew_price', '<', 'cost_renew')
                         ->orWhereColumn('transfer_price', '<', 'cost_transfer'))),
+                Filter::make('registry_details')
+                    ->label('Needs registry details')
+                    ->toggle()
+                    ->visible(fn () => self::hasRegistryColumn())
+                    ->query(fn (Builder $query) => $query->where('registry_fields', 'like', '%"required":true%')),
                 SelectFilter::make('server_id')
                     ->label('Enom server')
                     ->relationship('server', 'name')
@@ -205,6 +218,95 @@ class TldResource extends Resource
             ->placeholder('Not set')
             ->alignEnd()
             ->sortable();
+    }
+
+    /** "1–10 yrs", or "2 yrs" when the registry allows one term only. */
+    public static function termRange(Tld $record): string
+    {
+        $terms = self::terms($record);
+        $min = $terms[0];
+        $max = $terms[count($terms) - 1];
+        return ($min === $max ? $min : $min.'–'.$max).' yr'.($max === 1 ? '' : 's');
+    }
+
+    /** @return list<int> */
+    private static function terms(Tld $record): array
+    {
+        if (method_exists($record, 'terms')) {
+            try { $terms = $record->terms(); if ($terms) { return array_values($terms); } } catch (Throwable) {}
+        }
+        $min = max(1, min(10, (int) ($record->getAttribute('min_years') ?: 1)));
+        return range($min, max($min, min(10, (int) ($record->getAttribute('max_years') ?: 10))));
+    }
+
+    /**
+     * The registry fields an order for this ending asks for (for example .us nexus), from the stored schema.
+     * @return list<array{name: string, label: string, required: bool, parent: ?string, options: array}>
+     */
+    public static function registryFields(Tld $record): array
+    {
+        try {
+            $fields = method_exists(Catalogue::class, 'attributesFor')
+                ? app(Catalogue::class)->attributesFor($record)
+                : $record->getAttribute('registry_fields');
+        } catch (Throwable) { return []; }
+        if (is_string($fields)) { $fields = json_decode($fields, true); }
+        if (!is_array($fields)) { return []; }
+        $clean = [];
+        foreach ($fields as $field) {
+            if (!is_array($field) || !is_string($field['name'] ?? null)) { continue; }
+            $clean[] = [
+                'name' => $field['name'],
+                'label' => is_string($field['label'] ?? null) && $field['label'] !== '' ? $field['label'] : $field['name'],
+                'required' => ($field['required'] ?? false) === true,
+                'parent' => is_string($field['parent'] ?? null) ? $field['parent'] : null,
+                'options' => is_array($field['options'] ?? null) ? $field['options'] : [],
+            ];
+        }
+        return $clean;
+    }
+
+    /** Labels of the required top-level registry fields, in sentence case. @return list<string> */
+    public static function registryNeeds(Tld $record): array
+    {
+        $needs = [];
+        foreach (self::registryFields($record) as $field) {
+            if ($field['required'] && $field['parent'] === null) { $needs[] = self::sentence($field['label']); }
+        }
+        return $needs;
+    }
+
+    /** Lowercase capitalised words but keep acronyms: "Nexus Category" becomes "Nexus category". */
+    private static function sentence(string $label): string
+    {
+        $label = trim(preg_replace('/\s+/', ' ', $label));
+        $lower = preg_replace_callback('/\b([A-Z])([a-z]+)\b/', fn ($m) => strtolower($m[0]), $label);
+        return ucfirst((string) $lower);
+    }
+
+    private static function shortList(array $items): string
+    {
+        $items = array_map(fn ($item) => lcfirst(self::sentence($item)), $items);
+        return count($items) > 2 ? $items[0].', '.$items[1].' and '.(count($items) - 2).' more' : implode(', ', $items);
+    }
+
+    private static function orderRules(Tld $record): string
+    {
+        $terms = self::terms($record);
+        $min = $terms[0];
+        $max = $terms[count($terms) - 1];
+        $line = $min === $max ? 'Registers for '.$min.' year'.($min === 1 ? '' : 's').' only.'
+            : 'Registers for '.$min.' to '.$max.' years.';
+        $needs = self::registryNeeds($record);
+        return $line.($needs ? ' The order form asks for: '.implode(', ', $needs).'.' : '');
+    }
+
+    private static bool $registryColumn;
+
+    private static function hasRegistryColumn(): bool
+    {
+        try { return self::$registryColumn ??= \Illuminate\Support\Facades\Schema::hasColumn('enom_tlds', 'registry_fields'); }
+        catch (Throwable) { return false; }
     }
 
     private static function modeSummary(Tld $record): string
@@ -319,6 +421,7 @@ class TldResource extends Resource
             Grid::make(3)->schema(self::fixedInputs(conditional: true)),
             Text::make(fn (Get $get) => self::preview($record, $get))->visible(fn (Get $get) => $get('pricing_mode') !== 'fixed' && Staff::can(Staff::COSTS)),
             Text::make(fn (Get $get) => self::costLine($record))->visible(fn () => Staff::can(Staff::COSTS))->color('gray'),
+            Text::make(self::orderRules($record))->color('gray'),
         ];
     }
 

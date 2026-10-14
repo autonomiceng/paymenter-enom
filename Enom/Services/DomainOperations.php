@@ -88,12 +88,12 @@ class DomainOperations
                 'billing_managed' => true, 'dispatch_marker_version' => 1, 'domain' => $domain->domain, 'user_id' => (int) $domain->user_id,
                 'service_id' => (int) $service->id, 'server_id' => (int) $domain->server_id,
                 'authority_generation' => $domain->authority_generation, 'confirmed_revision' => $domain->confirmed_revision,
-                'currency' => $service->currency_code, 'term' => 1, 'retail_minor' => $this->cents($item->price),
+                'currency' => $service->currency_code, 'term' => $initial ? max(1, (int) $intent->term) : 1, 'retail_minor' => $this->cents($item->price),
             ]) : null;
             $operation = Operation::firstOrCreate(['operation_key' => $key], [
                 'domain_id' => $domain->id, 'service_id' => $service->id,
                 'invoice_id' => $item->invoice_id, 'invoice_item_id' => $item->id,
-                'action' => $action, 'term' => 1, 'funding_basis' => 'paid_invoice',
+                'action' => $action, 'term' => $initial ? max(1, (int) $intent->term) : 1, 'funding_basis' => 'paid_invoice',
                 'state' => $valid ? 'awaiting_payment' : 'held', 'safe_code' => $valid ? null : 'binding_invalid',
                 'amount' => $item->price, 'currency' => $item->invoice->currency_code,
                 'base_expires_at' => $domain->provider_expires_at,
@@ -166,7 +166,8 @@ class DomainOperations
         $service = $domain?->service;
         if ($domain && self::writesPaused($domain)) { return false; }
         if (!$domain || !$service || !$this->validService($service, $domain) || (int) $operation->service_id !== (int) $service->id
-            || $service->currency_code !== $operation->currency || (int) $operation->term !== 1) { return false; }
+            || $service->currency_code !== $operation->currency || (int) $operation->term < 1 || (int) $operation->term > 10
+            || $operation->action === 'transfer' && (int) $operation->term !== 1) { return false; }
         $policy = $operation->policy ?? [];
         if (!empty($policy['billing_managed']) && (!$domain->billing_managed
             || (int) ($policy['authority_generation'] ?? -1) !== $domain->authority_generation
@@ -296,7 +297,7 @@ class DomainOperations
                 $result = $api->search($domain->domain);
                 $check = EnomApi::normalize('search', $result);
                 if ($result->status !== 'success' || ($check['is_premium'] ?? null) !== false || ($check['is_platinum'] ?? null) !== false || ($check['is_eap'] ?? null) !== false
-                    || ($claimed->action === 'register' && ($check['min_reg_year'] ?? 1) > 1)
+                    || ($claimed->action === 'register' && ($check['min_reg_year'] ?? 1) > max(1, (int) $claimed->term))
                     || ($claimed->action === 'register' && empty($check['available']))
                     || ($claimed->action === 'transfer' && (!empty($check['available']) || empty($check['transferable'])))) {
                     return $this->finish($claimed, 'rejected', 'domain_unavailable_or_premium');
@@ -305,6 +306,11 @@ class DomainOperations
                 if (is_array($node) && array_is_list($node)) { $node = count($node) === 1 ? $node[0] : null; }
                 $amount = is_array($node) && ($node['name'] ?? null) === $domain->domain
                     ? RegistrarMoney::decimal($check['prices'][$claimed->action === 'register' ? 'registration' : 'transfer'] ?? null) : null;
+                // A multi-year registration costs the first year plus renewal years; bind the total to the term.
+                if ($amount !== null && $claimed->action === 'register' && (int) $claimed->term > 1) {
+                    $renewal = RegistrarMoney::decimal($check['prices']['renewal'] ?? null);
+                    $amount = $renewal === null ? null : self::money($this->cents($amount) + $this->cents($renewal) * ((int) $claimed->term - 1));
+                }
                 $currency = is_array($node) ? RegistrarMoney::checkPriceCurrency($node['prices'] ?? null) : null;
                 $updated = $this->updateClaimEvidence($claimed, ['quote' => [
                     'state' => $amount !== null && $currency !== null ? 'advisory' : 'unconfirmed', 'source' => 'Check',
@@ -357,6 +363,14 @@ class DomainOperations
                     return $this->finish($claimed, 'held', 'dns_preimage_changed');
                 }
             }
+            // An update needs the registry's current address; read it before the dispatch boundary.
+            if ($claimed->action === 'glue_update') {
+                $old = $this->currentHostIp($api, $claimed->payload['host']);
+                if ($old === null) { return $this->finish($claimed, 'rejected', 'host_not_found'); }
+                if (self::sameIp($old, $claimed->payload['ip'])) { return $this->finish($claimed, 'succeeded', 'confirmed'); }
+                $claimed->update(['payload' => array_replace($claimed->payload ?? [], ['old_ip' => $old])]);
+                $claimed = $claimed->fresh();
+            }
             // Re-check immediately at dispatch as well as on each transport request.
             $this->apiForServer((int) $domain->server_id);
             $sealed = $this->sealDispatch($claimed);
@@ -406,7 +420,7 @@ class DomainOperations
                     $expiryMatches = $order->status === 'success' && $order->value('errcount') === '0'
                         && ($normalized['provider_order_id'] ?? null) === $claimed->provider_order_id
                         && ($normalized['domain'] ?? null) === $domain->domain && ($normalized['completed'] ?? false) === true
-                        && ($normalized['term'] ?? null) === 1 && $orderExpiry
+                        && ($normalized['term'] ?? null) === (int) $claimed->term && $orderExpiry
                         && $orderExpiry->format('Y-m-d') === $readExpiry->format('Y-m-d');
                 }
                 if (!$claimed->provider_order_id || !$responseExpiry || $read->status !== 'success' || !$readExpiry
@@ -434,6 +448,12 @@ class DomainOperations
                 $this->recordSnapshot($domain, ['privacy' => $snapshot, 'read_status' => ['privacy' => $privacyRead->status]]);
             } elseif ($claimed->action === 'epp_sync') {
                 return $this->finish($claimed, 'succeeded', 'epp_sync_acknowledged');
+            } elseif (in_array($claimed->action, DomainManager::GLUE_ACTIONS, true)) {
+                $host = $claimed->payload['host'];
+                $ip = $this->currentHostIp($api, $host);
+                $confirmed = $claimed->action === 'glue_delete' ? $ip === null : self::sameIp($ip, $claimed->payload['ip']);
+                if (!$confirmed) { return $this->finish($claimed, 'uncertain', 'management_unconfirmed'); }
+                $this->recordGlue($domain, $host, $claimed->action === 'glue_delete' ? null : $ip);
             } elseif ($claimed->action === 'epp_email') {
                 // Enom accepted the request to email the registrant. Delivery is not observable.
                 return $this->finish($claimed, 'succeeded', 'epp_email_accepted');
@@ -456,11 +476,11 @@ class DomainOperations
         return match ($operation->action) {
             // Register on Enom's default DNS, then apply the chosen nameservers as a separate change.
             // A refused nameserver must never fail a paid registration.
-            'register' => $api->register($domain->domain, $payload['contacts'] ?? [], [], 1),
-            'transfer' => $api->transfer($domain->domain, $payload['contacts'] ?? [], $payload['epp'] ?? ''),
+            'register' => $api->register($domain->domain, $payload['contacts'] ?? [], [], (int) $operation->term, $payload['registry'] ?? []),
+            'transfer' => $api->transfer($domain->domain, $payload['contacts'] ?? [], $payload['epp'] ?? '', $payload['registry'] ?? []),
             'renew' => ($operation->policy['provider_command'] ?? null) === 'UpdateExpiredDomains'
-                ? $api->expiredRenew($domain->domain, 1)
-                : ($domain->billing_managed ? $api->existingRenew($domain->domain, 1) : $api->renew($domain->domain, 1)),
+                ? $api->expiredRenew($domain->domain, (int) $operation->term)
+                : ($domain->billing_managed ? $api->existingRenew($domain->domain, (int) $operation->term) : $api->renew($domain->domain, (int) $operation->term)),
             'privacy_purchase' => $api->purchasePrivacy($domain->domain, 1),
             'privacy_renew' => $api->renewPrivacy($domain->domain, 1),
             'nameservers' => $api->setNameservers($domain->domain, $payload['nameservers']),
@@ -468,6 +488,9 @@ class DomainOperations
             'lock' => $api->setLock($domain->domain, $payload['locked']),
             'epp_sync' => $api->synchronizeEpp($domain->domain),
             'epp_email' => $api->emailTransferCode($domain->domain),
+            'glue_add' => $api->registerHost($payload['host'], $payload['ip']),
+            'glue_update' => $api->updateHost($payload['host'], (string) ($payload['old_ip'] ?? throw new RuntimeException('Current address unknown.')), $payload['ip']),
+            'glue_delete' => $api->deleteHost($payload['host']),
             'privacy_enable' => $api->enablePrivacy($domain->domain, true),
             'privacy_disable' => $api->enablePrivacy($domain->domain, false),
             'hosts' => $api->setHosts($domain->domain, $payload['records']),
@@ -588,7 +611,7 @@ class DomainOperations
             }
             if ($order->status !== 'success' || ($normalized['domain'] ?? null) !== $domain->domain || empty($normalized['completed'])
                 || ($normalized['provider_order_id'] ?? null) !== $operation->provider_order_id
-                || ($operation->action !== 'transfer' && ($normalized['term'] ?? null) !== 1)) { return $operation; }
+                || ($operation->action !== 'transfer' && ($normalized['term'] ?? null) !== (int) $operation->term)) { return $operation; }
             $expiryResult = $api->expiry($domain->domain);
             $expiry = $expiryResult->confirmedExpiry();
             if ($expiryResult->status !== 'success' || !$expiry || ($operation->expected_expires_at && $expiry->format('Y-m-d') !== $operation->expected_expires_at->format('Y-m-d'))) { return $operation; }
@@ -602,7 +625,7 @@ class DomainOperations
             $orderResult = $api->order($operation->provider_order_id);
             $order = EnomApi::normalize('order', $orderResult);
             if ($orderResult->status !== 'success' || ($order['provider_order_id'] ?? null) !== $operation->provider_order_id
-                || ($order['domain'] ?? null) !== $domain->domain || empty($order['completed']) || ($order['term'] ?? null) !== 1) { return $operation; }
+                || ($order['domain'] ?? null) !== $domain->domain || empty($order['completed']) || ($order['term'] ?? null) !== (int) $operation->term) { return $operation; }
             $read = $api->privacy($domain->domain);
             $expiry = $read->confirmedPrivacyExpiry();
             $privacy = EnomApi::normalize('privacy', $read);
@@ -613,8 +636,17 @@ class DomainOperations
             $operation->save();
             return $this->finish($operation, 'succeeded', 'privacy_expiry_confirmed');
         }
+        // Transfer-code requests have nothing to read back; staff resolve them.
+        if (in_array($operation->action, ['epp_sync', 'epp_email'], true)) { return $operation; }
+        if (in_array($operation->action, DomainManager::GLUE_ACTIONS, true)) {
+            $host = (string) ($operation->payload['host'] ?? '');
+            try { $ip = $this->currentHostIp($api, $host); } catch (Throwable) { return $operation; }
+            $done = $operation->action === 'glue_delete' ? $ip === null : self::sameIp($ip, $operation->payload['ip'] ?? null);
+            if (!$done) { return $operation; }
+            $this->recordGlue($domain, $host, $operation->action === 'glue_delete' ? null : $ip);
+            return $this->finish($operation, 'succeeded', 'readback_confirmed');
+        }
         $kind = match ($operation->action) { 'contacts' => 'contacts', 'lock' => 'lock', 'privacy_enable', 'privacy_disable' => 'privacy', 'dnssec_add', 'dnssec_delete' => 'dnssec', 'provider_renewal_disable' => 'renewal', default => $operation->action };
-        if ($operation->action === 'epp_sync') { return $operation; }
         $snapshot = $api->snapshot($domain->domain, [$kind]);
         if ($this->managementMatches($operation, $snapshot)) {
             $this->recordSnapshot($domain, $snapshot);
@@ -715,6 +747,13 @@ class DomainOperations
                 ? [Service::STATUS_PENDING, Service::STATUS_ACTIVE] : [Service::STATUS_ACTIVE];
             if (!$service || !in_array($service->status, $expected, true)) {
                 return $this->finish($operation, 'uncertain', 'confirmation_lifecycle_changed');
+            }
+            // Registry details chosen at order (for example .us nexus) stay visible after the order payload is purged.
+            $registry = is_array($operation->payload['registry'] ?? null) ? $operation->payload['registry'] : [];
+            if ($registry && in_array($operation->action, ['register', 'transfer'], true)) {
+                $snapshot = $domain->snapshot ?? [];
+                $snapshot['registry'] = $registry;
+                $domain->snapshot = $snapshot;
             }
             $domain->update(['status' => 'active', 'provider_expires_at' => $expiry->format('Y-m-d'),
                 'provider_domain_id' => $anchor ?? $domain->provider_domain_id,
@@ -835,6 +874,19 @@ class DomainOperations
 
     private function finish(Operation $operation, string $state, string $code): Operation
     {
+        $result = $this->finishLocked($operation, $state, $code);
+        // A paid request Enom definitely didn't carry out goes back to the client as account credit,
+        // after any enclosing transaction commits (its locks would invert the client-first order).
+        if ($result->state === 'rejected') {
+            DB::afterCommit(function () use ($result) {
+                try { app(Refunds::class)->creditRejected($result); } catch (Throwable) {}
+            });
+        }
+        return $result;
+    }
+
+    private function finishLocked(Operation $operation, string $state, string $code): Operation
+    {
         return DB::transaction(function () use ($operation, $state, $code) {
             Domain::whereKey($operation->domain_id)->lockForUpdate()->firstOrFail();
             $current = Operation::whereKey($operation->id)->lockForUpdate()->firstOrFail();
@@ -844,7 +896,9 @@ class DomainOperations
             if ($operation->isDirty('confirmed_expires_at')) { $updates['confirmed_expires_at'] = $operation->confirmed_expires_at; }
             if (in_array($state, ['succeeded', 'rejected'], true)) {
                 $updates['completed_at'] = now();
-                $updates['payload'] = null;
+                // Contacts and transfer codes are purged; a glue request keeps only its (public) host name.
+                $updates['payload'] = in_array($current->action, DomainManager::GLUE_ACTIONS, true) && is_string($current->payload['host'] ?? null)
+                    ? ['host' => $current->payload['host']] : null;
                 if (in_array($operation->action, ['register', 'transfer'], true)) { OrderIntent::where('service_id', $operation->service_id)->update(['payload' => null]); }
             }
             $current->update($updates);
@@ -996,7 +1050,7 @@ class DomainOperations
             && (isset($operation->policy['dispatch_attempted_at']) || isset($operation->cost['execution']))
             && ($operation->policy['domain'] ?? null) === $operation->domain->domain
             && ($operation->policy['server_id'] ?? null) === (int) $operation->domain->server_id
-            && (int) $operation->term === 1 && ($operation->policy['term'] ?? null) === 1
+            && (int) $operation->term >= 1 && (int) $operation->term <= 10 && ($operation->policy['term'] ?? null) === (int) $operation->term
             && is_string($operation->policy['provider_domain_id'] ?? null)
             && preg_match('/^[1-9][0-9]{0,19}$/D', $operation->policy['provider_domain_id']) === 1;
     }
@@ -1046,7 +1100,7 @@ class DomainOperations
             $orderResult = $api->order($operation->provider_order_id);
             $order = EnomApi::normalize('order', $orderResult);
             $completed = $orderResult->status === 'success' && ($order['domain'] ?? null) === $capture['domain']
-                && ($order['provider_order_id'] ?? null) === $capture['order_id'] && ($order['term'] ?? null) === 1
+                && ($order['provider_order_id'] ?? null) === $capture['order_id'] && ($order['term'] ?? null) === (int) $operation->term
                 && ($order['completed'] ?? false) === true && $expiry->format('Y-m-d') === $capture['expected'];
         }
         $fact = ['version' => 1, 'observed_at' => now()->toIso8601String(), 'recorded_by' => (int) $staff->id,
@@ -1214,7 +1268,8 @@ class DomainOperations
 
     public function enqueueManagement(User $actor, int $domainId, string $action, array $payload, string $nonce): Operation
     {
-        $allowed = ['nameservers', 'contacts', 'lock', 'epp_sync', 'epp_email', 'privacy_enable', 'privacy_disable', 'hosts', 'srv', 'dnssec_add', 'dnssec_delete', 'provider_renewal_disable'];
+        $allowed = ['nameservers', 'contacts', 'lock', 'epp_sync', 'epp_email', 'privacy_enable', 'privacy_disable', 'hosts', 'srv', 'dnssec_add', 'dnssec_delete', 'provider_renewal_disable',
+            'glue_add', 'glue_update', 'glue_delete'];
         if (!in_array($action, $allowed, true) || !preg_match('/^[a-f0-9]{32,64}$/D', $nonce)) { throw new RuntimeException('Invalid domain request.'); }
         $key = 'management:'.$domainId.':'.$action.':'.hash('sha256', $nonce);
         return DB::transaction(function () use ($actor, $domainId, $action, $payload, $key) {
@@ -1233,12 +1288,21 @@ class DomainOperations
             }
             $this->apiForServer((int) $domain->server_id); // Guard only; constructing a client never performs HTTP.
             if ($domain->status !== 'active' || !$this->validService($domain->service, $domain)) { throw new RuntimeException('Domain management is unavailable.'); }
-            $capability = $action === 'epp_email' ? 'epp_sync' : $action;
-            if (($domain->capabilities[$capability] ?? false) !== true) { throw new InvalidArgumentException('This change is not available for this domain right now. Refresh its status and try again.'); }
+            $capability = DomainManager::capability($action);
+            $capable = $capability === 'glue' ? $domain->status === 'active' : ($domain->capabilities[$capability] ?? false) === true;
+            if (!$capable) { throw new InvalidArgumentException('This change is not available for this domain right now. Refresh its status and try again.'); }
             if (in_array($action, ['hosts', 'srv', 'dnssec_add', 'dnssec_delete'], true) && !RuntimeGuard::flag((int) $domain->server_id, 'dns_tools')) {
                 throw new InvalidArgumentException('DNS tools are turned off for this domain.');
             }
             if ($action !== 'provider_renewal_disable') { $payload = DomainManager::validatePayload($action, $payload + ['confirmed' => true]); }
+            if (in_array($action, DomainManager::GLUE_ACTIONS, true)) {
+                // Child nameservers belong under the domain itself, e.g. ns1.example.com.
+                if (!str_ends_with($payload['host'], '.'.$domain->domain)) {
+                    throw new InputValidationException(['host' => 'Child nameservers must end in .'.$domain->domain.'.']);
+                }
+                $known = in_array($payload['host'], array_column($domain->snapshot['glue'] ?? [], 'host'), true);
+                if ($action === 'glue_add' && $known) { throw new InputValidationException(['host' => 'That child nameserver already exists. Edit its IP address instead.']); }
+            }
             $operation = Operation::create(['operation_key' => $key,
                 'domain_id' => $domain->id, 'service_id' => $domain->service_id, 'action' => $action, 'term' => 1,
                 'funding_basis' => 'non_billable_management', 'authorized_by' => $actor->id,
@@ -1269,14 +1333,33 @@ class DomainOperations
     {
         $domain = Domain::findOrFail($domainId);
         // Refresh one bounded set per request; callers can choose cached pages while provider is unavailable.
-        $snapshot = $this->apiForServer((int) $domain->server_id, true)->snapshot($domain->domain);
+        $api = $this->apiForServer((int) $domain->server_id, true);
+        $snapshot = $api->snapshot($domain->domain);
+        // Enom can't list child nameservers, so re-check the ones we know about (null = gone).
+        $checked = [];
+        foreach (array_slice($domain->snapshot['glue'] ?? [], 0, 13) as $row) {
+            $host = (string) ($row['host'] ?? '');
+            try { $checked[$host] = $this->currentHostIp($api, $host); } catch (Throwable) {}
+        }
         $status = $snapshot['read_status'] ?? [];
-        $capabilities = ['renew' => $domain->status === 'active', 'epp_sync' => $domain->status === 'active'];
+        $capabilities = ['renew' => $domain->status === 'active', 'epp_sync' => $domain->status === 'active', 'glue' => $domain->status === 'active'];
         foreach (['nameservers', 'contacts', 'hosts', 'srv'] as $action) { $capabilities[$action] = ($status[$action] ?? null) === 'success'; }
         $capabilities['lock'] = ($status['lock'] ?? null) === 'success' && is_bool($snapshot['locked'] ?? null);
         $capabilities += $this->stateCapabilities($domain, $snapshot, ['privacy', 'dnssec'], $actor);
-        $domain->update(['snapshot' => $snapshot, 'capabilities' => $capabilities, 'last_synced_at' => now()]);
-        return $domain;
+        return DB::transaction(function () use ($domain, $snapshot, $capabilities, $checked) {
+            // Merge into the current row: glue changes committed meanwhile and hosts not re-checked are kept.
+            $current = Domain::lockForUpdate()->findOrFail($domain->id);
+            $glue = [];
+            foreach ($current->snapshot['glue'] ?? [] as $row) {
+                $host = (string) ($row['host'] ?? '');
+                if (!array_key_exists($host, $checked)) { $glue[] = $row; continue; }
+                if ($checked[$host] !== null) { $glue[] = ['host' => $host, 'ip' => $checked[$host]]; }
+            }
+            $snapshot['glue'] = $glue;
+            $snapshot['registry'] = $current->snapshot['registry'] ?? [];
+            $current->update(['snapshot' => $snapshot, 'capabilities' => $capabilities, 'last_synced_at' => now()]);
+            return $current;
+        });
     }
 
     public function toggleRenewalPreference(User $actor, int $domainId, bool $enabled): Domain
@@ -1300,6 +1383,16 @@ class DomainOperations
     }
 
     private function cents($amount): int { return (int) round((float) $amount * 100); }
+
+    private static function money(int $minor): string { return intdiv($minor, 100).'.'.str_pad((string) ($minor % 100), 2, '0', STR_PAD_LEFT); }
+
+    /** Same address whatever its spelling (IPv6 compression, case). */
+    private static function sameIp(?string $a, ?string $b): bool
+    {
+        $x = is_string($a) ? @inet_pton(trim($a)) : false;
+        $y = is_string($b) ? @inet_pton(trim($b)) : false;
+        return $x !== false && $y !== false && $x === $y;
+    }
 
     /** Registry records are unordered tuples. XML numbers and form integers have the same meaning. */
     public static function canonicalRecords(string $kind, array $records): array
@@ -1353,6 +1446,29 @@ class DomainOperations
     }
 
     /** Reuse verified readback without fetching unrelated provider sections. */
+    /** The registry's address for a child nameserver, or null when it doesn't exist. */
+    private function currentHostIp(EnomApi $api, string $host): ?string
+    {
+        $status = $api->hostStatus($host);
+        $ip = $status->value('checknsstatus.ipaddress');
+        if ($status->status === 'success' && (string) $status->value('nschecksuccess') === '1' && is_string($ip) && $ip !== '') { return $ip; }
+        if ($status->status === 'rejected' && str_contains(strtolower((string) $status->value('errors.err1')), 'does not exist')) { return null; }
+        throw new RuntimeException('Child nameserver status is unknown.');
+    }
+
+    private function recordGlue(Domain $domain, string $host, ?string $ip): void
+    {
+        DB::transaction(function () use ($domain, $host, $ip) {
+            $domain = Domain::whereKey($domain->id)->lockForUpdate()->firstOrFail();
+            $snapshot = $domain->snapshot ?? [];
+            $glue = array_values(array_filter($snapshot['glue'] ?? [], fn ($row) => ($row['host'] ?? null) !== $host));
+            if ($ip !== null) { $glue[] = ['host' => $host, 'ip' => $ip]; }
+            usort($glue, fn ($a, $b) => strcmp($a['host'], $b['host']));
+            $snapshot['glue'] = $glue;
+            $domain->update(['snapshot' => $snapshot]);
+        });
+    }
+
     private function recordSnapshot(Domain $domain, array $partial): void
     {
         $snapshot = $this->mergedSnapshot($domain, $partial);

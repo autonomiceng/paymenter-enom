@@ -10,6 +10,7 @@ use Filament\Forms\Components\Textarea;
 use Filament\Resources\Resource;
 use Filament\Schemas\Components\Text;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\Filter;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
@@ -84,20 +85,24 @@ class OperationResource extends Resource
                     ->hidden($nested),
                 TextColumn::make('action')
                     ->label('Request')
-                    ->formatStateUsing(fn (?string $state, Operation $record) => Labels::action($state)
-                        .($record->term && in_array($record->action, ['register', 'transfer', 'renew'], true) ? ', '.$record->term.' year'.((int) $record->term === 1 ? '' : 's') : ''))
+                    ->formatStateUsing(fn (?string $state, Operation $record) => Labels::request($record))
                     ->description(fn (Operation $record) => '#'.$record->id.', '.$record->created_at?->diffForHumans())
                     ->tooltip(fn (Operation $record) => $record->created_at?->format('M j, Y, H:i')),
                 TextColumn::make('state')
                     ->label('State')
                     ->badge()
-                    ->formatStateUsing(fn (?string $state) => Labels::state($state))
-                    ->color(fn (?string $state) => Labels::stateColor($state))
-                    ->tooltip(fn (Operation $record) => Labels::stateHint($record->state))
+                    ->formatStateUsing(fn (?string $state, Operation $record) => self::refunded($record) ? 'Refunded' : Labels::state($state))
+                    ->color(fn (?string $state, Operation $record) => self::refunded($record) ? 'gray' : Labels::stateColor($state))
+                    ->tooltip(fn (Operation $record) => self::refunded($record)
+                        ? ($record->safe_code === 'refunded_by_staff' && is_string($record->funding_reason) ? $record->funding_reason : 'The client\'s payment was added to their account credit.')
+                        : Labels::stateHint($record->state))
                     ->extraHeaderAttributes(['style' => 'min-width: 10rem'])
-                    ->description(fn (Operation $record) => ($said = Labels::providerMessage($record)) !== null
-                        ? 'Enom said: '.$said
-                        : (in_array($record->state, [...Labels::ATTENTION_STATES, 'awaiting_payment'], true) ? Labels::stateHint($record->state) : null))
+                    ->description(fn (Operation $record) => implode(' ', array_filter([
+                        ($refund = Labels::refundText($record)) ? $refund.'.' : null,
+                        ($said = Labels::providerMessage($record)) !== null
+                            ? 'Enom said: '.$said
+                            : (in_array($record->state, [...Labels::ATTENTION_STATES, 'awaiting_payment'], true) ? Labels::stateHint($record->state) : null),
+                    ])) ?: null)
                     ->wrap(),
                 TextColumn::make('funding_basis')
                     ->label('Who pays')
@@ -152,17 +157,93 @@ class OperationResource extends Resource
                 SelectFilter::make('funding_basis')
                     ->label('Who pays')
                     ->options(['paid_invoice' => 'Client invoice', 'complimentary' => 'Complimentary', 'sponsored' => 'Legacy', 'non_billable_management' => 'No charge']),
+                Filter::make('refunded')
+                    ->label('Refunded as credit')
+                    ->toggle()
+                    ->query(fn (Builder $query) => $query->whereIn('id', self::refundedIds())),
             ])
             ->recordActions([
                 self::checkAction(),
                 self::resumeAction(),
                 self::readResultAction(),
                 self::recordOutcomeAction(),
+                self::refundAction(),
             ])
             ->defaultSort('id', 'desc')
             ->paginated($nested ? [10, 25, 50] : [25, 50, 100])
             ->emptyStateHeading($nested ? 'No registrar requests yet' : 'Nothing here')
             ->emptyStateDescription($nested ? null : 'Requests appear when domains are ordered, renewed or changed.');
+    }
+
+    private static function refunded(Operation $record): bool
+    {
+        return $record->state === 'rejected' && Labels::refund($record) !== null;
+    }
+
+    /** Refunds live in the encrypted cost data, so they are found in PHP. Only paid requests can carry one. */
+    private static function refundedIds(): array
+    {
+        $ids = [];
+        foreach (Operation::query()->where('funding_basis', 'paid_invoice')->whereIn('state', ['rejected', 'disposed'])->select(['id', 'cost'])->lazyById(200) as $operation) {
+            if (Labels::refund($operation) !== null) { $ids[] = (int) $operation->id; }
+        }
+        return $ids ?: [0];
+    }
+
+    /** A paid request that is on hold and was never sent to Enom. The service makes the final check. */
+    private static function refundable(Operation $record): bool
+    {
+        if ($record->state !== 'held' || $record->funding_basis !== 'paid_invoice' || $record->started_at !== null
+            || !self::refunds('refundHeld') || !Staff::can(Staff::MANAGE, Staff::INVOICES)) { return false; }
+        if (!($service = self::refunds('canRefundHeld'))) { return true; }
+        try { return (bool) $service->canRefundHeld($record, Staff::user()); } catch (Throwable) { return false; }
+    }
+
+    /** StaffDomains is the staff write path; the Refunds service answers when StaffDomains does not delegate yet. */
+    private static function refunds(string $method): ?object
+    {
+        if ($service = Staff::service($method)) { return $service; }
+        $class = 'Paymenter\\Extensions\\Servers\\Enom\\Services\\Refunds';
+        return class_exists($class) && method_exists($class, $method) ? app($class) : null;
+    }
+
+    private static function refundAction(): Action
+    {
+        return Action::make('refund')
+            ->label('Refund as credit')
+            ->icon('heroicon-o-receipt-refund')
+            ->color('gray')
+            ->size('sm')
+            ->visible(fn (Operation $record) => self::refundable($record))
+            ->schema(fn (Operation $record) => [
+                Text::make('Closes this request without sending it to Enom and adds '
+                    .(Labels::money($record->amount, $record->currency) ?? 'the amount paid').' to '
+                    .($record->domain?->client?->name ?? 'the client').'\'s account credit. The invoice stays paid.'),
+                Textarea::make('reason')
+                    ->label('Reason')
+                    ->placeholder('For example: the client no longer wants this domain')
+                    ->required()
+                    ->minLength(5)
+                    ->maxLength(500)
+                    ->rows(2),
+            ])
+            ->modalIcon('heroicon-o-receipt-refund')
+            ->modalIconColor('warning')
+            ->modalHeading('Refund as credit')
+            ->modalSubmitActionLabel('Refund')
+            ->modalWidth('lg')
+            ->action(function (Operation $record, array $data) {
+                $staff = Staff::require(Staff::INVOICES);
+                $service = self::refunds('refundHeld');
+                if (!$service) { \Filament\Notifications\Notification::make()->title('Refunds are not available yet.')->danger()->send(); return; }
+                $reason = trim(preg_replace('/\s+/', ' ', (string) ($data['reason'] ?? '')));
+                Staff::attempt(function () use ($service, $staff, $record, $reason) {
+                    $result = $service->refundHeld($staff, (int) $record->id, $reason);
+                    $amount = is_array($result) ? Labels::money($result['amount'] ?? null, $result['currency'] ?? $record->currency) : null;
+                    $amount ??= Labels::money($record->amount, $record->currency);
+                    return $amount ? 'Refunded '.$amount.' as credit.' : 'Refunded as credit.';
+                }, 'Refunded as credit.');
+            });
     }
 
     private static function invoiceUrl(int $id): ?string

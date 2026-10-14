@@ -61,17 +61,27 @@ final class DomainBilling
             'due' => $domain->provider_expires_at->subDays($policy['due_days'])->format('Y-m-d')];
     }
 
-    public function invoice(int $domainId, ?User $actor = null, ?string $nonce = null): Invoice
+    /** Latest term a renewal may add: the registry keeps registrations within 10 years of today. */
+    public static function maxRenewalYears(Domain $domain): int
+    {
+        if (!$domain->provider_expires_at) { return 0; }
+        $years = 0;
+        while ($years < 10 && $domain->provider_expires_at->addYearsNoOverflow($years + 1)->lte(now()->addYearsNoOverflow(10))) { $years++; }
+        return $years;
+    }
+
+    public function invoice(int $domainId, ?User $actor = null, ?string $nonce = null, int $years = 1): Invoice
     {
         // Read the owner before the transaction: a plain read inside it would fix an older snapshot.
         $ownerId = Domain::whereKey($domainId)->value('user_id');
-        return DB::transaction(function () use ($domainId, $actor, $ownerId) {
+        return DB::transaction(function () use ($domainId, $actor, $ownerId, $years) {
             // Client first, like every other writer (orders, pricing, dispatch), to keep one lock order.
             User::whereKey($ownerId)->lockForUpdate()->first();
             $domain = Domain::lockForUpdate()->findOrFail($domainId);
             $service = Service::lockForUpdate()->findOrFail($domain->service_id);
             $domain->setRelation('service', $service);
             if ($actor && (int) $actor->id !== (int) $domain->user_id) { throw new RuntimeException('Domain renewal is unavailable.'); }
+            if ($years < 1 || $years > self::maxRenewalYears($domain)) { throw new RuntimeException('That renewal term would go past the 10-year registry limit.'); }
             $this->assertBinding($domain, $service);
             if (DomainOperations::writesPaused($domain)) { throw new RuntimeException('Domain renewal requires staff review.'); }
             if (!$this->registrarEnabled($domain)) { throw new RuntimeException('Registrar fulfillment is disabled.'); }
@@ -119,21 +129,21 @@ final class DomainBilling
                 Pricing::syncServicePrice($domain);
                 $service->refresh();
             }
-            $amount = $this->minor($service->price);
+            $amount = $this->minor($service->price) * $years;
             if ($amount <= 0) { throw new RuntimeException('A zero-price renewal requires explicit sponsorship.'); }
-            $lockedPolicy = $this->lockedPolicy($domain, $service, $policy, $calendar);
+            $lockedPolicy = $this->lockedPolicy($domain, $service, $policy, $calendar, $years);
             $invoice = new Invoice(['user_id' => $domain->user_id, 'currency_code' => $service->currency_code,
                 'status' => Invoice::STATUS_PENDING, 'due_at' => $calendar['due']]);
             $invoice->send_create_email = !config('settings.mail_disabled', false);
             $invoice->save();
             $item = $invoice->items()->create(['reference_type' => null, 'reference_id' => null,
                 'quantity' => 1, 'price' => $this->decimal($amount),
-                'description' => 'Renew '.$domain->domain.' ('.$policy['term'].' year; registrar expiry '.$calendar['expiry'].')']);
+                'description' => 'Renew '.$domain->domain.' ('.$years.' '.($years === 1 ? 'year' : 'years').'; expires '.$calendar['expiry'].')']);
             Operation::create(['domain_id' => $domain->id, 'service_id' => $service->id, 'invoice_id' => $invoice->id,
-                'invoice_item_id' => $item->id, 'operation_key' => $key, 'action' => 'renew', 'term' => $policy['term'],
+                'invoice_item_id' => $item->id, 'operation_key' => $key, 'action' => 'renew', 'term' => $years,
                 'funding_basis' => 'paid_invoice', 'state' => 'awaiting_payment', 'amount' => $this->decimal($amount),
                 'currency' => $service->currency_code, 'base_expires_at' => $calendar['expiry'],
-                'expected_expires_at' => $domain->provider_expires_at->addYearNoOverflow()->format('Y-m-d'),
+                'expected_expires_at' => $domain->provider_expires_at->addYearsNoOverflow($years)->format('Y-m-d'),
                 'policy' => $lockedPolicy, 'payload' => []]);
             if ($policy['credits_auto_use']) { $this->payWithCredits($invoice); }
             // Billing agreements require a separate explicit authorization path.
@@ -154,14 +164,15 @@ final class DomainBilling
         return $invoice;
     }
 
-    private function lockedPolicy(Domain $domain, Service $service, array $policy, array $calendar): array
+    private function lockedPolicy(Domain $domain, Service $service, array $policy, array $calendar, int $years = 1): array
     {
         $price = new Price(['price' => $service->price, 'currency' => $service->currency, 'tax' => Settings::tax($service->user)]);
         unset($policy['sponsorship']);
         $uid = $service->product?->server?->settings->firstWhere('key', 'uid')?->value;
         $account = $policy['account_fingerprint'] ?? (is_string($uid) && $uid !== '' ? RuntimeGuard::serverFingerprint($service->product?->server) : null);
         return array_merge($policy, ['billing_managed' => true, 'dispatch_marker_version' => 1, 'calendar' => $calendar,
-            'retail_minor' => $this->minor($service->price), 'original_net_minor' => $this->minor($price->subtotal),
+            // A multi-year obligation is the yearly price times its term.
+            'term' => $years, 'retail_minor' => $this->minor($service->price) * $years, 'original_net_minor' => $this->minor($price->subtotal) * $years,
             'currency' => $service->currency_code, 'authority_generation' => (int) $domain->authority_generation,
             'confirmed_revision' => (int) $domain->confirmed_revision,
             'domain' => $domain->domain, 'user_id' => (int) $domain->user_id,
@@ -281,11 +292,11 @@ final class DomainBilling
      * Queue this cycle's renewal at the reseller's cost. One renewal per expiry cycle,
      * whatever paid for it. Staff may pass themselves as the actor; the daily run passes null.
      */
-    public function complimentary(int $domainId, ?User $actor = null): ?Operation
+    public function complimentary(int $domainId, ?User $actor = null, int $years = 1): ?Operation
     {
         // Read the owner before the transaction: a plain read inside it would fix an older snapshot.
         $ownerId = Domain::whereKey($domainId)->value('user_id');
-        return DB::transaction(function () use ($domainId, $actor, $ownerId) {
+        return DB::transaction(function () use ($domainId, $actor, $ownerId, $years) {
             // Client first, like every other writer (orders, pricing, dispatch), to keep one lock order.
             User::whereKey($ownerId)->lockForUpdate()->first();
             $domain = Domain::lockForUpdate()->findOrFail($domainId);
@@ -302,17 +313,19 @@ final class DomainBilling
             $cycle = Operation::where('domain_id', $domain->id)->where('action', 'renew')->whereDate('base_expires_at', $calendar['expiry'])
                 ->where(fn ($query) => $query->where('state', '!=', 'rejected')->orWhereNull('state'))->first();
             if ($cycle) { return $cycle->funding_basis === 'complimentary' ? $cycle : null; }
+            // Only staff may choose a longer complimentary term; the daily run renews one year.
+            if ($years < 1 || $years > self::maxRenewalYears($domain) || ($years > 1 && !$actor)) { throw new RuntimeException('That renewal term would go past the 10-year registry limit.'); }
             $this->assertEligible($domain, $service);
             Pricing::syncServicePrice($domain);
             $service->refresh();
             $policy = $this->policy($domain);
             if (!$policy['enabled'] || !empty($policy['automatic_spend_paused'])) { return null; }
             $operation = Operation::create(['domain_id' => $domain->id, 'service_id' => $service->id,
-                'operation_key' => $key, 'action' => 'renew', 'term' => $policy['term'], 'funding_basis' => 'complimentary',
+                'operation_key' => $key, 'action' => 'renew', 'term' => $years, 'funding_basis' => 'complimentary',
                 'state' => 'queued', 'amount' => '0.00', 'currency' => $service->currency_code,
-                'base_expires_at' => $calendar['expiry'], 'expected_expires_at' => $domain->provider_expires_at->addYearNoOverflow()->format('Y-m-d'),
+                'base_expires_at' => $calendar['expiry'], 'expected_expires_at' => $domain->provider_expires_at->addYearsNoOverflow($years)->format('Y-m-d'),
                 'authorized_by' => $actor?->id, 'funding_reason' => $actor ? 'Complimentary renewal requested by staff' : 'Complimentary renewal',
-                'policy' => $this->lockedPolicy($domain, $service, $policy, $calendar) + ['complimentary_cap_minor' => Pricing::complimentaryCapMinor((int) $domain->server_id)],
+                'policy' => $this->lockedPolicy($domain, $service, $policy, $calendar, $years) + ['complimentary_cap_minor' => Pricing::complimentaryCapMinor((int) $domain->server_id)],
                 'payload' => []]);
             ExecuteOperation::dispatch($operation->id)->afterCommit();
             return $operation;

@@ -16,6 +16,8 @@ final class Staff
     public const MANAGE = 'admin.enom.manage';
     public const FUND = 'admin.enom.fund';
     public const COSTS = 'admin.enom.costs';
+    /** Paymenter's own invoice permission, needed to give account credit back. */
+    public const INVOICES = 'admin.invoices.update';
 
     public const STAFF_SERVICE = 'Paymenter\\Extensions\\Servers\\Enom\\Services\\StaffDomains';
 

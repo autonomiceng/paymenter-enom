@@ -77,6 +77,11 @@ class Enom extends Server
                 'description' => 'Must be fewer than the invoice days.'],
             ['name' => 'credits_auto_use', 'label' => 'Pay renewals from account credit', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
                 'description' => 'Used only when the client\'s credit covers the whole invoice.'],
+            ['name' => 'reminder_days', 'label' => 'Reminder emails, days before expiry', 'type' => 'text', 'default' => '60,30,7,1',
+                'validation' => ['nullable', 'regex:/^\\s*\\d{1,3}(\\s*,\\s*\\d{1,3})*\\s*$/'],
+                'description' => 'Comma-separated. Domains that renew with nothing to do get only the 30-day email. Edit the wording in Notification Templates.'],
+            ['name' => 'expired_reminder_days', 'label' => 'Reminder emails, days after expiry', 'type' => 'text', 'default' => '3',
+                'validation' => ['nullable', 'regex:/^\\s*\\d{1,3}(\\s*,\\s*\\d{1,3})*\\s*$/']],
             ['name' => 'grace_renewals_enabled', 'label' => 'Allow renewal after expiry', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
                 'description' => 'Renews paid domains during the registry grace period, if Enom still allows it at the expected cost.'],
             ['name' => 'default_nameservers', 'label' => 'Default nameservers', 'type' => 'textarea', 'rows' => 4,
@@ -125,6 +130,7 @@ class Enom extends Server
     {
         app(Migrator::class)->run([base_path('extensions/Servers/Enom/database/migrations')]);
         $this->verifySchema();
+        Services\Reminders::ensureTemplates();
     }
 
     public function upgraded($oldVersion = null): void { $this->installed(); }
@@ -191,6 +197,10 @@ class Enom extends Server
         })->name('enom-domain-observation')->dailyAt('00:05')->withoutOverlapping(15)->onOneServer();
         Schedule::call(fn () => app(DomainBilling::class)->sweep())
             ->name('enom-domain-billing')->dailyAt('00:10')->withoutOverlapping(15)->onOneServer();
+        Schedule::call(fn () => app(Services\Refunds::class)->retryPending())
+            ->name('enom-refund-retry')->hourly()->withoutOverlapping(30)->onOneServer();
+        Schedule::call(fn () => app(Services\Reminders::class)->sweep())
+            ->name('enom-renewal-reminders')->dailyAt('09:00')->withoutOverlapping(30)->onOneServer();
         Schedule::call(fn () => app(DomainOperations::class)->reportRetiredInvoicePayments())
             ->name('enom-retired-invoice-payments')->dailyAt('00:15')->withoutOverlapping(15)->onOneServer();
     }

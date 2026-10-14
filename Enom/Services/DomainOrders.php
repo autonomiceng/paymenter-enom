@@ -10,6 +10,7 @@ use App\Models\Order;
 use App\Models\Product;
 use App\Models\Service;
 use App\Models\User;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Paymenter\Extensions\Servers\Enom\Api\DomainName;
@@ -26,76 +27,116 @@ class DomainOrders
 
     /**
      * Availability and price for one name, without creating anything. Used by the search page,
-     * which checks each enabled ending separately.
+     * which checks each enabled ending separately. Guests ($user null) see pre-tax catalogue prices.
+     * Availability is cached for a minute; quoting checks again.
      *
      * @return array{domain: string, tld: string, available: bool, transferable: bool, premium: bool,
-     *     register_price: ?string, transfer_price: ?string, renew_price: ?string, complimentary: bool, existing: bool}
+     *     register_price: ?string, transfer_price: ?string, renew_price: ?string, complimentary: bool, existing: bool,
+     *     terms: list<int>, register_totals: array<int, string>, taxed: bool}
      */
-    public function check(User $user, string $input): array
+    public function check(?User $user, string $input): array
     {
         $resolved = app(Catalogue::class)->resolve($input);
         $tld = $resolved['tld'];
         $existing = Domain::where('domain', $resolved['domain'])->exists();
-        $result = $this->operations->apiForServer((int) $tld->server_id, true)->search($resolved['domain']);
-        $check = EnomApi::normalize('search', $result);
-        if ($result->status !== 'success') { throw new RuntimeException('Availability could not be checked right now.'); }
-        // Names needing a multi-year first term count as unavailable: only one-year orders are sold.
-        $premium = ($check['is_premium'] ?? null) !== false || ($check['is_platinum'] ?? null) !== false || ($check['is_eap'] ?? null) !== false
-            || ($check['min_reg_year'] ?? 1) > 1;
-        $complimentary = self::complimentaryFor($user);
+        $check = Cache::remember('enom:check:'.$tld->server_id.':'.$resolved['domain'], 60, function () use ($tld, $resolved) {
+            $result = $this->operations->apiForServer((int) $tld->server_id, true)->search($resolved['domain']);
+            if ($result->status !== 'success') { throw new RuntimeException('Availability could not be checked right now.'); }
+            return EnomApi::normalize('search', $result);
+        });
+        $premium = ($check['is_premium'] ?? null) !== false || ($check['is_platinum'] ?? null) !== false || ($check['is_eap'] ?? null) !== false;
+        $terms = self::termsFor($tld, $check);
+        $complimentary = $user !== null && self::complimentaryFor($user);
+        $price = fn (?string $amount) => $complimentary ? '0.00' : ($user ? Pricing::taxed($user, $amount, 'USD') : $amount);
+        $totals = [];
+        foreach ($terms as $years) { $totals[$years] = $price($tld->registrationTotal($years)); }
         return ['domain' => $resolved['domain'], 'tld' => $tld->tld,
-            'available' => !$existing && !$premium && !empty($check['available']),
+            'available' => !$existing && !$premium && $terms !== [] && !empty($check['available']),
             'transferable' => !$existing && !$premium && empty($check['available']) && !empty($check['transferable']),
-            'premium' => $premium, 'existing' => $existing, 'complimentary' => $complimentary,
-            'register_price' => $complimentary ? '0.00' : Pricing::taxed($user, $tld->price('register'), 'USD'),
-            'transfer_price' => $complimentary ? '0.00' : Pricing::taxed($user, $tld->price('transfer'), 'USD'),
-            'renew_price' => $complimentary ? '0.00' : Pricing::taxed($user, $tld->price('renew'), 'USD')];
+            'premium' => $premium, 'existing' => $existing, 'complimentary' => $complimentary, 'taxed' => $user !== null,
+            'register_price' => $price($tld->price('register')), 'transfer_price' => $price($tld->price('transfer')),
+            'renew_price' => $price($tld->price('renew')), 'terms' => $terms, 'register_totals' => $totals];
+    }
+
+    /** Registration terms for this name: the ending's range, raised to the name's own registry minimum. */
+    private static function termsFor(Tld $tld, array $check): array
+    {
+        $minimum = (int) ($check['min_reg_year'] ?? 1);
+        return array_values(array_filter($tld->terms(), fn (int $years) => $years >= max(1, $minimum)));
     }
 
     public function quote(User $user, string $domain, string $action = 'register', int $term = 1): array
     {
-        if (!in_array($action, ['register', 'transfer'], true) || $term !== 1) { throw new RuntimeException('Only one-year registration and transfer are available.'); }
+        if (!in_array($action, ['register', 'transfer'], true)) { throw new RuntimeException('Choose registration or transfer.'); }
+        if ($action === 'transfer') { $term = 1; } // A transfer always adds one year.
         $resolved = app(Catalogue::class)->resolve($domain);
         $tld = $resolved['tld'];
         $product = app(Catalogue::class)->ensureProduct((int) $tld->server_id);
         $plan = $product->plans->first(fn ($plan) => $plan->type === 'recurring' && $plan->billing_unit === 'year' && (int) $plan->billing_period === 1);
         if (!$plan) { throw new RuntimeException('Domain catalogue configuration requires review.'); }
         $currency = 'USD';
-        $complimentary = self::complimentaryFor($user);
-        $amount = $complimentary ? '0.00' : Pricing::taxed($user, $tld->price($action), $currency);
-        $renewalAmount = $complimentary ? '0.00' : Pricing::taxed($user, $tld->price('renew'), $currency);
-        if ($amount === null || $renewalAmount === null) { throw new RuntimeException('Domain pricing is unavailable.'); }
         $parsed = ['domain' => $resolved['domain'], 'sld' => $resolved['sld'], 'tld' => $tld->tld];
         if (Domain::where('domain', $parsed['domain'])->exists()) { throw new RuntimeException('This domain already has a portal record.'); }
         $result = $this->operations->apiForServer((int) $tld->server_id, true)->search($parsed['domain']);
         $check = EnomApi::normalize('search', $result);
         if ($result->status !== 'success') { throw new RuntimeException('Availability could not be checked right now.'); }
         if (($check['is_premium'] ?? null) !== false || ($check['is_platinum'] ?? null) !== false || ($check['is_eap'] ?? null) !== false
-            || ($check['min_reg_year'] ?? 1) > 1
-            || ($action === 'register' && empty($check['available']))
+            || ($action === 'register' && (empty($check['available']) || !in_array($term, self::termsFor($tld, $check), true)))
             || ($action === 'transfer' && (!empty($check['available']) || empty($check['transferable'])))) {
             throw new RuntimeException('This domain is unavailable or requires unsupported registry pricing.');
         }
+        $complimentary = self::complimentaryFor($user);
+        $amount = $complimentary ? '0.00' : Pricing::taxed($user, $action === 'register' ? $tld->registrationTotal($term) : $tld->price('transfer'), $currency);
+        $renewalAmount = $complimentary ? '0.00' : Pricing::taxed($user, $tld->price('renew'), $currency);
+        if ($amount === null || $renewalAmount === null) { throw new RuntimeException('Domain pricing is unavailable.'); }
         $intent = OrderIntent::create([
             'id' => bin2hex(random_bytes(24)), 'user_id' => $user->id, 'server_id' => $tld->server_id,
             'product_id' => $product->id, 'plan_id' => $plan->id, ...$parsed,
-            'action' => $action, 'term' => 1, 'amount' => $amount, 'renewal_amount' => $renewalAmount,
+            'action' => $action, 'term' => $term, 'amount' => $amount, 'renewal_amount' => $renewalAmount,
             'currency' => $currency, 'expires_at' => now()->addMinutes(30),
             'payload' => ['quote_check' => ['available' => $check['available'] ?? false, 'transferable' => $check['transferable'] ?? false],
-                'complimentary' => $complimentary],
+                'complimentary' => $complimentary, 'terms' => self::termsFor($tld, $check)],
         ]);
         return $this->quoteData($intent);
     }
 
     private function quoteData(OrderIntent $intent): array
     {
+        $tld = Tld::query()->where('server_id', $intent->server_id)->where('tld', $intent->tld)->first();
+        $years = max(1, (int) $intent->term);
         return ['intent_id' => $intent->id, 'domain' => $intent->domain, 'action' => $intent->action,
-            'term' => 1, 'amount' => $intent->amount, 'currency' => $intent->currency,
+            'term' => $years, 'years' => $years, 'amount' => $intent->amount, 'currency' => $intent->currency,
             'renewal_amount' => $intent->renewal_amount, 'expires_at' => $intent->expires_at->toIso8601String(),
+            'terms' => $intent->action === 'register' ? array_values(array_map('intval', $intent->payload['terms'] ?? [$years])) : [1],
+            'min_years' => $tld ? min($tld->terms()) : 1, 'max_years' => $tld ? max($tld->terms()) : 1,
+            'new_expiry_estimate' => now()->addYearsNoOverflow($years)->toDateString(),
+            'registry_fields' => $tld ? app(Catalogue::class)->attributesFor($tld) : [],
             'complimentary' => (bool) ($intent->payload['complimentary'] ?? false),
             'server_id' => (int) $intent->server_id,
             'default_nameservers' => RuntimeGuard::defaultNameservers((int) $intent->server_id),
             'test_environment' => RuntimeGuard::isTest((int) $intent->server_id)];
+    }
+
+    /**
+     * Requote an open order for a different registration term, keeping the same intent so the
+     * client's form stays put. Prices come from the catalogue; availability was checked at quote time.
+     */
+    public function changeTerm(User $user, string $intentId, int $years): array
+    {
+        return DB::transaction(function () use ($user, $intentId, $years) {
+            $intent = OrderIntent::where('user_id', $user->id)->whereKey($intentId)->lockForUpdate()->firstOrFail();
+            if ($intent->claimed_at || $intent->expires_at->isPast()) { throw new RuntimeException('Domain quote expired or was already used.'); }
+            if ($intent->action !== 'register' || !in_array($years, array_map('intval', $intent->payload['terms'] ?? [1]), true)) {
+                throw new RuntimeException('That term is not available for this name.');
+            }
+            $tld = Tld::query()->where('server_id', $intent->server_id)->where('tld', $intent->tld)->firstOrFail();
+            $complimentary = (bool) ($intent->payload['complimentary'] ?? false);
+            $amount = $complimentary ? '0.00' : Pricing::taxed($user, $tld->registrationTotal($years), $intent->currency);
+            if ($amount === null) { throw new RuntimeException('Domain pricing is unavailable.'); }
+            // Keep the expiry explicitly: some MySQL/MariaDB installs auto-update the first TIMESTAMP column.
+            $intent->update(['term' => $years, 'amount' => $amount, 'expires_at' => $intent->expires_at]);
+            return $this->quoteData($intent->fresh());
+        });
     }
 
     /** Reopen an existing quote without another availability request or order write. */
@@ -115,9 +156,9 @@ class DomainOrders
      *
      * @return Invoice|Domain the invoice to pay, or the domain for complimentary orders
      */
-    public function place(User $user, string $intentId, array $contacts = [], ?string $epp = null, array $nameservers = []): Invoice|Domain
+    public function place(User $user, string $intentId, array $contacts = [], ?string $epp = null, array $nameservers = [], array $registry = []): Invoice|Domain
     {
-        return DB::transaction(function () use ($user, $intentId, $contacts, $epp, $nameservers) {
+        return DB::transaction(function () use ($user, $intentId, $contacts, $epp, $nameservers, $registry) {
             // Client row first: serialises complimentary limits with grants and other orders.
             User::whereKey($user->id)->lockForUpdate()->first();
             $intent = OrderIntent::where('user_id', $user->id)->whereKey($intentId)->lockForUpdate()->firstOrFail();
@@ -135,7 +176,7 @@ class DomainOrders
             $complimentary = (bool) ($intent->payload['complimentary'] ?? false);
             $tld = Tld::query()->where('server_id', $intent->server_id)->where('tld', $intent->tld)->first();
             if (!$tld?->orderable() || $complimentary !== self::complimentaryFor($user)
-                || !$complimentary && (Pricing::taxed($user, $tld->price($intent->action), $intent->currency) !== $intent->amount
+                || !$complimentary && (Pricing::taxed($user, $intent->action === 'register' ? $tld->registrationTotal(max(1, (int) $intent->term)) : $tld->price('transfer'), $intent->currency) !== $intent->amount
                     || Pricing::taxed($user, $tld->price('renew'), $intent->currency) !== $intent->renewal_amount)) {
                 throw new RuntimeException('Domain pricing changed. Search again.');
             }
@@ -148,8 +189,11 @@ class DomainOrders
             }
             $nameservers = $intent->action === 'register' ? ($nameservers ?: RuntimeGuard::defaultNameservers((int) $intent->server_id)) : [];
             if ($nameservers) { DomainManager::validatePayload('nameservers', ['confirmed' => true, 'nameservers' => implode("\n", $nameservers)]); }
+            // Registry details (for example .us nexus) are validated against the ending's stored schema.
+            $registry = RegistryFields::validate(app(Catalogue::class)->attributesFor($tld), $registry);
             $intent->payload = ['contacts' => $contacts, 'epp' => $intent->action === 'transfer' ? $epp : null,
-                'nameservers' => $nameservers, 'complimentary' => $complimentary];
+                'nameservers' => $nameservers, 'complimentary' => $complimentary, 'registry' => $registry,
+                'terms' => $intent->payload['terms'] ?? [1]];
             $intent->save();
             $order = new Order(['user_id' => $user->id, 'currency_code' => $intent->currency]);
             $order->send_create_email = false;
@@ -178,23 +222,23 @@ class DomainOrders
             if ($complimentary) {
                 $domain->refresh();
                 $operation = Operation::create(['domain_id' => $domain->id, 'service_id' => $service->id,
-                    'operation_key' => 'complimentary:'.$intent->id, 'action' => $intent->action, 'term' => 1,
+                    'operation_key' => 'complimentary:'.$intent->id, 'action' => $intent->action, 'term' => max(1, (int) $intent->term),
                     'funding_basis' => 'complimentary', 'state' => 'queued', 'amount' => '0.00', 'currency' => $intent->currency,
                     'authorized_by' => $user->id, 'funding_reason' => 'Complimentary client',
-                    'payload' => $intent->payload, 'policy' => self::complimentaryPolicy($domain, $service, (int) $intent->server_id)]);
+                    'payload' => $intent->payload, 'policy' => self::complimentaryPolicy($domain, $service, (int) $intent->server_id, max(1, (int) $intent->term))]);
                 // A paid $0.00 record keeps the native unpaid-order cleanup away from slow transfers and shows the client what happened.
                 $record = new Invoice(['user_id' => $user->id, 'currency_code' => $intent->currency, 'status' => Invoice::STATUS_PAID, 'due_at' => now()]);
                 $record->send_create_email = false;
                 $record->save();
                 $record->items()->create(['reference_type' => Service::class, 'reference_id' => $service->id, 'quantity' => 1, 'price' => '0.00',
-                    'description' => ($intent->action === 'transfer' ? 'Transfer ' : 'Register ').$intent->domain.' (1 year, complimentary)']);
+                    'description' => self::lineDescription($intent).' — complimentary']);
                 $intent->update(['claimed_at' => now(), 'invoice_id' => $record->id]);
                 \Paymenter\Extensions\Servers\Enom\Jobs\ExecuteOperation::dispatch($operation->id)->afterCommit();
                 return $domain;
             }
             $invoice = $this->newInvoice($user, $intent->currency);
             $item = $invoice->items()->create(['reference_type' => Service::class, 'reference_id' => $service->id,
-                'quantity' => 1, 'price' => $intent->amount, 'description' => ($intent->action === 'transfer' ? 'Transfer ' : 'Register ').$intent->domain.' (1 year)']);
+                'quantity' => 1, 'price' => $intent->amount, 'description' => self::lineDescription($intent)]);
             $operation = $this->operations->bindInvoiceItem($item);
             if (!$operation || $operation->state !== 'awaiting_payment') { throw new RuntimeException('Domain payment binding could not be established.'); }
             $intent->update(['claimed_at' => now(), 'invoice_id' => $invoice->id, 'invoice_item_id' => $item->id]);
@@ -209,22 +253,42 @@ class DomainOrders
     }
 
     /** Binding and cost cap recorded on every complimentary request. */
-    public static function complimentaryPolicy(Domain $domain, Service $service, int $serverId): array
+    private static function lineDescription(OrderIntent $intent): string
+    {
+        $years = max(1, (int) $intent->term);
+        return $intent->action === 'transfer' ? 'Transfer '.$intent->domain.' (adds 1 year)'
+            : 'Register '.$intent->domain.' ('.$years.' '.($years === 1 ? 'year' : 'years').')';
+    }
+
+    public static function complimentaryPolicy(Domain $domain, Service $service, int $serverId, int $years = 1): array
     {
         return array_replace($domain->renewal_policy ?? [], [
             'billing_managed' => true, 'dispatch_marker_version' => 1, 'domain' => $domain->domain, 'user_id' => (int) $domain->user_id,
             'service_id' => (int) $service->id, 'server_id' => $serverId,
             'authority_generation' => (int) $domain->authority_generation, 'confirmed_revision' => (int) $domain->confirmed_revision,
-            'currency' => $service->currency_code, 'term' => 1, 'retail_minor' => 0,
+            'currency' => $service->currency_code, 'term' => $years, 'retail_minor' => 0,
             'complimentary_cap_minor' => Pricing::complimentaryCapMinor($serverId),
         ]);
     }
 
-    public function renew(User $user, int $domainId, ?string $nonce = null): Invoice
+    public function renew(User $user, int $domainId, ?string $nonce = null, int $years = 1): Invoice
     {
         $domain = Domain::where('user_id', $user->id)->findOrFail($domainId);
-        if ($domain->billing_managed) { return app(DomainBilling::class)->invoice($domainId, $user, $nonce); }
+        if ($domain->billing_managed) { return app(DomainBilling::class)->invoice($domainId, $user, $nonce, $years); }
+        if ($years !== 1) { throw new RuntimeException('This domain renews one year at a time.'); }
         return $this->billExisting($user, $domainId, 'renew', $nonce);
+    }
+
+    /** Terms a client may renew for now, and the price per year they pay. */
+    public function renewalOptions(User $user, int $domainId): array
+    {
+        $domain = Domain::where('user_id', $user->id)->findOrFail($domainId);
+        $max = $domain->billing_managed ? DomainBilling::maxRenewalYears($domain) : min(1, DomainBilling::maxRenewalYears($domain));
+        $perYear = Pricing::renewalPrice($domain);
+        return ['years' => $max > 0 ? range(1, $max) : [], 'price_per_year' => $perYear,
+            'totals' => $perYear === null ? [] : array_combine($max > 0 ? range(1, $max) : [], array_map(
+                fn (int $years) => RegistrarMoney::decimal(number_format(((float) $perYear) * $years, 2, '.', '')), $max > 0 ? range(1, $max) : [])),
+            'expires_at' => $domain->provider_expires_at?->toDateString(), 'complimentary' => Pricing::isComplimentary($domain)];
     }
 
     public function privacy(User $user, int $domainId, string $action, ?string $nonce = null): Invoice

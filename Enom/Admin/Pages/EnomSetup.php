@@ -2,7 +2,9 @@
 
 namespace Paymenter\Extensions\Servers\Enom\Admin\Pages;
 
+use App\Admin\Resources\NotificationTemplateResource;
 use App\Admin\Resources\ServerResource;
+use App\Models\NotificationTemplate;
 use App\Models\Server;
 use Filament\Actions\Action;
 use Filament\Infolists\Components\TextEntry;
@@ -70,7 +72,95 @@ class EnomSetup extends Page
                     ]),
             ]);
         }
-        return $schema->components($servers->map(fn (Server $server) => $this->serverSection($server))->all());
+        return $schema->components([
+            ...$servers->map(fn (Server $server) => $this->serverSection($server))->all(),
+            $this->remindersSection($servers),
+        ]);
+    }
+
+    public const REMINDER_TEMPLATES = [
+        'enom_domain_expiring' => 'Domain expiring',
+        'enom_domain_expired' => 'Domain expired',
+        'enom_domain_order_refunded' => 'Order refunded',
+    ];
+
+    /** Reminder schedule from the server settings, links to the native email templates and recent sends. */
+    private function remindersSection($servers): Section
+    {
+        $schedule = fn (string $key, string $default) => $servers->map(function (Server $server) use ($key, $default, $servers) {
+            $days = self::days((string) RuntimeGuard::setting((int) $server->id, $key, $default));
+            return ($servers->count() > 1 ? $server->name.': ' : '').($days ? self::dayList($days).' day'.($days === [1] ? '' : 's') : 'None');
+        })->all();
+        $stats = self::reminderCount();
+        $single = $servers->count() === 1 ? self::serverUrl((int) $servers->first()->id) : null;
+
+        return Section::make('Renewal reminders')
+            ->description('Emails clients before and after a domain expires.')
+            ->afterHeader([
+                Action::make('reminderSchedule')
+                    ->label('Change schedule')
+                    ->icon('heroicon-o-cog-6-tooth')
+                    ->color('gray')
+                    ->url($single)
+                    ->visible($single !== null),
+            ])
+            ->schema([
+                Grid::make(['default' => 1, 'sm' => 2, 'lg' => $stats === null ? 3 : 4])->schema([
+                    TextEntry::make('reminderBefore')->label('Before expiry')
+                        ->state($schedule('reminder_days', '60,30,7,1'))
+                        ->listWithLineBreaks()
+                        ->belowContent('Complimentary and paid-up domains get the 30-day one only'),
+                    TextEntry::make('reminderAfter')->label('After expiry')
+                        ->state($schedule('expired_reminder_days', '3'))
+                        ->listWithLineBreaks(),
+                    TextEntry::make('reminderSent')->label('Sent in the last 30 days')
+                        ->state($stats)
+                        ->numeric()
+                        ->visible($stats !== null),
+                    TextEntry::make('reminderTemplates')->label('Email templates')
+                        ->state(self::templateLinks())
+                        ->html()
+                        ->listWithLineBreaks(),
+                ]),
+            ]);
+    }
+
+    /** @return list<int> */
+    private static function days(string $value): array
+    {
+        $days = array_values(array_unique(array_filter(array_map('intval', preg_split('/[\s,]+/', $value) ?: []), fn (int $day) => $day > 0 && $day <= 365)));
+        rsort($days);
+        return $days;
+    }
+
+    private static function dayList(array $days): string
+    {
+        return count($days) > 1 ? implode(', ', array_slice($days, 0, -1)).' and '.end($days) : (string) $days[0];
+    }
+
+    private static function reminderCount(): ?int
+    {
+        $service = Staff::service('reminderStats');
+        if (!$service) { return null; }
+        try { $stats = $service->reminderStats(); } catch (Throwable $exception) { report($exception); return null; }
+        $count = is_array($stats) ? ($stats['sent_30_days'] ?? $stats['sent_last_30_days'] ?? $stats['last_30_days'] ?? $stats['sent'] ?? $stats['count'] ?? null) : $stats;
+        return is_numeric($count) ? (int) $count : null;
+    }
+
+    /** @return list<string> HTML links to the native editor, or plain names without the permission. */
+    private static function templateLinks(): array
+    {
+        $templates = NotificationTemplate::query()->whereIn('key', array_keys(self::REMINDER_TEMPLATES))->get(['id', 'key', 'enabled'])->keyBy('key');
+        $edit = Staff::can('admin.notification_templates.update');
+        $links = [];
+        foreach (self::REMINDER_TEMPLATES as $key => $name) {
+            $template = $templates->get($key);
+            $url = $template && $edit ? self::safeUrl(fn () => NotificationTemplateResource::getUrl('edit', ['record' => $template->id])) : null;
+            $suffix = !$template ? ' <span class="text-gray-500 dark:text-gray-400">(not installed)</span>'
+                : (!$template->enabled ? ' <span class="text-gray-500 dark:text-gray-400">(off)</span>' : '');
+            $links[] = ($url ? '<a href="'.e($url).'" class="text-primary-600 hover:underline dark:text-primary-400">'.e($name).'</a>' : e($name)).$suffix;
+        }
+        return $links;
     }
 
     private function serverSection(Server $server): Section

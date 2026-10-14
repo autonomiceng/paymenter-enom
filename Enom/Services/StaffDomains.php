@@ -43,17 +43,37 @@ class StaffDomains
      * Renew this cycle now. Complimentary domains queue a renewal at the reseller's cost;
      * others get the client's renewal invoice (the same one the daily run would issue).
      */
-    public function renewNow(User $staff, int $domainId): Invoice|Operation
+    public function renewNow(User $staff, int $domainId, int $years = 1): Invoice|Operation
     {
         $this->authorize($staff);
         $domain = Domain::findOrFail($domainId);
+        if ($years < 1 || $years > DomainBilling::maxRenewalYears($domain)) { throw new InvalidArgumentException('That term would go past the 10-year registry limit.'); }
         if (Pricing::isComplimentary($domain)) {
             $this->authorize($staff, 'admin.enom.fund');
-            return app(DomainBilling::class)->complimentary($domainId, $staff)
+            return app(DomainBilling::class)->complimentary($domainId, $staff, $years)
                 ?? throw new InvalidArgumentException('This expiry cycle already has a renewal or an invoice.');
         }
-        return app(DomainBilling::class)->invoice($domainId);
+        return app(DomainBilling::class)->invoice($domainId, null, null, $years);
     }
+
+    /** Terms staff can renew this domain for now. */
+    public function renewalYears(int $domainId): array
+    {
+        $max = DomainBilling::maxRenewalYears(Domain::findOrFail($domainId));
+        return $max > 0 ? range(1, $max) : [];
+    }
+
+    public function canRefundHeld(Operation $operation): bool { return app(Refunds::class)->canRefundHeld($operation); }
+
+    /** Close a paid request that was never sent and return its amount as account credit. */
+    public function refundHeld(User $staff, int $operationId, string $reason): array
+    {
+        $this->authorize($staff);
+        return app(Refunds::class)->refundHeld($staff, $operationId, $reason);
+    }
+
+    /** Reminder emails recorded in the last 30 days. */
+    public function reminderStats(): int { return Reminders::stats(30); }
 
     /** Who pays: inherit (client default), standard, custom (with price) or complimentary. */
     public function setPricing(User $staff, int $domainId, string $mode, ?string $price = null): Domain

@@ -25,13 +25,14 @@ final class RegistrarClient
         'enableservices', 'disableservices', 'getrenew', 'setrenew', 'gethosts', 'sethosts',
         'getdomainsrvhosts', 'setdomainsrvhosts', 'getdnssec', 'adddnssec', 'deletednssec',
         'getexpireddomains', 'updateexpireddomains', 'gettldlist', 'pe_getdomainpricing', 'pe_getresellerprice',
-        'tp_resendemail', 'checknsstatus',
+        'tp_resendemail', 'checknsstatus', 'registernameserver', 'updatenameserver', 'deletenameserver',
     ];
     private const WRITES = [
         'purchase', 'extend', 'tp_createorder', 'tp_submitorder', 'tp_updateorderdetail',
         'contacts', 'modifyns', 'setreglock', 'synchauthinfo', 'purchaseservices',
         'renewservices', 'enableservices', 'disableservices', 'setrenew', 'sethosts',
         'setdomainsrvhosts', 'adddnssec', 'deletednssec', 'updateexpireddomains', 'tp_resendemail',
+        'registernameserver', 'updatenameserver', 'deletenameserver',
     ];
     private const READS = [
         'check', 'gettlddetails', 'getextattributes', 'getbalance', 'getdomaininfo',
@@ -250,6 +251,11 @@ final class RegistrarClient
         }
         if (in_array($command, ['purchaseservices', 'renewservices'], true) && !$this->id($data['orderid'] ?? null)) {
             return new RegistrarResult('unknown', 'missing_order', $data);
+        }
+        // Glue changes report NsSuccess=1 when the registry accepted them.
+        if (in_array($command, ['registernameserver', 'updatenameserver', 'deletenameserver'], true)) {
+            $flag = $data['nssuccess'] ?? ($data['registernameserver']['nssuccess'] ?? null);
+            if ((string) $flag !== '1') { return new RegistrarResult('unknown', 'host_change_unconfirmed', $data); }
         }
         // EmailEPP=True answers with EPPEmailMessage instead of InfoSynched.
         if ($command === 'synchauthinfo' && strtolower((string) ($data['infosynched'] ?? '')) !== 'true'

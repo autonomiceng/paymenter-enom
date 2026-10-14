@@ -73,6 +73,9 @@ final class RenewalAdmission
                 return $this->refuse('renewal_state_unconfirmed');
             }
             if ($info['registrar_hold'] && !$expired) { return $this->refuse('registrar_hold'); }
+            // Enom's fresh limit is binding whatever the quote says; grace renewals are one year at a time.
+            if ((int) $operation->term > $info['max_extension']) { return $this->refuse('renewal_term_above_registry_limit'); }
+            if ($expired && (int) $operation->term !== 1) { return $this->refuse('grace_renewal_one_year_only'); }
             if (!$this->ordinaryDomain($evidence['check'], $domain->domain)) { return $this->refuse('renewal_premium_or_unknown'); }
             $quote = RegistrarMoney::renewalQuote($evidence['extend'], $binding + ['observed_at' => $clock->toIso8601String()],
                 $evidence['check'], $evidence['expired'], $evidence['info']);
@@ -151,7 +154,7 @@ final class RenewalAdmission
     private function localRefusal(Operation $operation, ?Domain $domain): ?string
     {
         $service = $domain?->service;
-        if ($operation->action !== 'renew' || (int) $operation->term !== 1 || !$domain || !$service
+        if ($operation->action !== 'renew' || (int) $operation->term < 1 || (int) $operation->term > 10 || !$domain || !$service
             || !in_array($operation->state, ['queued', 'running'], true)
             || !$this->operations->validService($service, $domain)
             || (int) $operation->service_id !== (int) $service->id
@@ -159,7 +162,7 @@ final class RenewalAdmission
             || $service->cancellation()->exists()) { return 'renewal_lifecycle_invalid'; }
         if (!$domain->provider_expires_at || !$operation->base_expires_at
             || !$operation->base_expires_at->equalTo($domain->provider_expires_at)
-            || !$operation->expected_expires_at || !$operation->expected_expires_at->equalTo($operation->base_expires_at->addYearNoOverflow())) {
+            || !$operation->expected_expires_at || !$operation->expected_expires_at->equalTo($operation->base_expires_at->addYearsNoOverflow(max(1, (int) $operation->term)))) {
             return 'expiry_changed';
         }
         if (!is_string($domain->provider_domain_id) || preg_match('/^[1-9][0-9]{0,19}$/D', $domain->provider_domain_id) !== 1) {
@@ -174,7 +177,7 @@ final class RenewalAdmission
                 || (isset($policy['user_id']) && $policy['user_id'] !== (int) $domain->user_id)
                 || ($policy['authority_generation'] ?? null) !== $domain->authority_generation
                 || ($policy['confirmed_revision'] ?? null) !== $domain->confirmed_revision
-                || ($policy['currency'] ?? null) !== $operation->currency || ($policy['term'] ?? null) !== 1) {
+                || ($policy['currency'] ?? null) !== $operation->currency || ($policy['term'] ?? null) !== (int) $operation->term) {
                 return 'renewal_policy_binding_changed';
             }
         }
@@ -227,7 +230,7 @@ final class RenewalAdmission
             'base_expires_at' => $domain->provider_expires_at?->format('Y-m-d'), 'policy' => $operation->policy,
             'operation_state' => $operation->state, 'funding_basis' => $operation->funding_basis,
             'invoice_id' => $operation->invoice_id, 'invoice_item_id' => $operation->invoice_item_id,
-            'amount' => $operation->amount, 'currency' => $operation->currency,
+            'amount' => $operation->amount, 'currency' => $operation->currency, 'term' => (int) $operation->term,
             'operation_base_expires_at' => $operation->base_expires_at?->format('Y-m-d'),
             'expected_expires_at' => $operation->expected_expires_at?->format('Y-m-d')];
     }
