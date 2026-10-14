@@ -95,7 +95,8 @@ $make = function (string $name, int $price = 15) use ($user, $server, $product, 
     $source = fn ($value) => ['status' => 'fresh', 'succeeded_at' => now()->toIso8601String(), 'value' => $value];
     return Domain::create(['service_id' => $service->id, 'user_id' => $user->id, 'server_id' => $server->id,
         'domain' => $name.'.com', 'sld' => $name, 'tld' => 'com', 'status' => 'active', 'provider_expires_at' => '2026-12-01',
-        'billing_managed' => false, 'authority_generation' => 1, 'confirmed_revision' => 1,
+        // 0.3 backfills existing domains to a custom price so their native price is kept exactly.
+        'billing_managed' => false, 'authority_generation' => 1, 'confirmed_revision' => 1, 'price_mode' => 'custom',
         'observation' => ['status' => 'fresh', 'account_fingerprint' => hash('sha256', 'sandbox:test-account'), 'expiry_drift' => 'none',
             'sources' => ['info' => $source(['domain_name_id' => '456', 'registration_status' => 'registered', 'purchase_status' => 'paid', 'expires_at' => '2026-12-01T00:00:00Z']), 'renewal' => $source(['auto_renew' => false]),
                 'expiry' => $source(['expires_at' => '2026-12-01T00:00:00Z'])],

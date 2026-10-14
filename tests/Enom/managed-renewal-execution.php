@@ -174,7 +174,7 @@ $make = function (string $kind = 'paid', string $tld = 'com', array $options = [
     $domain = Domain::create(['service_id' => $service->id, 'user_id' => $user->id, 'server_id' => $server->id,
         'domain' => $name, 'sld' => 'execution-'.$counter, 'tld' => $tld, 'provider_domain_id' => '456',
         'status' => 'active', 'provider_expires_at' => $options['expiry'] ?? '2026-12-01', 'billing_managed' => true,
-        'authority_generation' => 1, 'confirmed_revision' => 1, 'renewal_policy' => ['enabled' => true]]);
+        'authority_generation' => 1, 'confirmed_revision' => 1, 'renewal_policy' => ['enabled' => true], 'price_mode' => 'custom']); // 0.3 backfill: keep the native price
     if ($kind === 'complimentary') {
         // 0.3: the reseller pays; one renewal per cycle at a quote under the server's complimentary cost limit.
         $service->update(['price' => '0.00']);

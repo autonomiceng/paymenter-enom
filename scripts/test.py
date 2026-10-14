@@ -20,10 +20,7 @@ SUITES = {
                'reconciliation-registration.php', 'capability-readbacks.php', 'provider-disposition.php', 'native-date-missing-schema.php',
                'request-gates.php', 'staff-funding-gates.php', 'catalogue-integration.php', 'runtime-guard.php', 'management-actions.php',
                'pricing-complimentary.php'],
-    'ui': ['automation-ui.php', 'automation-ui-edge-cases.php', 'readmission-ui-regressions.php', 'ui-concurrency-regressions.php',
-           'ui-controller-regressions.php', 'ui-live-validation-pipeline.php', 'ui-admin-hub.php', 'ui-domain-validation-controller.php',
-           'ui-ownership.php', 'ui-type-regressions.php', 'ui-views.php', 'uiux-regressions.php', 'presentation-regressions.php',
-           'ui-live-validation-dom.cjs', 'uiux-help-dom.cjs', 'ui-domain-validation.cjs'],
+    'ui': ['client-controller.php', 'client-views.php', 'admin-staff.php', 'client-script.cjs'],
 }
 
 def hashes(root):
