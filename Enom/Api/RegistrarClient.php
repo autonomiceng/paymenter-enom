@@ -76,7 +76,8 @@ final class RegistrarClient
                 || ($request['numyears'] ?? null) !== 1 || ($request['usecreditcard'] ?? null) !== 'no') {
                 throw new \InvalidArgumentException('Expired renewal requires one safe one-year domain request.');
             }
-            $parts = DomainName::parse((string) ($request['domainname'] ?? ''), ['com', 'net', 'us']);
+            $name = (string) ($request['domainname'] ?? '');
+            $parts = DomainName::parse($name, [substr($name, (int) strpos($name, '.') + 1)]);
             if ($parts['domain'] !== ($request['domainname'] ?? null) || str_starts_with($parts['sld'], 'xn--')) {
                 throw new \InvalidArgumentException('Invalid existing-domain renewal request.');
             }

@@ -6,6 +6,7 @@ use App\Models\Category;
 use App\Models\Product;
 use App\Models\Server;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 use Paymenter\Extensions\Servers\Enom\Api\DomainName;
@@ -39,7 +40,8 @@ class Catalogue
     {
         $tlds = $this->orderable();
         if ($tlds->isEmpty()) { throw new RuntimeException('Domain ordering is not available yet.'); }
-        $parts = DomainName::parse($input, $tlds->pluck('tld')->all());
+        $parts = DomainName::parse($input, $tlds->pluck('tld')->unique()->all());
+        if ($tlds->where('tld', $parts['tld'])->count() > 1) { throw new RuntimeException('.'.$parts['tld'].' is set up on more than one Enom server. Ask support.'); }
         if (str_starts_with($parts['sld'], 'xn--')) { throw new InvalidArgumentException('International domain names are not available.'); }
         return ['tld' => $tlds->firstWhere('tld', $parts['tld']), 'domain' => $parts['domain'], 'sld' => $parts['sld']];
     }
@@ -138,19 +140,37 @@ class Catalogue
         if (!$tld->price('register') || !$tld->price('renew') || !$tld->price('transfer')) {
             throw new InvalidArgumentException('Set registration, renewal and transfer prices before enabling .'.$tld->tld.'.');
         }
+        $lock = Cache::lock('enom:enable-tld:'.$tld->tld, 60);
+        if (!$lock->get()) { throw new RuntimeException('.'.$tld->tld.' is being changed by someone else. Try again in a minute.'); }
+        try {
+            $this->enableLocked($tld);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    private function enableLocked(Tld $tld): void
+    {
         if (Tld::query()->where('tld', $tld->tld)->where('enabled', true)->where('id', '!=', $tld->id)->exists()) {
             throw new InvalidArgumentException('.'.$tld->tld.' is already sold through another Enom server.');
         }
         $api = $this->operations->apiForServer((int) $tld->server_id, true);
         $details = $api->tldInfo($tld->tld);
         $minimum = $details->value('tlds.tld.registration.minimum');
-        if ($details->status === 'success' && is_numeric($minimum) && (int) $minimum > 1) {
+        $identified = strtolower((string) $details->value('tlds.tld.tld')) === $tld->tld;
+        if ($details->status !== 'success' || !$identified || !is_numeric($minimum)) {
+            throw new RuntimeException('Could not confirm that .'.$tld->tld.' can be registered for one year. Try again.');
+        }
+        if ((int) $minimum > 1) {
             throw new InvalidArgumentException('.'.$tld->tld.' must be registered for at least '.(int) $minimum.' years. Only one-year terms are sold for now.');
         }
         $attributes = $api->tldExtendedAttributes($tld->tld);
         if ($attributes->status !== 'success') { throw new RuntimeException('Could not check .'.$tld->tld.' registry requirements with Enom. Try again.'); }
         if (self::requiresExtraDetails($attributes)) {
             throw new InvalidArgumentException('.'.$tld->tld.' needs extra registrant details (for example a residency or nexus declaration) that the order form does not collect yet.');
+        }
+        if (Tld::query()->where('tld', $tld->tld)->where('enabled', true)->where('id', '!=', $tld->id)->exists()) {
+            throw new InvalidArgumentException('.'.$tld->tld.' is already sold through another Enom server.');
         }
         $tld->enabled = true;
         $tld->save();

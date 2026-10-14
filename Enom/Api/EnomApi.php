@@ -516,7 +516,7 @@ final class EnomApi
             if ($normalized['status'] !== 'success') { continue; }
             if ($kind === 'contacts') {
                 $snapshot['contact_status'] = ['pending_verification' => $normalized['pending_verification'] ?? null, 'transfer_locked' => $normalized['transfer_locked'] ?? null];
-                $snapshot['contact_roles'] = array_keys(array_filter($normalized['collected'] ?? ['registrant' => true, 'admin' => true, 'tech' => true, 'auxbilling' => true]));
+                $snapshot['contact_roles'] = array_keys(array_filter($normalized['collected'] ?? ['registrant' => true, 'admin' => true, 'tech' => true, 'auxbilling' => true])) ?: ['registrant'];
             }
             if ($kind === 'dnssec') { $snapshot['dnssec_shape_verified'] = $normalized['shape_verified'] ?? false; }
             if (in_array($kind, ['contacts', 'nameservers', 'hosts', 'srv', 'dnssec'], true)) { $snapshot[$kind] = $normalized[$kind] ?? []; }

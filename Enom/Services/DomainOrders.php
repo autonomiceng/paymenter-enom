@@ -39,7 +39,9 @@ class DomainOrders
         $result = $this->operations->apiForServer((int) $tld->server_id, true)->search($resolved['domain']);
         $check = EnomApi::normalize('search', $result);
         if ($result->status !== 'success') { throw new RuntimeException('Availability could not be checked right now.'); }
-        $premium = ($check['is_premium'] ?? null) !== false || ($check['is_platinum'] ?? null) !== false || ($check['is_eap'] ?? null) !== false;
+        // Names needing a multi-year first term count as unavailable: only one-year orders are sold.
+        $premium = ($check['is_premium'] ?? null) !== false || ($check['is_platinum'] ?? null) !== false || ($check['is_eap'] ?? null) !== false
+            || ($check['min_reg_year'] ?? 1) > 1;
         $complimentary = self::complimentaryFor($user);
         return ['domain' => $resolved['domain'], 'tld' => $tld->tld,
             'available' => !$existing && !$premium && !empty($check['available']),
@@ -68,6 +70,7 @@ class DomainOrders
         $result = $this->operations->apiForServer((int) $tld->server_id, true)->search($parsed['domain']);
         $check = EnomApi::normalize('search', $result);
         if ($result->status !== 'success' || ($check['is_premium'] ?? null) !== false || ($check['is_platinum'] ?? null) !== false || ($check['is_eap'] ?? null) !== false
+            || ($check['min_reg_year'] ?? 1) > 1
             || ($action === 'register' && empty($check['available']))
             || ($action === 'transfer' && (!empty($check['available']) || empty($check['transferable'])))) {
             throw new RuntimeException('This domain is unavailable or requires unsupported registry pricing.');
@@ -114,6 +117,8 @@ class DomainOrders
     public function place(User $user, string $intentId, array $contacts = [], ?string $epp = null, array $nameservers = []): Invoice|Domain
     {
         return DB::transaction(function () use ($user, $intentId, $contacts, $epp, $nameservers) {
+            // Client row first: serialises complimentary limits with grants and other orders.
+            User::whereKey($user->id)->lockForUpdate()->first();
             $intent = OrderIntent::where('user_id', $user->id)->whereKey($intentId)->lockForUpdate()->firstOrFail();
             if ($intent->claimed_at) {
                 return ($intent->payload['complimentary'] ?? false)
@@ -231,6 +236,7 @@ class DomainOrders
     {
         if ($nonce !== null && !preg_match('/^[a-f0-9]{32,64}$/D', $nonce)) { throw new RuntimeException('Invalid purchase request.'); }
         return DB::transaction(function () use ($user, $domainId, $action, $nonce) {
+            User::whereKey($user->id)->lockForUpdate()->first();
             $domain = Domain::where('user_id', $user->id)->whereKey($domainId)->lockForUpdate()->firstOrFail();
             $service = $domain->service;
             if (!$service || !$this->operations->validService($service, $domain) || $domain->status !== 'active' || $service->status !== Service::STATUS_ACTIVE) { throw new RuntimeException('Domain billing is unavailable.'); }

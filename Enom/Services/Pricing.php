@@ -34,6 +34,7 @@ final class Pricing
     public static function clientGrant(?User $user): ?array
     {
         if (!$user || CustomProperty::query()->where('key', self::CLIENT_PROPERTY)->exists()) { return null; }
+        // Writers and dispatch hold the client row lock before reading this, so a plain read is current.
         $property = $user->properties()->where('key', self::CLIENT_PROPERTY)->whereNull('custom_property_id')->first();
         if (!$property) { return null; }
         $grant = json_decode((string) $property->value, true);
@@ -50,6 +51,25 @@ final class Pricing
     /** Staff-only. $maxDomains limits how many complimentary domains the client may hold; null is no limit. */
     public static function setClientComplimentary(User $user, bool $complimentary, ?User $staff = null, ?int $maxDomains = null): void
     {
+        // The client row is the authority lock shared with order placement and dispatch (user before domain).
+        DB::transaction(function () use ($user, $complimentary, $staff, $maxDomains) {
+            User::whereKey($user->id)->lockForUpdate()->first();
+            if ($complimentary && $maxDomains !== null) {
+                $following = self::liveDomains($user->id)->where(fn ($q) => $q->whereNull('price_mode')->orWhere('price_mode', 'complimentary'))->count();
+                if ($following > $maxDomains) {
+                    throw new InvalidArgumentException('This client already has '.$following.' domains that would become complimentary. Set a limit of at least '.$following.', or leave it blank.');
+                }
+            }
+            self::writeClientGrant($user, $complimentary, $staff, $maxDomains);
+        });
+        foreach (Domain::query()->where('user_id', $user->id)->whereNull('price_mode')->get() as $domain) {
+            self::syncServicePrice($domain);
+            self::retireIfComplimentary($domain);
+        }
+    }
+
+    private static function writeClientGrant(User $user, bool $complimentary, ?User $staff, ?int $maxDomains): void
+    {
         if ($complimentary) {
             $user->properties()->updateOrCreate(['key' => self::CLIENT_PROPERTY], ['name' => 'Complimentary domains', 'custom_property_id' => null,
                 'value' => json_encode(['granted_by' => $staff?->id, 'granted_at' => now()->toIso8601String(),
@@ -57,10 +77,13 @@ final class Pricing
         } else {
             $user->properties()->where('key', self::CLIENT_PROPERTY)->delete();
         }
-        foreach (Domain::query()->where('user_id', $user->id)->whereNull('price_mode')->get() as $domain) {
-            self::syncServicePrice($domain);
-            self::retireIfComplimentary($domain);
-        }
+    }
+
+    /** Domains that still count toward a client's portfolio. */
+    private static function liveDomains(int $userId)
+    {
+        return Domain::query()->where('user_id', $userId)
+            ->whereNotIn('status', ['cancelled', 'transferred_away', 'deleted', 'registration_rejected', 'transfer_rejected']);
     }
 
     /** Whether a complimentary client may add one more domain under their limit. */
@@ -69,8 +92,7 @@ final class Pricing
         $grant = self::clientGrant($user);
         if ($grant === null) { return false; }
         if ($grant['max_domains'] === null) { return true; }
-        $held = Domain::query()->where('user_id', $user->id)->whereNotIn('status', ['cancelled', 'transferred_away', 'deleted'])->get()
-            ->filter(fn (Domain $domain) => self::isComplimentary($domain))->count();
+        $held = self::liveDomains($user->id)->where(fn ($q) => $q->whereNull('price_mode')->orWhere('price_mode', 'complimentary'))->count();
         return $held < $grant['max_domains'];
     }
 
@@ -115,8 +137,18 @@ final class Pricing
             if ($price === null || (float) $price <= 0) { throw new InvalidArgumentException('Enter a custom yearly price above 0.00.'); }
             if ($service) { $service->price = $price; $service->save(); }
         }
-        $domain->price_mode = $mode === 'inherit' ? null : $mode;
-        $domain->save();
+        DB::transaction(function () use ($domain, $mode) {
+            $owner = User::whereKey($domain->user_id)->lockForUpdate()->first();
+            $grant = self::clientGrant($owner);
+            $becomesFree = $mode === 'complimentary' || $mode === 'inherit' && $grant !== null;
+            if ($becomesFree && $domain->price_mode !== 'complimentary' && !($domain->price_mode === null && $grant !== null)
+                && $grant !== null && $grant['max_domains'] !== null
+                && self::liveDomains($domain->user_id)->where(fn ($q) => $q->whereNull('price_mode')->orWhere('price_mode', 'complimentary'))->count() >= $grant['max_domains']) {
+                throw new InvalidArgumentException('This client already has their limit of '.$grant['max_domains'].' complimentary domains.');
+            }
+            Domain::whereKey($domain->id)->lockForUpdate()->update(['price_mode' => $mode === 'inherit' ? null : $mode]);
+        });
+        $domain->refresh();
         if ($mode !== 'custom') { self::syncServicePrice($domain); }
         self::retireIfComplimentary($domain);
     }

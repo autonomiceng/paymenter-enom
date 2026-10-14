@@ -16,6 +16,9 @@ class Tld extends Model
 
     protected $guarded = [];
 
+    /** Costs never enter arrays, JSON or Livewire state; read them through cost(). */
+    protected $hidden = ['cost_register', 'cost_renew', 'cost_transfer'];
+
     protected $casts = [
         'enabled' => 'boolean', 'markup' => 'decimal:2',
         'register_price' => 'decimal:2', 'renew_price' => 'decimal:2', 'transfer_price' => 'decimal:2',

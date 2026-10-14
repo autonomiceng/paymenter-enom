@@ -5,6 +5,7 @@ namespace Paymenter\Extensions\Servers\Enom\Services;
 use App\Models\Invoice;
 use App\Models\User;
 use Illuminate\Auth\Access\AuthorizationException;
+use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 use Paymenter\Extensions\Servers\Enom\Api\RegistrarClient;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
@@ -57,11 +58,19 @@ class StaffDomains
     /** Who pays: inherit (client default), standard, custom (with price) or complimentary. */
     public function setPricing(User $staff, int $domainId, string $mode, ?string $price = null): Domain
     {
-        $this->authorize($staff, $mode === 'complimentary' ? 'admin.enom.fund' : 'admin.enom.manage');
-        $domain = Domain::findOrFail($domainId);
-        if ($domain->price_mode === 'complimentary' && $mode !== 'complimentary') { $this->authorize($staff, 'admin.enom.fund'); }
-        Pricing::setDomainMode($domain, $mode, $price);
-        return $domain->fresh();
+        $this->authorize($staff);
+        $ownerId = Domain::whereKey($domainId)->value('user_id');
+        return DB::transaction(function () use ($staff, $domainId, $mode, $price, $ownerId) {
+            // Decide under the client lock so a concurrent grant can't change the effective result.
+            User::whereKey($ownerId)->lockForUpdate()->first();
+            $domain = Domain::lockForUpdate()->findOrFail($domainId);
+            // Judge by the effective result: "follow client default" can make a domain complimentary too.
+            $before = Pricing::mode($domain);
+            $after = $mode === 'inherit' ? (Pricing::clientComplimentary(User::find($domain->user_id)) ? 'complimentary' : 'standard') : $mode;
+            if ($before === 'complimentary' || $after === 'complimentary') { $this->authorize($staff, 'admin.enom.fund'); }
+            Pricing::setDomainMode($domain, $mode, $price);
+            return $domain->fresh();
+        });
     }
 
     public function setClientComplimentary(User $staff, User $client, bool $on, ?int $maxDomains = null): void

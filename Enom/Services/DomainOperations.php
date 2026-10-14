@@ -242,8 +242,9 @@ class DomainOperations
             && $this->cents($service->price) !== $this->cents($operation->amount)) { return false; }
         $total = 0;
         foreach ($invoice->transactions as $transaction) {
-            if ($transaction->status !== InvoiceTransactionStatus::Succeeded || (!$transaction->gateway_id && !$transaction->is_credit_transaction)
-                || $this->cents($transaction->amount) <= 0) { continue; }
+            // Gateway, account-credit and staff-recorded payments all count. An invoice switched to
+            // "paid" with no recorded payment does not, so it never funds a registrar purchase.
+            if ($transaction->status !== InvoiceTransactionStatus::Succeeded || $this->cents($transaction->amount) <= 0) { continue; }
             $total += $this->cents($transaction->amount);
         }
         return $total === $this->cents($invoice->total);
@@ -295,6 +296,7 @@ class DomainOperations
                 $result = $api->search($domain->domain);
                 $check = EnomApi::normalize('search', $result);
                 if ($result->status !== 'success' || ($check['is_premium'] ?? null) !== false || ($check['is_platinum'] ?? null) !== false || ($check['is_eap'] ?? null) !== false
+                    || ($claimed->action === 'register' && ($check['min_reg_year'] ?? 1) > 1)
                     || ($claimed->action === 'register' && empty($check['available']))
                     || ($claimed->action === 'transfer' && (!empty($check['available']) || empty($check['transferable'])))) {
                     return $this->finish($claimed, 'rejected', 'domain_unavailable_or_premium');
@@ -796,7 +798,11 @@ class DomainOperations
     /** Commit a unique marker after the final checks, with no provider request inside the lock. */
     private function sealDispatch(Operation $claimed): ?Operation
     {
-        return DB::transaction(function () use ($claimed) {
+        // Owner read before the transaction so no snapshot predates the lock.
+        $ownerId = Domain::whereKey($claimed->domain_id)->value('user_id');
+        return DB::transaction(function () use ($claimed, $ownerId) {
+            // Same authority lock as complimentary grants: user, then domain.
+            User::whereKey($ownerId)->lockForUpdate()->first();
             $domain = Domain::whereKey($claimed->domain_id)->lockForUpdate()->firstOrFail();
             $current = Operation::whereKey($claimed->id)->lockForUpdate()->firstOrFail();
             $current->setRelation('domain', $domain);
@@ -915,9 +921,9 @@ class DomainOperations
     {
         $server = $domain->service?->product?->server;
         if (!$server?->enabled || $server->extension !== 'Enom' || (int) $server->id !== (int) $domain->server_id) { return false; }
-        $settings = $server->settings->pluck('value', 'key');
-        return filter_var($readOnly && $settings->has('reads_enabled') ? $settings->get('reads_enabled')
-            : $settings->get('operations_enabled', false), FILTER_VALIDATE_BOOLEAN);
+        // Reads (status checks, reconciliation) need only credentials; pausing processing pauses writes.
+        if ($readOnly) { return true; }
+        return filter_var($server->settings->pluck('value', 'key')->get('operations_enabled', false), FILTER_VALIDATE_BOOLEAN);
     }
 
     public function approveFunding(int $operationId, User $staff, string $reason): Operation
@@ -1277,6 +1283,7 @@ class DomainOperations
     {
         $domain = $this->ownedDomain($actor, $domainId);
         return DB::transaction(function () use ($domain, $enabled) {
+            User::whereKey($domain->user_id)->lockForUpdate()->first();
             $domain = Domain::whereKey($domain->id)->lockForUpdate()->firstOrFail();
             if (!$enabled) {
                 if ($domain->billing_managed) { $this->retireUnpaidRenewals($domain); }
@@ -1389,6 +1396,7 @@ class DomainOperations
             $snapshot['read_status'][$kind] = $partial['read_status'][$kind];
             if ($kind === 'dnssec') { $snapshot['dnssec_shape_verified'] = $partial['dnssec_shape_verified'] ?? false; }
             if ($kind === 'contacts' && isset($partial['contact_status'])) { $snapshot['contact_status'] = $partial['contact_status']; }
+            if ($kind === 'contacts' && isset($partial['contact_roles'])) { $snapshot['contact_roles'] = $partial['contact_roles']; }
         }
         return $snapshot;
     }
