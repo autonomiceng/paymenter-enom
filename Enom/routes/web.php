@@ -1,0 +1,34 @@
+<?php
+
+use App\Http\Middleware\MustVerfiyEmail;
+use Illuminate\Support\Facades\Route;
+use Paymenter\Extensions\Servers\Enom\Http\Controllers\AdminController;
+use Paymenter\Extensions\Servers\Enom\Http\Controllers\DomainController;
+use Paymenter\Extensions\Servers\Enom\Http\Controllers\HelpController;
+
+Route::middleware(['web', 'auth', MustVerfiyEmail::class])->group(function () {
+    // Static help. GET only, allowlisted topics, no writes.
+    Route::get('/domains/help/{topic?}', [HelpController::class, 'customer'])->where('topic', 'ordering|payment|statuses|renewal|dns|contacts|privacy|transfers')->name('enom.help');
+    Route::get('/admin/enom/help/{topic?}', [HelpController::class, 'admin'])->where('topic', 'setup|enrollment|calendar|sponsorship|costs|results|review')->name('enom.admin.help');
+    Route::get('/domains', [DomainController::class, 'index'])->name('enom.domains.index');
+    Route::post('/domains/search', [DomainController::class, 'quote'])->name('enom.domains.quote')->middleware('throttle:20,1')->block(10, 10);
+    Route::post('/domains/order', [DomainController::class, 'place'])->name('enom.domains.place')->middleware('throttle:10,1')->block(10, 10);
+    Route::get('/domains/order/{intent}', [DomainController::class, 'order'])->where('intent', '[a-f0-9]{48}')->name('enom.domains.order');
+    Route::get('/domains/{domain}', [DomainController::class, 'show'])->whereNumber('domain')->name('enom.domains.show');
+    Route::post('/domains/{domain}/refresh', [DomainController::class, 'refresh'])->whereNumber('domain')->name('enom.domains.refresh')->middleware('throttle:10,1')->block(10, 10);
+    Route::post('/domains/{domain}/renew', [DomainController::class, 'renew'])->whereNumber('domain')->name('enom.domains.renew')->middleware('throttle:10,1')->block(10, 10);
+    Route::post('/domains/{domain}/privacy/{action}', [DomainController::class, 'privacy'])->whereNumber('domain')->where('action', 'purchase|renew')->name('enom.domains.privacy')->middleware('throttle:10,1')->block(10, 10);
+    Route::post('/domains/{domain}/renewal-preference', [DomainController::class, 'renewalPreference'])->whereNumber('domain')->name('enom.domains.preference')->middleware('throttle:10,1')->block(10, 10);
+    Route::post('/domains/{domain}/manage/{action}', [DomainController::class, 'manage'])->whereNumber('domain')->name('enom.domains.manage')->middleware('throttle:20,1')->block(10, 10);
+    Route::get('/admin/enom', [AdminController::class, 'index'])->name('enom.admin.index');
+    Route::get('/admin/enom/domains/{domain}', [AdminController::class, 'domain'])->whereNumber('domain')->name('enom.admin.domain');
+    Route::post('/admin/enom/domains/{domain}/policy', [AdminController::class, 'policy'])->whereNumber('domain')->name('enom.admin.policy')->middleware('throttle:10,1')->block(10, 10);
+    Route::post('/admin/enom/domains/{domain}/sponsorship', [AdminController::class, 'sponsorship'])->whereNumber('domain')->name('enom.admin.sponsorship')->middleware('throttle:10,1')->block(10, 10);
+    Route::post('/admin/enom/domains/{domain}/refresh', [AdminController::class, 'refresh'])->whereNumber('domain')->name('enom.admin.refresh')->middleware('throttle:10,1')->block(10, 10);
+    Route::post('/admin/enom/domains/{domain}/sponsored-renewal', [AdminController::class, 'sponsoredRenewal'])->whereNumber('domain')->name('enom.admin.sponsored-renewal')->middleware('throttle:10,1')->block(10, 10);
+    Route::post('/admin/enom/{operation}/reconcile', [AdminController::class, 'reconcile'])->whereNumber('operation')->name('enom.admin.reconcile')->middleware('throttle:10,1')->block(10, 10);
+    Route::post('/admin/enom/{operation}/readmit', [AdminController::class, 'readmit'])->whereNumber('operation')->name('enom.admin.readmit')->middleware('throttle:10,1')->block(10, 10);
+    Route::post('/admin/enom/{operation}/provider-fact', [AdminController::class, 'providerFact'])->whereNumber('operation')->name('enom.admin.provider-fact')->middleware('throttle:10,1')->block(10, 10);
+    Route::post('/admin/enom/{operation}/disposition', [AdminController::class, 'disposition'])->whereNumber('operation')->name('enom.admin.disposition')->middleware('throttle:10,1')->block(10, 10);
+    Route::post('/admin/enom/{operation}/fund', [AdminController::class, 'fund'])->whereNumber('operation')->name('enom.admin.fund')->middleware('throttle:10,1')->block(10, 10);
+});
