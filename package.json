@@ -1,0 +1,21 @@
+{
+  "name": "paymenter-enom-development",
+  "version": "0.2.6",
+  "private": true,
+  "license": "MIT",
+  "description": "Offline development tests for the Paymenter Enom extension",
+  "scripts": {
+    "test": "python3 scripts/test.py",
+    "test:provider": "python3 scripts/test.py --suite provider",
+    "test:ui": "python3 scripts/test.py --suite ui",
+    "lint": "python3 scripts/test.py --suite lint",
+    "build": "python3 scripts/build.py"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "author": "Autonomic Engineering"
+}

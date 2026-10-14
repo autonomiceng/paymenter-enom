@@ -1,0 +1,10 @@
+Enom for Paymenter
+Copyright (c) 2026 Autonomic Engineering
+Author: Autonomic Engineering
+License: MIT. See LICENSE and Enom/LICENSE.
+
+The release archive contains the extension runtime and its license.
+Paymenter is a separate dependency licensed by its authors under MIT.
+Development dependencies retain the licenses declared in package-lock.json.
+Paymenter and development dependencies are not bundled in the release archive.
+Enom and Paymenter names identify the services this extension integrates with.
