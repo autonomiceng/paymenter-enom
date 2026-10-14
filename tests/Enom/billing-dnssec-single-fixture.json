@@ -1,0 +1,20 @@
+{
+  "command": "GETDNSSEC",
+  "errcount": "0",
+  "done": "true",
+  "dnssecdata": {
+    "keydata": {
+      "algorithm": "13",
+      "digest": "72E28946F8C78F20620941F019ADE7C43A35869A31AC28A8F8BE29367810C40D",
+      "digesttype": "2",
+      "keytag": "27578"
+    },
+    "result": {
+      "responsecode": "200",
+      "responsemessage": "Command completed successfully"
+    }
+  },
+  "dnssecdatacount": "1",
+  "maxsiglife": "",
+  "success": "True"
+}
