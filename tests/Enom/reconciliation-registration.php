@@ -12,6 +12,13 @@ use Paymenter\Extensions\Servers\Enom\Services\DomainOperations;
 $checks = 0;
 $staffRole = App\Models\Role::create(['name' => 'Offline registrar staff', 'permissions' => ['admin.enom.manage']]);
 $staff = App\Models\User::create(['email' => 'recovery-staff@example.invalid', 'password' => 'synthetic', 'role_id' => $staffRole->id]);
+// 0.3: a confirmed registration/transfer queues exactly one post-registration detail refresh (read only) and nothing else.
+function onlyRefreshJobAdded(array $before, array $after, int $domainId): bool {
+    if (count($after) !== count($before) + 1 || array_slice($after, 0, count($before)) != $before) { return false; }
+    $payload = json_decode(end($after)->payload, true);
+    return ($payload['displayName'] ?? null) === 'Paymenter\\Extensions\\Servers\\Enom\\Jobs\\RefreshDomain'
+        && str_contains((string) ($payload['data']['command'] ?? ''), 's:8:"domainId";i:'.$domainId.';');
+}
 function fundedRegistration(): array {
     global $staff;
     [$domain, $operation, $intent] = fixture('register');
@@ -50,9 +57,10 @@ verify($result->state === 'succeeded' && $result->safe_code === 'expiry_confirme
 verify($domain->fresh()->status === 'active' && $domain->fresh()->provider_expires_at->format('Y-m-d') === '2027-10-13'
     && $domain->fresh()->service->status === 'active' && $domain->fresh()->service->expires_at->format('Y-m-d') === '2027-09-13', 'Recovery did not preserve separate provider expiry and native billing lead.');
 verify($result->payload === null && $intent->fresh()->payload === null, 'Recovered registration retained private initial payload.');
-foreach (['invoices', 'invoice_items', 'invoice_transactions', 'jobs', 'failed_jobs'] as $table) {
+foreach (['invoices', 'invoice_items', 'invoice_transactions', 'failed_jobs'] as $table) {
     verify($after[$table] == $before[$table], 'Recovery changed native '.$table.'.');
 }
+verify(onlyRefreshJobAdded($before['jobs'], $after['jobs'], $domain->id), 'Recovery did not queue exactly one detail refresh for the recovered domain.');
 verify(App\Models\Invoice::find($operation->invoice_id)->status === 'pending' && App\Models\InvoiceTransaction::where('invoice_id', $operation->invoice_id)->count() === 0, 'Staff funding fabricated customer payment.');
 $reader->execute($operation->id); $reader->reconcile($operation->id);
 verify($commands->getArrayCopy() === ['GetOrderDetail', 'GetDomainExp'], 'Recovery replayed a Purchase or another registrar request.');
@@ -97,7 +105,8 @@ verify($completed->state === 'succeeded', 'Actual Purchase/getter date discrepan
 verify($executedDomain->fresh()->provider_expires_at->format('Y-m-d') === '2027-10-14'
     && $executedDomain->fresh()->service->expires_at->format('Y-m-d') === '2027-09-14', 'Registration fallback chose acknowledgement expiry instead of corroborated dedicated getter.');
 $financialAfter = finances();
-foreach (['invoices', 'invoice_items', 'invoice_transactions', 'jobs', 'failed_jobs'] as $table) { verify($financialAfter[$table] == $financialBefore[$table], 'Registration fallback changed native '.$table.'.'); }
+foreach (['invoices', 'invoice_items', 'invoice_transactions', 'failed_jobs'] as $table) { verify($financialAfter[$table] == $financialBefore[$table], 'Registration fallback changed native '.$table.'.'); }
+verify(onlyRefreshJobAdded($financialBefore['jobs'], $financialAfter['jobs'], $executedDomain->id), 'Registration success did not queue exactly one detail refresh.');
 verify($executionCommands->getArrayCopy() === ['Check', 'Purchase', 'GetDomainExp', 'GetOrderDetail'], 'Registration fallback resent Purchase or added unexpected reads.');
 $executor->execute($execution->id);
 verify(count($executionCommands) === 4, 'Completed registration was resent.');

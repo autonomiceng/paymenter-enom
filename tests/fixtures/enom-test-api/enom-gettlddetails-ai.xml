@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<interface-response>
+  <tlds>
+    <tld>
+      <TLDID>3000</TLDID>
+      <TLD>ai</TLD>
+      <AbleToLock>True</AbleToLock>
+      <AllowWPPS>True</AllowWPPS>
+      <ExtAttributes>False</ExtAttributes>
+      <SupportsDnsSec>True</SupportsDnsSec>
+      <Registration>
+        <Realtime>True</Realtime>
+        <Unit>Year</Unit>
+        <Minimum>2</Minimum>
+        <Maximum>10</Maximum>
+        <HasPremiumNames>True</HasPremiumNames>
+        <ExtAttributes>False</ExtAttributes>
+        <ExtAttributesDomainLevel>False</ExtAttributesDomainLevel>
+        <DNSRequired>True</DNSRequired>
+        <DNSMinimum>2</DNSMinimum>
+        <DNSMaximum>13</DNSMaximum>
+        <GeneralAvailabilityStartDate>2025-01-15T11:00:00</GeneralAvailabilityStartDate>
+      </Registration>
+      <Renewal>
+        <AutoRenewOnly>False</AutoRenewOnly>
+        <AutoRenewed>True</AutoRenewed>
+        <RenewBeforeExpMonths>0</RenewBeforeExpMonths>
+        <DeleteType>0</DeleteType>
+        <DeleteDay>42</DeleteDay>
+        <GracePeriod>45</GracePeriod>
+        <Reactivate>True</Reactivate>
+        <Restorable>True</Restorable>
+        <RGP>True</RGP>
+        <RGPDays>32</RGPDays>
+        <ExtendedRGP>True</ExtendedRGP>
+        <TransferPeriod>2</TransferPeriod>
+      </Renewal>
+    </tld>
+  </tlds>
+  <Command>GETTLDDETAILS</Command>
+  <APIType>API.NET</APIType>
+  <Language>eng</Language>
+  <ErrCount>0</ErrCount>
+  <ResponseCount>0</ResponseCount>
+  <MinPeriod>2</MinPeriod>
+  <MaxPeriod>10</MaxPeriod>
+  <Server />
+  <Site>eNom</Site>
+  <IsLockable>True</IsLockable>
+  <IsRealTimeTLD>True</IsRealTimeTLD>
+  <TimeDifference>+8.00</TimeDifference>
+  <ExecTime />
+  <Done>true</Done>
+  <TrackingKey />
+  <RequestDateTime />
+  <debug />
+</interface-response>

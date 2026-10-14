@@ -34,7 +34,7 @@ foreach (['running', 'pending', 'uncertain'] as $state) {
     verify(($snapshot['writes_blocked'] ?? false) === true && $snapshot['capabilities'] === [], 'Unresolved domain still exposes registrar/billing capabilities.');
     verify(($snapshot['needs_review'] ?? false) === ($state === 'uncertain'), 'Unresolved notice does not distinguish review from running/pending.');
     try { $operations->enqueueManagement($user, $domain->id, 'lock', ['confirmed' => true, 'locked' => '1'], hash('sha256', 'new-management-'.$state)); verify(false, 'Unresolved domain accepted a new management request.'); }
-    catch (InvalidArgumentException $e) { verify(str_contains($e->getMessage(), 'registrar request'), 'Management refusal lacks a safe unresolved-request explanation.'); }
+    catch (InvalidArgumentException $e) { verify(str_contains($e->getMessage(), 'still being processed'), 'Management refusal lacks a safe unresolved-request explanation.'); }
     try { $orders->renew($user, $domain->id, hash('sha256', 'new-renewal-'.$state)); verify(false, 'Unresolved domain accepted a new renewal invoice.'); }
     catch (InvalidArgumentException $e) { verify(str_contains($e->getMessage(), 'registrar request'), 'Billing refusal lacks a safe unresolved-request explanation.'); }
     verify($operations->enqueueManagement($user, $domain->id, 'lock', ['confirmed' => true, 'locked' => '0'], $nonce)->id === $known->id, 'Exact management nonce no longer returns its recorded request.');
@@ -52,20 +52,21 @@ foreach (['queued', 'awaiting_payment', 'held', 'rejected', 'succeeded'] as $sta
     verify(($manager->snapshot($user, $domain->id)['writes_blocked'] ?? false) === false, 'Queued, unpaid or terminal request blanket-blocks the domain.');
     verify($operations->enqueueManagement($user, $domain->id, 'lock', ['confirmed' => true, 'locked' => '1'], hash('sha256', 'allowed-'.$state))->wasRecentlyCreated, 'Nonblocking state prevents a new management request.');
 }
-require_once $testRoot.'/app/Classes/helpers.php';
-Illuminate\Support\Facades\Auth::login($user);
-$app['view']->share('errors', new Illuminate\Support\ViewErrorBag);
-$app['view']->addLocation($release.'/themes/default/views');
-app('router')->getRoutes()->refreshNameLookups();
+require_once dirname(__DIR__).'/enom-domain-page.php';
 [$domain, $blocker] = activeFixture();
 $blocker->update(['state' => 'uncertain']);
 $snapshot = $manager->snapshot($user, $domain->id);
-$keys = array_fill_keys([...$manager::ACTIONS, 'refresh', 'renew', 'privacy_purchase', 'privacy_renew', 'renewal_preference'], str_repeat('a', 64));
-$html = view('enom::show', ['snapshot' => $snapshot, 'keys' => $keys])->render();
-verify(str_contains($html, 'A registrar request needs review by support.') && str_contains($html, 'Refresh status') && str_contains($html, 'Recent requests'), 'Blocked page lacks review notice, refresh or history.');
-verify(!str_contains($html, 'Create renewal invoice') && !str_contains($html, 'Buy contact privacy, 1 year') && !str_contains($html, 'Turn off registrar lock'), 'Blocked page renders new registrar/invoice forms.');
-verify(str_contains($html, 'Turn off renewal'), 'Blocked page removes local preference disable control.');
-$request = Illuminate\Http\Request::create('/domains/'.$domain->id.'/manage/contacts', 'POST', ['confirmed' => '1', 'contact_type' => 'tech', 'contact' => ['first_name' => 'Preserved', 'last_name' => 'Customer', 'address1' => '123 Example Road', 'city' => 'Example', 'postal_code' => '12345', 'country' => 'US', 'email_address' => 'offline@example.invalid', 'phone' => '+1.5551234567'], 'epp' => 'never-flash']);
+// The blocked page offers no registrar or invoice form (renew, privacy purchase, management); the renewal switch stays.
+$actions = enomFormActions(enomDomainPage($user, $domain->id));
+$base = '/domains/'.$domain->id;
+verify(!in_array($base.'/renew', $actions, true) && !in_array($base.'/privacy/purchase', $actions, true)
+    && !array_filter($actions, fn ($action) => str_starts_with($action, $base.'/manage/')), 'Blocked page renders new registrar/invoice forms: '.json_encode($actions));
+verify(in_array($base.'/renewal-preference', $actions, true), 'Blocked page removes local preference disable control.');
+[$openDomain, $openSeed] = activeFixture();
+$openActions = enomFormActions(enomDomainPage($user, $openDomain->id));
+verify(in_array('/domains/'.$openDomain->id.'/manage/lock', $openActions, true), 'Unblocked page lost its registrar forms (fixture check).');
+Illuminate\Support\Facades\Auth::login($user);
+$request = Illuminate\Http\Request::create('/domains/'.$domain->id.'/manage/contacts', 'POST', ['confirmed' => '1', 'contact_type' => 'tech', 'contact' => ['first_name' => 'Preserved', 'last_name' => 'Customer', 'address1' => '123 Example Road', 'city' => 'Example', 'postal_code' => '12345', 'country' => 'US', 'email_address' => 'offline@example.com', 'phone' => '+1.5551234567'], 'epp' => 'never-flash']);
 $session = new Illuminate\Session\Store('offline-gate', new Illuminate\Session\ArraySessionHandler(120));
 $session->start();
 $request->setLaravelSession($session);

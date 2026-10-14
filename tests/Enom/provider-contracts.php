@@ -57,7 +57,10 @@ foreach ([['UID' => 'override'], ['pW' => 'override'], ['ResponseType' => 'text'
     rejects(fn () => $blocked->execute('SetRenew', $parameters), 'unsafe parameters refused before transport');
 }
 rejects(fn () => $blocked->execute('DeleteRegistration'), 'deletion unavailable');
-check((new RegistrarClient('fake', 'fake'))->execute('GetBalance')->status === 'unknown', 'transport guard refuses unconfigured requests before network access');
+// Blank credentials still refuse before cURL; anything else reaching the real transport
+// fails closed here only because the offline harness disables curl_exec.
+check((new RegistrarClient('', ''))->execute('GetBalance')->summary() === ['status' => 'unknown', 'code' => 'transport'], 'blank credentials refused before network');
+check((new RegistrarClient('fake', 'fake'))->execute('GetBalance')->status === 'unknown', 'offline harness blocks the real transport');
 $gate = true; $guardedCalls = 0;
 $guarded = new RegistrarClient('uid', 'token', function ($command) use (&$guardedCalls) { ++$guardedCalls; return xml($command); }, function () use (&$gate) { if (!$gate) { throw new RuntimeException('private configuration SECRET'); } });
 $guarded->execute('GetBalance'); $gate = false;

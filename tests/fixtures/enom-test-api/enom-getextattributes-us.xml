@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<interface-response>
+  <Attributes>
+    <Attribute>
+      <ID>1</ID>
+      <Name>us_nexus</Name>
+      <Application>2</Application>
+      <UserDefined>False</UserDefined>
+      <Required>1</Required>
+      <Description>Nexus Category</Description>
+      <IsChild>0</IsChild>
+      <Options>
+        <Option>
+          <ID>12</ID>
+          <Value>C11</Value>
+          <Title>US Citizen</Title>
+          <Description>A natural person who is a US Citizen.</Description>
+        </Option>
+        <Option>
+          <ID>13</ID>
+          <Value>C12</Value>
+          <Title>Permanent Resident</Title>
+          <Description>A natural person who is a Permanent Resident.</Description>
+        </Option>
+      </Options>
+    </Attribute>
+    <Attribute>
+      <ID>2</ID>
+      <Name>us_purpose</Name>
+      <Application>2</Application>
+      <UserDefined>False</UserDefined>
+      <Required>1</Required>
+      <Description>Application Purpose</Description>
+      <IsChild>0</IsChild>
+      <Options>
+        <Option>
+          <ID>17</ID>
+          <Value>P1</Value>
+          <Title>For Profit</Title>
+          <Description>Business use for profit</Description>
+        </Option>
+        <Option>
+          <ID>18</ID>
+          <Value>P2</Value>
+          <Title>Non-profit</Title>
+          <Description>Non-profit business, club, association, religious organization, etc.</Description>
+        </Option>
+      </Options>
+    </Attribute>
+  </Attributes>
+  <Command>GETEXTATTRIBUTES</Command>
+  <APIType>API.NET</APIType>
+  <Language>eng</Language>
+  <ErrCount>0</ErrCount>
+  <ResponseCount>0</ResponseCount>
+  <MinPeriod>1</MinPeriod>
+  <MaxPeriod>10</MaxPeriod>
+  <Server />
+  <Site>eNom</Site>
+  <IsLockable />
+  <IsRealTimeTLD />
+  <TimeDifference>+0.00</TimeDifference>
+  <ExecTime />
+  <Done>true</Done>
+  <TrackingKey />
+  <RequestDateTime />
+  <debug />
+</interface-response>

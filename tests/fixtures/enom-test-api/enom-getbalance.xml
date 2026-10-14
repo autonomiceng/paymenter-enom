@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<interface-response>
+  <Reseller>1</Reseller>
+  <Balance>1,000.00</Balance>
+  <AvailableBalance>1,234.56</AvailableBalance>
+  <Price>8.95</Price>
+  <COMPrice>8.95</COMPrice>
+  <NETPrice>15.55</NETPrice>
+  <ORGPrice>8.95</ORGPrice>
+  <CCPrice>24.95</CCPrice>
+  <TVPrice>39.95</TVPrice>
+  <BZPrice>24.95</BZPrice>
+  <NUPrice>24.95</NUPrice>
+  <DomainCount>0</DomainCount>
+  <Command>GETBALANCE</Command>
+  <APIType>API</APIType>
+  <Language>eng</Language>
+  <ErrCount>0</ErrCount>
+  <ResponseCount>0</ResponseCount>
+  <MinPeriod>1</MinPeriod>
+  <MaxPeriod>10</MaxPeriod>
+  <Server />
+  <Site>eNom</Site>
+  <IsLockable>False</IsLockable>
+  <IsRealTimeTLD>True</IsRealTimeTLD>
+  <TimeDifference>+03.00</TimeDifference>
+  <ExecTime />
+  <Done>true</Done>
+  <TrackingKey />
+  <RequestDateTime />
+  <debug />
+</interface-response>

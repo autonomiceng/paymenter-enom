@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<interface-response>
+  <tldlist>
+    <tld>
+      <tld>com</tld>
+    </tld>
+    <tld>
+      <tld>net</tld>
+    </tld>
+    <tld>
+      <tld>org</tld>
+    </tld>
+    <tld>
+      <tld>us</tld>
+    </tld>
+    <tld>
+      <tld>co.uk</tld>
+    </tld>
+    <tld>
+      <tld>ai</tld>
+    </tld>
+    <tld>
+      <tld>io</tld>
+    </tld>
+    <tld>
+      <tld>tm</tld>
+    </tld>
+    <tld>
+      <tld>br.com</tld>
+    </tld>
+    <tld>
+      <tld />
+    </tld>
+    <tldcount>10</tldcount>
+  </tldlist>
+  <Command>GETTLDLIST</Command>
+  <APIType>API</APIType>
+  <Language>eng</Language>
+  <ErrCount>0</ErrCount>
+  <ResponseCount>0</ResponseCount>
+  <MinPeriod />
+  <MaxPeriod>10</MaxPeriod>
+  <Server />
+  <Site>eNom</Site>
+  <IsLockable />
+  <IsRealTimeTLD />
+  <TimeDifference>+0.00</TimeDifference>
+  <ExecTime />
+  <Done>true</Done>
+  <TrackingKey />
+  <RequestDateTime />
+  <debug />
+</interface-response>
