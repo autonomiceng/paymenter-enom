@@ -26,9 +26,9 @@ final class DomainObservation
         if (!$domain || !$this->binding($domain)) { return 'ineligible'; }
         try { $configuration = $this->configuration((int) $domain->server_id); }
         catch (\Throwable) { $this->recordFailure($domainId, 'guard_refused'); return 'guard_refused'; }
-        $account = hash('sha256', 'sandbox:'.strtolower($configuration['uid']));
+        $account = RuntimeGuard::accountFingerprint($configuration);
         // Duplicate native server rows for one provider account share the same budget.
-        $lock = Cache::lock('enom:sandbox:observe:account:'.$account, 180);
+        $lock = Cache::lock('enom:observe:account:'.$account, 180);
         if (!$lock->get()) { return 'busy'; }
         try {
             $capture = DB::transaction(function () use ($domainId, $account) {
@@ -43,7 +43,7 @@ final class DomainObservation
                 return ['binding' => $binding, 'sequence' => $sequence, 'started_at' => $started, 'account' => $account];
             });
             if (!$capture) { return 'ineligible'; }
-            $budget = 'enom:sandbox:observe:requests:'.$account;
+            $budget = 'enom:observe:requests:'.$account;
             try { $limit = $this->accountLimit($account, $configuration); }
             catch (\Throwable) { return $this->apply($domainId, $capture, [], 'configuration_invalid'); }
             if (RateLimiter::remaining($budget, $limit) < count(self::SOURCES)) {
@@ -77,8 +77,8 @@ final class DomainObservation
         if (!$domain || !$this->binding($domain) || !$domain->provider_expires_at) { return 'ineligible'; }
         try { $configuration = $this->configuration((int) $domain->server_id); }
         catch (\Throwable) { $this->recordFailure($domainId, 'guard_refused'); return 'guard_refused'; }
-        $account = hash('sha256', 'sandbox:'.strtolower($configuration['uid']));
-        $lock = Cache::lock('enom:sandbox:observe:account:'.$account, 180);
+        $account = RuntimeGuard::accountFingerprint($configuration);
+        $lock = Cache::lock('enom:observe:account:'.$account, 180);
         if (!$lock->get()) { return 'busy'; }
         try {
             $capture = DB::transaction(function () use ($domainId, $account) {
@@ -92,7 +92,7 @@ final class DomainObservation
                 return ['binding' => $binding, 'sequence' => $sequence, 'started_at' => $started, 'account' => $account];
             });
             if (!$capture) { return 'ineligible'; }
-            $budget = 'enom:sandbox:observe:requests:'.$account;
+            $budget = 'enom:observe:requests:'.$account;
             try { $limit = $this->accountLimit($account, $configuration); }
             catch (\Throwable) { return $this->applyQuote($domainId, $capture, null, 'configuration_invalid'); }
             // Reserve room for the maximum four commands, including expired inventory.
@@ -136,7 +136,7 @@ final class DomainObservation
     private function accountLimit(string $account, array $configuration): int
     {
         $configured = RuntimeGuard::observerRequestsPerMinute($configuration);
-        $key = 'enom:sandbox:observe:account-limit:'.$account;
+        $key = 'enom:observe:account-limit:'.$account;
         $remembered = Cache::get($key);
         $limit = is_int($remembered) && $remembered >= 4 && $remembered <= 300 ? min($configured, $remembered) : $configured;
         // Called while the account lock is held. A higher alias cannot reset a
@@ -159,7 +159,7 @@ final class DomainObservation
     private function assertAccount(int $serverId, string $account): void
     {
         $configuration = $this->configuration($serverId);
-        if (!hash_equals($account, hash('sha256', 'sandbox:'.strtolower($configuration['uid'])))) {
+        if (!hash_equals($account, RuntimeGuard::accountFingerprint($configuration))) {
             throw new \RuntimeException('Registrar account binding changed.');
         }
     }
@@ -170,7 +170,7 @@ final class DomainObservation
         if (!$service || (int) $service->user_id !== (int) $domain->user_id
             || (int) $service->product?->server_id !== (int) $domain->server_id
             || $service->product?->server?->extension !== 'Enom' || !in_array($domain->status, self::STATUSES, true)) { return null; }
-        try { $parts = DomainName::parse($domain->domain, ['com', 'net', 'us']); }
+        try { $parts = DomainName::parse($domain->domain, [$domain->tld]); }
         catch (\Throwable) { return null; }
         if ($parts['domain'] !== $domain->domain || $parts['sld'] !== $domain->sld || $parts['tld'] !== $domain->tld) { return null; }
         return ['domain' => $domain->domain, 'sld' => $domain->sld, 'tld' => $domain->tld,

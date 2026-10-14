@@ -2,7 +2,7 @@
 
 namespace Paymenter\Extensions\Servers\Enom\Api;
 
-/** Registrar commands for one-year .com domains in test mode. */
+/** Command facade for one Enom account. Domain endings come from the server's TLD catalogue. */
 final class EnomApi
 {
     private const CONTACT_FIELDS = [
@@ -13,8 +13,43 @@ final class EnomApi
         'phone' => 'Phone', 'phone_ext' => 'PhoneExt', 'fax' => 'Fax',
     ];
 
+    /** @var list<string> */
+    private array $suffixes = ['com', 'net', 'us'];
+
     public function __construct(private RegistrarClient $client) {}
     public function isReadOnly(): bool { return $this->client->isReadOnly(); }
+    public function environment(): string { return $this->client->environment(); }
+
+    /** Endings this account may address: the catalogue plus endings of existing registrations. */
+    public function withSuffixes(array $suffixes): self
+    {
+        $clean = [];
+        foreach ([...$this->suffixes, ...$suffixes] as $suffix) {
+            $suffix = strtolower(ltrim(trim((string) $suffix), '.'));
+            if ($suffix !== '' && preg_match('/^[a-z0-9]+(?:\.[a-z0-9]+)*$/D', $suffix) && !in_array($suffix, $clean, true)) { $clean[] = $suffix; }
+        }
+        $this->suffixes = $clean;
+        return $this;
+    }
+
+    /** @return list<string> */
+    public function suffixes(): array { return $this->suffixes; }
+
+    private function parse(string $domain): array
+    {
+        $parts = DomainName::parse($domain, $this->suffixes);
+        if (str_starts_with($parts['sld'], 'xn--')) {
+            throw new \InvalidArgumentException('International domains are unavailable in this catalogue.');
+        }
+        return $parts;
+    }
+
+    public function tldList(): RegistrarResult { return $this->client->execute('GetTLDList'); }
+    public function domainPricing(): RegistrarResult { return $this->client->execute('PE_GetDomainPricing', ['Years' => 1]); }
+    public function tldExtendedAttributes(string $tld): RegistrarResult { return $this->client->execute('GetExtAttributes', ['TLD' => strtolower($tld)]); }
+    public function tldInfo(string $tld): RegistrarResult { return $this->client->execute('GetTLDDetails', ['TLD' => strtolower($tld)]); }
+    public function emailTransferCode(string $domain): RegistrarResult { return $this->call('SynchAuthInfo', $domain, ['EmailEPP' => 'True', 'RunSynchAutoInfo' => 'True']); }
+    public function resendTransferApproval(string $domain): RegistrarResult { return $this->call('TP_ResendEmail', $domain); }
 
     public function balance(): RegistrarResult { return $this->client->execute('GetBalance'); }
     public function tldDetails(): RegistrarResult { return $this->client->execute('GetTLDDetails', ['TLD' => 'com']); }
@@ -23,11 +58,7 @@ final class EnomApi
 
     private function call(string $command, string $domain, array $parameters = []): RegistrarResult
     {
-        $existingRead = in_array(strtolower($command), ['getdomaininfo', 'getregistrationstatus', 'getdomainexp', 'getextendinfo', 'getcontacts', 'getdns', 'getreglock', 'getwppsinfo', 'getrenew', 'gethosts', 'getdomainsrvhosts', 'getdnssec', 'tp_getdetailsbydomain'], true);
-        $parts = DomainName::parse($domain, $existingRead ? ['com', 'net', 'us'] : ['com']);
-        if (str_starts_with($parts['sld'], 'xn--')) {
-            throw new \InvalidArgumentException('International domains are unavailable in this catalogue.');
-        }
+        $parts = $this->parse($domain);
         return $this->client->execute($command, ['SLD' => $parts['sld'], 'TLD' => $parts['tld']] + $parameters);
     }
 
@@ -90,8 +121,7 @@ final class EnomApi
     /** Parse existing registrations without the new-order catalogue restriction. */
     public function existingRenew(string $domain, int $years = 1): RegistrarResult
     {
-        $parts = DomainName::parse($domain, ['com', 'net', 'us']);
-        if (str_starts_with($parts['sld'], 'xn--')) { throw new \InvalidArgumentException('International domain renewals are unavailable.'); }
+        $parts = $this->parse($domain);
         return $this->client->execute('Extend', ['SLD' => $parts['sld'], 'TLD' => $parts['tld'], 'NumYears' => $this->term($years), 'UseCreditCard' => 'no']);
     }
 
@@ -99,8 +129,7 @@ final class EnomApi
 
     public function expiredRenew(string $domain, int $years = 1): RegistrarResult
     {
-        $parts = DomainName::parse($domain, ['com', 'net', 'us']);
-        if (str_starts_with($parts['sld'], 'xn--')) { throw new \InvalidArgumentException('International domain renewals are unavailable.'); }
+        $parts = $this->parse($domain);
         // Use account credit. Omit card fields and premium price overrides.
         return $this->client->execute('UpdateExpiredDomains', ['DomainName' => $parts['domain'], 'NumYears' => $this->term($years), 'UseCreditCard' => 'no']);
     }
@@ -108,8 +137,7 @@ final class EnomApi
     /** Fresh authenticated reads; callers still validate their captured account binding. */
     public function renewalEvidence(string $domain, ?callable $beforeRead = null, ?\DateTimeInterface $observedAt = null): array
     {
-        $parts = DomainName::parse($domain, ['com', 'net', 'us']);
-        if (str_starts_with($parts['sld'], 'xn--')) { throw new \InvalidArgumentException('International domain renewals are unavailable.'); }
+        $parts = $this->parse($domain);
         $clock = $observedAt ? \DateTimeImmutable::createFromInterface($observedAt)
             : (function_exists('now') ? \DateTimeImmutable::createFromInterface(now()) : new \DateTimeImmutable('now', new \DateTimeZone('UTC')));
         if ($beforeRead) { $beforeRead('info', null); }
@@ -137,8 +165,8 @@ final class EnomApi
 
     public function transfer(string $domain, array $contacts, string $epp): RegistrarResult
     {
-        $parts = DomainName::parse($domain);
-        if (str_starts_with($parts['sld'], 'xn--') || $epp === '' || strlen($epp) > 512 || preg_match('/[\x00-\x1f\x7f]/', $epp)) {
+        $parts = $this->parse($domain);
+        if ($epp === '' || strlen($epp) > 512 || preg_match('/[\x00-\x1f\x7f]/', $epp)) {
             throw new \InvalidArgumentException('Invalid transfer authorization.');
         }
         return $this->client->execute('TP_CreateOrder', [
@@ -149,6 +177,10 @@ final class EnomApi
 
     public function updateContact(string $domain, string $type, array $fields): RegistrarResult
     {
+        if (strtolower($type) === 'all') {
+            // One request sets every role, so they can't end up half-changed.
+            return $this->call('Contacts', $domain, $this->contactSets(array_fill_keys(['registrant', 'admin', 'tech', 'auxbilling'], $fields)));
+        }
         $prefix = $this->contactType($type);
         return $this->call('Contacts', $domain, ['ContactType' => strtoupper($prefix)] + $this->contactFields($prefix, $fields));
     }
@@ -390,6 +422,9 @@ final class EnomApi
                 $contact = $info[$type] ?? [];
                 if (!is_array($contact) || ($contact && array_is_list($contact))) { return ['status' => 'unknown']; }
                 $normalized['contacts'][$type] = [];
+                // Registries that don't collect a role (common since GDPR) report it as NotCollected.
+                $match = $contact[$type.'contactmatch'] ?? null;
+                $normalized['collected'][$type] = !(is_string($match) && strcasecmp($match, 'NotCollected') === 0);
                 foreach (self::CONTACT_FIELDS as $key => $suffix) {
                     $values = [];
                     foreach ([$type.strtolower($suffix), strtolower($suffix)] as $field) {
@@ -481,6 +516,7 @@ final class EnomApi
             if ($normalized['status'] !== 'success') { continue; }
             if ($kind === 'contacts') {
                 $snapshot['contact_status'] = ['pending_verification' => $normalized['pending_verification'] ?? null, 'transfer_locked' => $normalized['transfer_locked'] ?? null];
+                $snapshot['contact_roles'] = array_keys(array_filter($normalized['collected'] ?? ['registrant' => true, 'admin' => true, 'tech' => true, 'auxbilling' => true]));
             }
             if ($kind === 'dnssec') { $snapshot['dnssec_shape_verified'] = $normalized['shape_verified'] ?? false; }
             if (in_array($kind, ['contacts', 'nameservers', 'hosts', 'srv', 'dnssec'], true)) { $snapshot[$kind] = $normalized[$kind] ?? []; }

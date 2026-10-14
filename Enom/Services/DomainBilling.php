@@ -108,6 +108,9 @@ final class DomainBilling
             $policy = $this->policy($domain);
             if (!$policy['enabled']) { throw new RuntimeException('Domain renewal billing is disabled.'); }
             if (!empty($policy['automatic_spend_paused'])) { throw new RuntimeException('Domain renewal spending requires review.'); }
+            if (Pricing::isComplimentary($domain)) { throw new RuntimeException('Complimentary domains renew without an invoice.'); }
+            // New invoices charge the current catalogue price; issued invoices above keep theirs.
+            if (Pricing::mode($domain) === 'standard') { Pricing::syncServicePrice($domain); $service->refresh(); }
             $amount = $this->minor($service->price);
             if ($amount <= 0) { throw new RuntimeException('A zero-price renewal requires explicit sponsorship.'); }
             $lockedPolicy = $this->lockedPolicy($domain, $service, $policy, $calendar);
@@ -148,7 +151,7 @@ final class DomainBilling
         $price = new Price(['price' => $service->price, 'currency' => $service->currency, 'tax' => Settings::tax($service->user)]);
         unset($policy['sponsorship']);
         $uid = $service->product?->server?->settings->firstWhere('key', 'uid')?->value;
-        $account = $policy['account_fingerprint'] ?? (is_string($uid) && $uid !== '' ? hash('sha256', 'sandbox:'.strtolower($uid)) : null);
+        $account = $policy['account_fingerprint'] ?? (is_string($uid) && $uid !== '' ? RuntimeGuard::serverFingerprint($service->product?->server) : null);
         return array_merge($policy, ['billing_managed' => true, 'dispatch_marker_version' => 1, 'calendar' => $calendar,
             'retail_minor' => $this->minor($service->price), 'original_net_minor' => $this->minor($price->subtotal),
             'currency' => $service->currency_code, 'authority_generation' => (int) $domain->authority_generation,
@@ -166,7 +169,7 @@ final class DomainBilling
         }
         $uid = $service->product?->server?->settings->firstWhere('key', 'uid')?->value;
         if (isset($policy['account_fingerprint']) && (!is_string($uid) || $uid === ''
-            || !hash_equals($policy['account_fingerprint'], hash('sha256', 'sandbox:'.strtolower($uid))))) {
+            || !hash_equals($policy['account_fingerprint'], RuntimeGuard::serverFingerprint($service->product?->server)))) {
             throw new RuntimeException('Registrar account authority requires review.');
         }
         if (isset($policy['provider_account_identity']) && (!is_string($uid) || $uid === ''
@@ -262,6 +265,44 @@ final class DomainBilling
         });
     }
 
+    /**
+     * Queue this cycle's renewal at the reseller's cost. One renewal per expiry cycle,
+     * whatever paid for it. Staff may pass themselves as the actor; the daily run passes null.
+     */
+    public function complimentary(int $domainId, ?User $actor = null): ?Operation
+    {
+        return DB::transaction(function () use ($domainId, $actor) {
+            $domain = Domain::lockForUpdate()->findOrFail($domainId);
+            $service = Service::lockForUpdate()->findOrFail($domain->service_id);
+            $domain->setRelation('service', $service);
+            if (!Pricing::isComplimentary($domain)) { throw new RuntimeException('This domain is not complimentary.'); }
+            $this->assertBinding($domain, $service);
+            if (DomainOperations::writesPaused($domain)) { throw new RuntimeException('Domain renewal requires staff review.'); }
+            if (!$this->registrarEnabled($domain)) { throw new RuntimeException('Processing orders and changes is turned off.'); }
+            if ($service->status !== Service::STATUS_ACTIVE || $service->cancellation()->exists()) { throw new RuntimeException('Renewal is turned off for this domain.'); }
+            $calendar = $this->calendar($domain);
+            $key = 'complimentary:'.$domain->id.':'.$calendar['expiry'];
+            if ($existing = Operation::where('operation_key', $key)->first()) { return $existing; }
+            $cycle = Operation::where('domain_id', $domain->id)->where('action', 'renew')->whereDate('base_expires_at', $calendar['expiry'])
+                ->where(fn ($query) => $query->where('state', '!=', 'rejected')->orWhereNull('state'))->first();
+            if ($cycle) { return $cycle->funding_basis === 'complimentary' ? $cycle : null; }
+            $this->assertEligible($domain, $service);
+            Pricing::syncServicePrice($domain);
+            $service->refresh();
+            $policy = $this->policy($domain);
+            if (!$policy['enabled'] || !empty($policy['automatic_spend_paused'])) { return null; }
+            $operation = Operation::create(['domain_id' => $domain->id, 'service_id' => $service->id,
+                'operation_key' => $key, 'action' => 'renew', 'term' => $policy['term'], 'funding_basis' => 'complimentary',
+                'state' => 'queued', 'amount' => '0.00', 'currency' => $service->currency_code,
+                'base_expires_at' => $calendar['expiry'], 'expected_expires_at' => $domain->provider_expires_at->addYearNoOverflow()->format('Y-m-d'),
+                'authorized_by' => $actor?->id, 'funding_reason' => $actor ? 'Complimentary renewal requested by staff' : 'Complimentary renewal',
+                'policy' => $this->lockedPolicy($domain, $service, $policy, $calendar) + ['complimentary_cap_minor' => Pricing::complimentaryCapMinor((int) $domain->server_id)],
+                'payload' => []]);
+            ExecuteOperation::dispatch($operation->id)->afterCommit();
+            return $operation;
+        });
+    }
+
     public function sweep(): array
     {
         $summary = ['queued' => 0];
@@ -300,6 +341,11 @@ final class DomainBilling
             $policy = $this->policy($domain);
             if (!$policy['enabled'] || !$this->scheduledEnabled($domain) || !$domain->provider_expires_at
                 || $this->calendar($domain)['issue'] > now()->toDateString()) { return $this->health($domainId, 'not_due'); }
+            if (Pricing::isComplimentary($domain)) {
+                $this->assertBinding($domain, $domain->service);
+                $this->assertEligible($domain, $domain->service);
+                return $this->health($domainId, $this->complimentary($domainId) ? 'complimentary' : 'review');
+            }
             if ($this->minor($domain->service?->price) === 0) {
                 $this->assertBinding($domain, $domain->service);
                 if (!$this->sponsorshipApproved($domain, $domain->service, $policy)) { return $this->health($domainId, 'sponsorship_review'); }
@@ -362,7 +408,7 @@ final class DomainBilling
                     || ($policy['domain'] ?? null) !== $domain->domain || ($policy['user_id'] ?? null) !== (int) $domain->user_id
                     || ($policy['service_id'] ?? null) !== (int) $service->id || ($policy['server_id'] ?? null) !== (int) $domain->server_id
                     || isset($policy['account_fingerprint']) && (!is_string($uid) || !is_string($policy['account_fingerprint'])
-                        || !hash_equals($policy['account_fingerprint'], hash('sha256', 'sandbox:'.strtolower($uid))))
+                        || !hash_equals($policy['account_fingerprint'], RuntimeGuard::serverFingerprint($service->product?->server)))
                     || isset($policy['provider_account_identity']) && (!is_string($uid) || !is_string($policy['provider_account_identity'])
                         || !hash_equals($policy['provider_account_identity'], hash('sha256', strtolower(trim($uid)))))) {
                     return 'review';

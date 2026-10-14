@@ -224,7 +224,7 @@ class DomainAdministration
         if (!$service || !$this->operations->validService($service, $candidate) || $service->status !== Service::STATUS_ACTIVE
             || $service->cancellation()->exists() || $domain->status !== 'active' || !$domain->provider_expires_at
             || !$domain->provider_expires_at->isFuture()) { return 'A confirmed active one-year service and future registrar expiry are required.'; }
-        try { $parts = DomainName::parse($domain->domain, ['com']); }
+        try { $parts = DomainName::parse($domain->domain, [$domain->tld]); }
         catch (Throwable) { return 'This TLD has no accepted renewal execution contract. Keep its billing under review.'; }
         if ($parts['domain'] !== $domain->domain || $parts['sld'] !== $domain->sld || $parts['tld'] !== $domain->tld) { return 'The canonical domain mapping requires review.'; }
         if ($domain->operations()->whereIn('state', self::BLOCKING_STATES)->exists()) { return 'Resolve outstanding registrar or payment requests before enabling this policy.'; }
@@ -248,7 +248,7 @@ class DomainAdministration
             || ($observation['expiry_drift'] ?? null) !== 'none') { return 'Provider identity, confirmed expiry and disabled registrar auto-renew must match.'; }
         try {
             $configuration = $this->readGuard ? ($this->readGuard)((int) $domain->server_id, true) : RuntimeGuard::assertProvider((int) $domain->server_id, true);
-            $account = hash('sha256', 'sandbox:'.strtolower((string) ($configuration['uid'] ?? '')));
+            $account = RuntimeGuard::accountFingerprint($configuration);
             $baseline = $domain->renewal_policy['account_fingerprint'] ?? null;
             if (!is_string($configuration['uid'] ?? null) || $configuration['uid'] === ''
                 || !is_string($observation['account_fingerprint'] ?? null) || !hash_equals($account, $observation['account_fingerprint'])

@@ -173,8 +173,10 @@ final class RegistrarMoney
         $item = $details[0];
         try {
             if (!is_string($binding['domain'] ?? null) || !is_string($item['description'] ?? null)) { return $unknown; }
-            $expected = DomainName::parse($binding['domain'], ['com', 'net', 'us'])['domain'];
-            $actual = DomainName::parse($item['description'], ['com', 'net', 'us'])['domain'];
+            // The binding's own ending is the only suffix the order line may carry.
+            $suffix = substr($binding['domain'], (int) strpos($binding['domain'], '.') + 1);
+            $expected = DomainName::parse($binding['domain'], [$suffix])['domain'];
+            $actual = DomainName::parse($item['description'], [$suffix])['domain'];
         } catch (\Throwable) { return $unknown; }
         $term = $binding['term'] ?? null;
         if ($actual !== $expected || !is_int($term) || $term < 1 || $term > 10

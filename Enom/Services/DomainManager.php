@@ -10,7 +10,9 @@ use Paymenter\Extensions\Servers\Enom\Models\Operation;
 /** Owner-scoped presentation and validated durable management requests. */
 class DomainManager
 {
-    public const ACTIONS = ['nameservers', 'contacts', 'lock', 'epp_sync', 'privacy_enable', 'privacy_disable', 'hosts', 'srv', 'dnssec_add', 'dnssec_delete'];
+    public const ACTIONS = ['nameservers', 'contacts', 'lock', 'epp_sync', 'epp_email', 'privacy_enable', 'privacy_disable', 'hosts', 'srv', 'dnssec_add', 'dnssec_delete'];
+
+    public const DNS_ACTIONS = ['hosts', 'srv', 'dnssec_add', 'dnssec_delete'];
 
     public const CONTACT_FIELDS = ['first_name', 'last_name', 'organization_name', 'address1', 'address2', 'city', 'state_province', 'postal_code', 'country', 'email_address', 'phone', 'phone_ext', 'job_title', 'fax'];
     public const REQUIRED_CONTACT_FIELDS = ['first_name', 'last_name', 'address1', 'city', 'postal_code', 'country', 'email_address', 'phone'];
@@ -57,6 +59,14 @@ class DomainManager
         $automation = DomainAdministration::customer($domain);
         $staffHold = DomainOperations::writesPaused($domain);
         $capabilities = $unresolved->isNotEmpty() || $staffHold ? [] : array_filter($domain->capabilities ?? [], fn ($value) => $value === true);
+        $dnsTools = RuntimeGuard::flag((int) $domain->server_id, 'dns_tools');
+        if (!$dnsTools) { $capabilities = array_diff_key($capabilities, array_flip(self::DNS_ACTIONS)); }
+        if (!empty($capabilities['epp_sync'])) { $capabilities['epp_email'] = true; }
+        // Complimentary renewals are scheduled automatically; clients cannot trigger extra ones.
+        if (Pricing::isComplimentary($domain)) { unset($capabilities['renew']); }
+        $lastEpp = $domain->operations()->where('action', 'epp_email')->whereIn('state', ['queued', 'running', 'succeeded'])->latest('id')->value('created_at');
+        $eppNext = $lastEpp && \Carbon\CarbonImmutable::parse($lastEpp)->addMinutes(10)->isFuture() ? \Carbon\CarbonImmutable::parse($lastEpp)->addMinutes(10)->toIso8601String() : null;
+        $pendingInvoice = $links[(int) ($recent->first(fn ($operation) => in_array($operation->action, ['register', 'transfer', 'renew'], true) && $operation->state === 'awaiting_payment')?->id ?? 0)]['id'] ?? null;
         if ($domain->billing_managed && (!$automation['enabled'] || !$domain->provider_expires_at
             || !in_array($domain->status, ['active', 'expired', 'grace'], true)
             || !($price = RegistrarMoney::decimal((string) $domain->service->price)) || $price === '0.00')) {
@@ -78,7 +88,36 @@ class DomainManager
             // Public retail fact only. A zero price never produces a customer renewal invoice.
             'zero_retail' => RegistrarMoney::decimal((string) $domain->service->price) === '0.00',
             'hosts_digest' => self::digest($cached['hosts']), 'srv_digest' => self::digest($cached['srv']),
+            'price' => ['mode' => Pricing::mode($domain), 'source' => Pricing::source($domain), 'amount' => Pricing::renewalPrice($domain),
+                'currency' => $domain->service->currency_code],
+            'default_nameservers' => RuntimeGuard::defaultNameservers((int) $domain->server_id),
+            'dns_tools' => $dnsTools,
+            'test_environment' => RuntimeGuard::isTest((int) $domain->server_id),
+            'registrant_email_masked' => self::maskEmail($cached['contacts']['registrant']['email_address'] ?? null),
+            'epp_email_available_at' => $eppNext,
+            'contacts_match' => self::contactsMatch(array_intersect_key($cached['contacts'], array_flip($cached['contact_roles']))),
+            // Roles Enom actually stores. For most gTLDs only the registrant is collected.
+            'contact_roles' => $cached['contact_roles'],
+            'pending_invoice_id' => $pendingInvoice,
         ];
+    }
+
+    public static function maskEmail(mixed $email): ?string
+    {
+        if (!is_string($email) || !str_contains($email, '@')) { return null; }
+        [$local, $host] = explode('@', $email, 2);
+        return mb_substr($local, 0, 1).str_repeat('•', max(2, min(6, mb_strlen($local) - 1))).'@'.$host;
+    }
+
+    /** True when every role has the same contact details, so one form can edit them all. */
+    public static function contactsMatch(array $contacts): bool
+    {
+        $roles = array_values(array_filter(array_map(fn ($type) => $contacts[$type] ?? null, ['registrant', 'admin', 'tech', 'auxbilling'])));
+        if (count($roles) < 2) { return true; }
+        $normalize = fn (array $contact) => array_map(fn ($value) => is_string($value) ? strtolower(trim($value)) : $value, array_intersect_key($contact, array_flip(self::REQUIRED_CONTACT_FIELDS)));
+        $first = $normalize($roles[0]);
+        foreach ($roles as $contact) { if ($normalize($contact) !== $first) { return false; } }
+        return true;
     }
 
     public function request(User $user, int $domainId, string $action, array $payload): Operation
@@ -87,8 +126,11 @@ class DomainManager
         if (!in_array($action, self::ACTIONS, true)) {
             throw new InvalidArgumentException('Choose a supported domain action.');
         }
-        if (($domain->capabilities[$action] ?? false) !== true) {
-            throw new InvalidArgumentException('This action is unavailable for this domain. Refresh its status or contact support.');
+        if (($domain->capabilities[$action === 'epp_email' ? 'epp_sync' : $action] ?? false) !== true) {
+            throw new InvalidArgumentException('This change is not available for this domain right now. Refresh its status and try again.');
+        }
+        if (in_array($action, self::DNS_ACTIONS, true) && !RuntimeGuard::flag((int) $domain->server_id, 'dns_tools')) {
+            throw new InvalidArgumentException('DNS tools are turned off for this domain.');
         }
         $nonce = $payload['_request_key'] ?? '';
         if (!is_string($nonce) || !preg_match('/\A[a-f0-9]{64}\z/', $nonce)) {
@@ -117,7 +159,8 @@ class DomainManager
     /** Deliberately excludes EPP, provider envelopes, order IDs and arbitrary error text. */
     public static function safeSnapshot(array $snapshot): array
     {
-        $result = ['nameservers' => [], 'contacts' => [], 'locked' => null, 'privacy' => [], 'contact_status' => [], 'hosts' => [], 'srv' => [], 'dnssec' => []];
+        $result = ['nameservers' => [], 'contacts' => [], 'locked' => null, 'privacy' => [], 'contact_status' => [], 'hosts' => [], 'srv' => [], 'dnssec' => [],
+            'contact_roles' => array_values(array_intersect(['registrant', 'admin', 'tech', 'auxbilling'], is_array($snapshot['contact_roles'] ?? null) ? $snapshot['contact_roles'] : ['registrant', 'admin', 'tech', 'auxbilling']))];
         $nameservers = is_array($snapshot['nameservers'] ?? null) ? $snapshot['nameservers'] : [];
         foreach (array_slice($nameservers, 0, 12) as $server) {
             if (is_string($server) && strlen($server) <= 253) {
@@ -175,10 +218,10 @@ class DomainManager
         if ($action === 'nameservers') {
             $servers = $payload['nameservers'] ?? [];
             if (is_string($servers)) {
-                $servers = preg_split('/\R/', trim($servers));
+                $servers = array_values(array_filter(array_map('trim', preg_split('/[\s,]+/', trim($servers)) ?: []), fn ($line) => $line !== ''));
             }
             if (!is_array($servers) || count($servers) < 2 || count($servers) > 12) {
-                throw new InvalidArgumentException('Enter between 2 and 12 nameservers.');
+                throw new InputValidationException(['nameservers' => 'Enter 2 to 12 nameservers, one per line.']);
             }
             $servers = array_map(fn ($server) => strtolower(self::text($server, 253)), $servers);
             foreach ($servers as $index => $server) {
@@ -199,7 +242,7 @@ class DomainManager
         }
         if ($action === 'contacts') {
             $type = $payload['contact_type'] ?? '';
-            if (!in_array($type, ['registrant', 'admin', 'tech', 'auxbilling'], true)) {
+            if (!in_array($type, ['registrant', 'admin', 'tech', 'auxbilling', 'all'], true)) {
                 throw new InputValidationException(['contact_type' => 'Choose a supported contact type.']);
             }
             if (!is_array($payload['contact'] ?? null)) {
@@ -225,7 +268,8 @@ class DomainManager
             if (!preg_match('/\A[A-Z]{2}\z/', $contact['country']) || ($countries && !array_key_exists($contact['country'], $countries))) {
                 $errors['contact.country'] = self::CONTACT_MESSAGES['country'];
             }
-            if (!filter_var($contact['email_address'], FILTER_VALIDATE_EMAIL)) {
+            if (!filter_var($contact['email_address'], FILTER_VALIDATE_EMAIL)
+                || preg_match('/\.(?:invalid|test|example|localhost|local)$/i', (string) $contact['email_address'])) {
                 $errors['contact.email_address'] = self::CONTACT_MESSAGES['email'];
             }
             $phone = self::phone($contact['phone'], $contact['country']);
@@ -247,7 +291,7 @@ class DomainManager
 
             return ['locked' => (bool) $payload['locked']];
         }
-        if (in_array($action, ['epp_sync', 'privacy_enable', 'privacy_disable'], true)) {
+        if (in_array($action, ['epp_sync', 'epp_email', 'privacy_enable', 'privacy_disable'], true)) {
             return [];
         }
         if (in_array($action, ['hosts', 'srv'], true)) {
@@ -275,7 +319,7 @@ class DomainManager
             }
             // The documented zero-record clearing contract is unverified. Fail closed.
             if (!$validated) {
-                throw new InvalidArgumentException('Removing every DNS record is unavailable in this sandbox. Keep at least one record.');
+                throw new InvalidArgumentException('Keep at least one DNS record.');
             }
 
             return ['records' => $validated, 'preimage_digest' => $digest];

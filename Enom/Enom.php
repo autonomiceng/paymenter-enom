@@ -8,11 +8,15 @@ use App\Events\Invoice\Paid;
 use App\Events\InvoiceItem\Created;
 use App\Events\CartItem\Creating as CartItemCreating;
 use App\Exceptions\DisplayException;
+use App\Models\Server as ServerModel;
 use App\Models\Service;
+use App\Models\Setting;
 use Illuminate\Database\Migrations\Migrator;
 use Illuminate\Foundation\Http\Middleware\TrimStrings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schedule;
 use Illuminate\Support\Facades\Schema;
@@ -25,62 +29,91 @@ use Paymenter\Extensions\Servers\Enom\Services\DomainOperations;
 use RuntimeException;
 use Throwable;
 
-#[ExtensionMeta(name: 'Enom sandbox', description: 'Registrar domains with native billing, daily observation and explicit reseller funding.', version: '0.2.6', author: 'Autonomic Engineering')]
+#[ExtensionMeta(name: 'Enom', description: 'Sell and manage domain names through an Enom reseller account.', version: '0.3.0', author: 'Autonomic Engineering')]
 class Enom extends Server
 {
     public function getConfig($values = [])
     {
-        // Descriptions are plain strings. FilamentInput shows them as helper text under each field.
+        $live = ($values['environment'] ?? null) === 'live';
         return [
-            ['name' => 'sandbox', 'label' => 'Sandbox only', 'type' => 'checkbox', 'default' => true, 'database_type' => 'boolean',
-                'description' => 'Keep this on. The extension only works with the Enom test environment, and turning this off stops every registrar request.'],
-            ['name' => 'operations_enabled', 'label' => 'Allow registrar changes', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
-                'description' => 'Lets the worker send registrations, transfers, renewals and domain changes. When on, the worker considers every queued request, including older ones. Each request must still pass its own checks, and a request waits while another request for the same domain is unresolved. Review Enom administration at /admin/enom before turning this on.'],
-            ['name' => 'reads_enabled', 'label' => 'Allow registrar reads', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
-                'description' => 'Lets Paymenter read domain status, expiry and prices from Enom. Reads never buy or change anything. Needed for registrar checks, enrollment and reconciliation.'],
-            ['name' => 'observations_enabled', 'label' => 'Check domains daily', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
-                'description' => 'Checks each domain\'s status and expiry once a day. Also needs Allow registrar reads.'],
-            ['name' => 'billing_enabled', 'label' => 'Schedule domain renewal invoices', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
-                'description' => 'Lets the daily billing run issue renewal invoices for managed domains and finish renewal cancellations. New invoices also need Allow registrar changes.'],
-            ['name' => 'grace_renewals_enabled', 'label' => 'Allow paid renewals during grace', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
-                'description' => 'Allows eligible paid or explicitly sponsored renewals after expiry, subject to current registrar eligibility and complete cost checks. Test expired-domain renewal before enabling this setting. When off, eligible unpaid invoices with no recorded transactions or registrar attempt are cancelled after expiry.'],
-            ['name' => 'managed_billing', 'label' => 'Use registrar expiry for new domains', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
-                'description' => 'Applies to registrations and transfers placed after this is on. Their renewal invoices follow the registrar expiry date. Enroll existing domains one at a time in Enom administration at /admin/enom.'],
-            ['name' => 'issue_days', 'label' => 'Issue renewal invoice, days before expiry', 'type' => 'number', 'default' => 21, 'database_type' => 'integer', 'validation' => 'integer|min:2|max:365',
-                'description' => 'Default for new managed domains. 2 to 365, and more than the payment due days.'],
-            ['name' => 'due_days', 'label' => 'Payment due, days before expiry', 'type' => 'number', 'default' => 7, 'database_type' => 'integer', 'validation' => 'integer|min:1|max:364',
-                'description' => 'Default for new managed domains. 1 to 364, and fewer than the issue days.'],
-            ['name' => 'credits_auto_use', 'label' => 'Pay renewal invoices from customer credit', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
-                'description' => 'Default for managed domains without their own setting. Credit is used only when the customer\'s balance covers the whole invoice.'],
-            ['name' => 'observer_requests_per_minute', 'label' => 'Domain check reads per minute', 'type' => 'number', 'default' => 60, 'database_type' => 'integer', 'validation' => 'integer|min:4|max:300',
-                'description' => 'Limits domain status and renewal-price checks, shared by servers using the same Enom account. This does not cap availability searches or renewal admission reads. 4 to 300.'],
-            ['name' => 'uid', 'label' => 'Sandbox login ID', 'type' => 'password', 'encrypted' => true,
-                'description' => 'Leave blank when creating the server. Add it afterwards with Edit server so it is stored encrypted. Registrar requests refuse credentials that are not encrypted.'],
-            ['name' => 'token', 'label' => 'Sandbox API token', 'type' => 'password', 'encrypted' => true,
-                'description' => 'Leave blank when creating the server. Add it afterwards with Edit server so it is stored encrypted.'],
-            ['name' => 'lead_days', 'label' => 'Service due date offset, unmanaged domains', 'type' => 'number', 'default' => 30, 'database_type' => 'integer', 'validation' => 'integer|min:1|max:90',
-                'description' => 'Only for domains outside managed billing. Sets the native service due date this many days before the registrar expiry. 1 to 90.'],
+            ['name' => 'environment', 'label' => 'Enom environment', 'type' => 'select', 'required' => true, 'default' => 'test', 'live' => true,
+                'options' => ['test' => 'Test (resellertest.enom.com)', 'live' => 'Live (reseller.enom.com)'],
+                'description' => $live
+                    ? 'Live registers real domains and charges your Enom balance. After saving, confirm live mode on Domains → Enom setup.'
+                    : 'Test uses Enom\'s reseller test account. Nothing is charged and test domains never go live. Use a separate server for live.'],
+            ['name' => 'uid', 'label' => 'Enom account ID', 'type' => 'text', 'required' => true, 'encrypted' => true,
+                'description' => 'The login ID of your Enom reseller account.'],
+            ['name' => 'token', 'label' => 'API token', 'type' => 'password', 'required' => true, 'encrypted' => true,
+                'description' => 'Create one in Enom under Resellers → API tokens. Enom also needs this server\'s IP address on its allowlist.'],
+            ['name' => 'operations_enabled', 'label' => 'Process orders and changes', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
+                'description' => 'Sends paid registrations, transfers, renewals and domain changes to Enom. Turn off to pause; waiting work is kept and sent when you turn it back on.'],
+            ['name' => 'observations_enabled', 'label' => 'Check domain status daily', 'type' => 'checkbox', 'default' => true, 'database_type' => 'boolean',
+                'description' => 'Reads each domain\'s status and expiry date from Enom once a day.'],
+            ['name' => 'billing_enabled', 'label' => 'Send renewal invoices', 'type' => 'checkbox', 'default' => true, 'database_type' => 'boolean',
+                'description' => 'Invoices clients before their domains expire. Complimentary domains renew without an invoice.'],
+            ['name' => 'issue_days', 'label' => 'Invoice days before expiry', 'type' => 'number', 'default' => 21, 'database_type' => 'integer', 'validation' => 'integer|min:2|max:365'],
+            ['name' => 'due_days', 'label' => 'Due days before expiry', 'type' => 'number', 'default' => 7, 'database_type' => 'integer', 'validation' => 'integer|min:1|max:364',
+                'description' => 'Must be fewer than the invoice days.'],
+            ['name' => 'credits_auto_use', 'label' => 'Pay renewals from account credit', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
+                'description' => 'Used only when the client\'s credit covers the whole invoice.'],
+            ['name' => 'grace_renewals_enabled', 'label' => 'Allow renewal after expiry', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
+                'description' => 'Renews paid domains during the registry grace period, if Enom still allows it at the expected cost.'],
+            ['name' => 'default_nameservers', 'label' => 'Default nameservers', 'type' => 'textarea', 'rows' => 4,
+                'placeholder' => "ns1.example.com\nns2.example.com", 'validation' => ['nullable', 'string', 'max:3000', static function ($attribute, $value, $fail) {
+                    if (!is_string($value) || trim($value) === '') { return; }
+                    if ($error = self::nameserverError(Services\RuntimeGuard::nameserverList($value))) { $fail($error); }
+                }],
+                'description' => 'One per line, 2 to 12. New registrations use these, and clients can switch back to them. Leave blank to use Enom\'s own nameservers.'],
+            ['name' => 'dns_tools', 'label' => 'Show Enom DNS tools', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
+                'description' => 'Lets clients and staff edit DNS records, SRV records and DNSSEC hosted at Enom. Leave off if your nameservers are elsewhere.'],
+            ['name' => 'privacy_price', 'label' => 'ID Protect price per year (USD)', 'type' => 'number', 'validation' => 'nullable|numeric|min:0.01|max:1000',
+                'description' => 'Leave blank to stop selling ID Protect (WHOIS privacy).'],
+            ['name' => 'complimentary_cost_cap', 'label' => 'Complimentary cost limit (USD)', 'type' => 'number', 'default' => 50, 'validation' => 'numeric|min:0|max:10000',
+                'description' => 'A complimentary registration or renewal waits for staff if Enom quotes more than this.'],
+            ['name' => 'observer_requests_per_minute', 'label' => 'Enom requests per minute', 'type' => 'number', 'default' => 60, 'database_type' => 'integer', 'validation' => 'integer|min:4|max:300',
+                'description' => 'Limit for daily status checks, shared by servers using the same Enom account.'],
         ];
+    }
+
+    /** First problem with a nameserver list, or null when it is usable. */
+    public static function nameserverError(array $hosts): ?string
+    {
+        if (count($hosts) < 2 || count($hosts) > 12) { return 'Enter 2 to 12 nameservers, one per line.'; }
+        foreach ($hosts as $host) {
+            if (strlen($host) > 253 || !str_contains($host, '.') || filter_var($host, FILTER_VALIDATE_IP)
+                || !preg_match('/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/D', $host)) {
+                return $host.' is not a valid nameserver hostname.';
+            }
+        }
+        return null;
+    }
+
+    public function testConfig(): bool|string
+    {
+        try {
+            $environment = $this->config('environment') ?: 'test';
+            $uid = trim((string) $this->config('uid'));
+            $token = trim((string) $this->config('token'));
+            if ($uid === '' || $token === '') { return 'Enter the Enom account ID and API token.'; }
+            $result = (new Api\RegistrarClient($uid, $token, null, null, true, $environment))->execute('GetBalance');
+            if ($result->status === 'success') { return true; }
+            $message = $result->value('errors.err1');
+            return is_string($message) && $message !== '' ? 'Enom says: '.mb_substr($message, 0, 200) : 'Enom did not accept the request. Check the account ID, token and IP allowlist.';
+        } catch (Throwable) {
+            return 'Could not reach Enom.';
+        }
     }
 
     public function getProductConfig($values = [])
     {
-        return [
-            ['name' => 'enom_tld', 'label' => 'Domain ending', 'type' => 'select', 'options' => ['com' => '.com'], 'default' => 'com', 'required' => true,
-                'description' => '.com is the only supported ending. Keep this product hidden, with one yearly recurring plan priced in USD, no setup fee, no configurable options and no upgrades. Customers order on the Domains page.'],
-            ['name' => 'enom_register_price', 'label' => 'Registration price, USD before tax', 'type' => 'number', 'required' => true, 'validation' => 'numeric|min:0.01',
-                'description' => 'Charged for a new one-year registration. The renewal price is the yearly plan price.'],
-            ['name' => 'enom_transfer_price', 'label' => 'Transfer price, USD before tax', 'type' => 'number', 'required' => true, 'validation' => 'numeric|min:0.01',
-                'description' => 'Charged for an incoming transfer.'],
-            ['name' => 'enom_privacy_price', 'label' => 'Contact privacy price, USD before tax', 'type' => 'number', 'validation' => 'nullable|numeric|min:0.01',
-                'description' => 'One year of contact privacy. Leave blank to hide privacy purchases.'],
-        ];
+        return [['name' => 'enom_pricing_note', 'type' => 'placeholder',
+            'label' => 'Domain prices are set per ending in Domains → TLDs & pricing. This product is managed by the Enom extension.']];
     }
 
     public function getCheckoutConfig()
     {
-        return [['name' => 'enom_order_path', 'type' => 'text', 'label' => 'Order domains through the Domains page',
-            'required' => true, 'validation' => [function ($attribute, $value, $fail) { $fail('Order domains through the Domains page.'); }]]];
+        return [['name' => 'enom_order_path', 'type' => 'text', 'label' => 'Domain',
+            'required' => true, 'validation' => [function ($attribute, $value, $fail) { $fail('Search for domains on the Domains page.'); }]]];
     }
 
     public function installed(): void
@@ -95,14 +128,16 @@ class Enom extends Server
     public function verifySchema(): void
     {
         $required = [
-            'enom_domains' => ['id', 'service_id', 'user_id', 'server_id', 'domain', 'sld', 'tld', 'status', 'provider_expires_at', 'provider_order_id', 'provider_domain_id', 'snapshot', 'capabilities', 'last_synced_at', 'drift_detected_at', 'billing_managed', 'renewal_policy', 'sponsorship', 'observation', 'authority_generation', 'confirmed_revision', 'created_at', 'updated_at'],
+            'enom_domains' => ['id', 'service_id', 'user_id', 'server_id', 'domain', 'sld', 'tld', 'status', 'provider_expires_at', 'provider_order_id', 'provider_domain_id', 'snapshot', 'capabilities', 'last_synced_at', 'drift_detected_at', 'billing_managed', 'renewal_policy', 'sponsorship', 'observation', 'authority_generation', 'confirmed_revision', 'price_mode', 'created_at', 'updated_at'],
             'enom_operations' => ['id', 'domain_id', 'service_id', 'invoice_id', 'operation_key', 'invoice_item_id', 'action', 'term', 'state', 'payload', 'policy', 'cost', 'funding_basis', 'amount', 'currency', 'lease_expires_at', 'base_expires_at', 'expected_expires_at', 'confirmed_expires_at', 'provider_order_id', 'safe_code', 'request_fingerprint', 'authorized_by', 'funding_reason', 'started_at', 'completed_at', 'created_at', 'updated_at'],
+            'enom_tlds' => ['id', 'server_id', 'tld', 'enabled', 'pricing_mode', 'markup', 'register_price', 'renew_price', 'transfer_price',
+                'cost_register', 'cost_renew', 'cost_transfer', 'costs_synced_at', 'sort_order', 'created_at', 'updated_at'],
             'enom_order_intents' => ['id', 'user_id', 'server_id', 'product_id', 'plan_id', 'domain', 'sld', 'tld', 'action', 'term', 'amount', 'renewal_amount', 'currency', 'service_id', 'invoice_id', 'invoice_item_id', 'payload', 'claimed_at', 'expires_at', 'created_at', 'updated_at'],
         ];
         foreach ($required as $table => $columns) {
             if (!Schema::hasTable($table) || !Schema::hasColumns($table, $columns)) { throw new RuntimeException('Enom extension schema is incomplete.'); }
         }
-        foreach (['enom_domains' => [['domain'], ['service_id']], 'enom_operations' => [['operation_key'], ['invoice_item_id', 'action']], 'enom_order_intents' => [['service_id']]] as $table => $constraints) {
+        foreach (['enom_domains' => [['domain'], ['service_id']], 'enom_operations' => [['operation_key'], ['invoice_item_id', 'action']], 'enom_order_intents' => [['service_id']], 'enom_tlds' => [['server_id', 'tld']]] as $table => $constraints) {
             $indexes = Schema::getIndexes($table);
             foreach ($constraints as $columns) {
                 if (!collect($indexes)->contains(fn ($index) => $index['unique'] && $index['columns'] === $columns)) { throw new RuntimeException('Enom extension uniqueness constraints are incomplete.'); }
@@ -126,11 +161,23 @@ class Enom extends Server
         });
         Service::updating(fn (Service $service) => app(DomainBilling::class)->preserveNativeDate($service));
         Event::listen(CartItemCreating::class, function (CartItemCreating $event) {
-            if ($event->cartItem->product?->server?->extension === 'Enom') { throw new DisplayException('Order domains through the Domains page.'); }
+            if ($event->cartItem->product?->server?->extension === 'Enom') { throw new DisplayException('Search for domains on the Domains page.'); }
         });
-        Event::listen('permissions', fn () => ['admin.enom.manage' => 'Manage Enom domains',
-            'admin.enom.fund' => 'Authorize Enom sponsorship', 'admin.enom.costs' => 'View internal Enom costs']);
+        // Native server Create saves settings without their encrypted flag. Encrypt Enom credentials before the first write.
+        Setting::saving(function (Setting $setting) {
+            if (!in_array($setting->key, ['uid', 'token'], true) || $setting->encrypted || !is_string($setting->value) || $setting->value === ''
+                || $setting->settingable_type !== (new ServerModel)->getMorphClass()
+                || ServerModel::query()->whereKey($setting->settingable_id)->value('extension') !== 'Enom') { return; }
+            $setting->encrypted = true;
+            $setting->value = Crypt::encryptString(trim($setting->value));
+        });
+        Event::listen('permissions', fn () => ['admin.enom.manage' => 'Manage domains',
+            'admin.enom.fund' => 'Give complimentary domains', 'admin.enom.costs' => 'See Enom costs and margins']);
         Event::listen('navigation.dashboard', fn () => ['name' => 'Domains', 'url' => route('enom.domains.index'), 'icon' => 'ri-global', 'priority' => 12]);
+        foreach (['Domain', 'Operation', 'Tld'] as $model) {
+            $policy = __NAMESPACE__.'\\Policies\\'.$model.'Policy';
+            if (class_exists($policy)) { Gate::policy(__NAMESPACE__.'\\Models\\'.$model, $policy); }
+        }
         Schedule::call(function () {
             try { app(DomainOperations::class)->sweep(); } catch (Throwable) {}
         })->name('enom-reconcile')->everyFiveMinutes()->withoutOverlapping(5)->onOneServer();
@@ -153,7 +200,7 @@ class Enom extends Server
     public function createServer(Service $service, $settings = [], $properties = [])
     {
         app(DomainOperations::class)->enqueueService($service);
-        return ['status' => 'Registrar operation queued; confirmation is shown in Domains.'];
+        return ['status' => 'Sent to the domain queue. Progress is shown on the Domains page.'];
     }
 
     public function unsuspendServer(Service $service, $settings = [], $properties = []) { return $this->createServer($service, $settings, $properties); }
@@ -168,7 +215,7 @@ class Enom extends Server
     public function getActions(Service $service, $settings = [], $properties = []): array
     {
         $domain = Domain::where('service_id', $service->id)->where('user_id', Auth::id())->first();
-        return $domain ? [['type' => 'view', 'label' => 'Domain', 'name' => 'domain']] : [];
+        return $domain ? [['type' => 'button', 'label' => 'Manage domain', 'url' => route('enom.domains.show', $domain->id)]] : [];
     }
 
     public function getView(Service $service, $settings = [], $properties = [], $name = 'domain')
