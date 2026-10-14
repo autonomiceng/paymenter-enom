@@ -19,6 +19,7 @@ final class RegistryFields
         $attributes = $result->value('attributes.attribute');
         if ($attributes === null || $attributes === '') { return []; }
         if (is_array($attributes) && !array_is_list($attributes)) { $attributes = [$attributes]; }
+        if (!is_array($attributes)) { throw new \InvalidArgumentException('Unreadable registry fields.'); }
         $schema = [];
         foreach (is_array($attributes) ? $attributes : [] as $attribute) {
             // A field we can't read safely makes the whole ending unsupported rather than silently optional.
@@ -34,6 +35,9 @@ final class RegistryFields
                 if (!is_array($option) || !is_string($option['value'] ?? null) || $option['value'] === '') { continue; }
                 $requires = $option['requires']['attribute'] ?? [];
                 if (is_array($requires) && !array_is_list($requires)) { $requires = [$requires]; }
+                if (!is_array($requires) || array_filter($requires, fn ($item) => !is_array($item) || !is_string($item['name'] ?? null))) {
+                    throw new \InvalidArgumentException('Unreadable registry field dependency.');
+                }
                 $choices[] = ['value' => $option['value'], 'label' => self::text($option['title'] ?? null) ?: $option['value'],
                     'description' => self::text($option['description'] ?? null),
                     'requires' => array_values(array_filter(array_map(fn ($item) => is_array($item) && is_string($item['name'] ?? null) ? $item['name'] : null, is_array($requires) ? $requires : [])))];
@@ -60,7 +64,7 @@ final class RegistryFields
     /** Names that would collide with ordinary Enom request parameters. */
     private static function reserved(string $name): bool
     {
-        return (bool) preg_match('/^(?:uid|pw|command|responsetype|sld|tld|numyears|ns\d+|usedns|renewname|renew|emailnotify|usecreditcard|queueorder|allowqueuing|ignorensfail|unlockregistrar|lock|authinfo\d*|ordertype|domaincount|preconfig|customersuppliedprice|(?:registrant|admin|tech|auxbilling|billing)[a-z]+)$/i', $name);
+        return (bool) preg_match('/^(?:uid|pw|command|responsetype|sld|tld|numyears|overrideorder|usewiretransfer|deleteorderdetail|premiumdomain|chargeamount|creditcard[a-z]*|cvv2|ccname|ns\d+|usedns|renewname|renew|emailnotify|usecreditcard|queueorder|allowqueuing|ignorensfail|unlockregistrar|lock|authinfo\d*|ordertype|domaincount|preconfig|customersuppliedprice|(?:registrant|admin|tech|auxbilling|billing)[a-z]+)$/i', $name);
     }
 
     /** Whether every field the registry needs can be collected by the order form. */

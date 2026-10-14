@@ -65,6 +65,8 @@ final class DomainBilling
     public static function maxRenewalYears(Domain $domain): int
     {
         if (!$domain->provider_expires_at) { return 0; }
+        // After expiry, Enom renews through UpdateExpiredDomains one year at a time.
+        if ($domain->provider_expires_at->lte(now()->startOfDay())) { return 1; }
         $years = 0;
         while ($years < 10 && $domain->provider_expires_at->addYearsNoOverflow($years + 1)->lte(now()->addYearsNoOverflow(10))) { $years++; }
         return $years;
@@ -97,6 +99,8 @@ final class DomainBilling
                 $existingInvoice = $this->existingInvoice($existing, $domain, $service);
                 if ($existing->safe_code !== 'renewal_cancelled_unpaid') {
                     if ($existingInvoice->status === Invoice::STATUS_CANCELLED) { throw new RuntimeException('Cancelled renewal billing requires review.'); }
+                    // An open invoice for this expiry is the renewal; never let a different term look accepted.
+                    if ((int) $existing->term !== $years) { throw new RuntimeException('A renewal invoice for this expiry already exists.'); }
                     return $existingInvoice;
                 }
                 // Resume creates a new obligation; the retired invoice and

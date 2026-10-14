@@ -77,10 +77,13 @@
     const ask = (form, submitter) => {
         const data = form.dataset;
         if (!dialog || typeof dialog.showModal !== 'function') {
-            return window.confirm(data.confirmTitle + '\n\n' + (data.confirmBody || '')) ? Promise.resolve(true) : Promise.resolve(false);
+            const option = form.querySelector('option:checked[data-confirm-body]');
+            return window.confirm(data.confirmTitle + '\n\n' + (option?.dataset.confirmBody || data.confirmBody || '')) ? Promise.resolve(true) : Promise.resolve(false);
         }
         dialog.querySelector('#enom-confirm-title').textContent = data.confirmTitle || 'Are you sure?';
-        dialog.querySelector('#enom-confirm-body').textContent = data.confirmBody || '';
+        // A select can carry its own wording per choice (for example the renewal term and its total).
+        const option = form.querySelector('option:checked[data-confirm-body]');
+        dialog.querySelector('#enom-confirm-body').textContent = option?.dataset.confirmBody || data.confirmBody || '';
         const ok = dialog.querySelector('#enom-confirm-ok');
         ok.textContent = data.confirmOk || 'Continue';
         ok.className = 'enom-btn ' + (data.confirmTone === 'danger' ? 'enom-btn--danger' : 'enom-btn--primary');
@@ -151,7 +154,7 @@
     document.addEventListener('submit', async event => {
         const form = event.target;
         if (!(form instanceof HTMLFormElement) || form.method === 'dialog') return;
-        if (form.matches('[data-enom-form]')) {
+        if (form.matches('[data-enom-form]') && !event.submitter?.hasAttribute('formnovalidate')) {
             const invalid = [...form.querySelectorAll('input, select, textarea')].filter(f => f.id).map(f => [f, fieldError(f)]);
             invalid.forEach(([f, m]) => showError(f, m));
             const first = invalid.find(([, m]) => m);
@@ -191,6 +194,32 @@
         update();
     });
 
+    /* Registry details: a child field shows only when its parent's chosen option requires it. */
+    document.querySelectorAll('[data-enom-registry]').forEach(section => {
+        const children = [...section.querySelectorAll('[data-registry-parent]')];
+        const update = () => children.forEach(wrap => {
+            const parentWrap = [...section.querySelectorAll('[data-registry-field]')].find(w => w.dataset.registryField === wrap.dataset.registryParent);
+            const parent = parentWrap?.querySelector('select');
+            const chosen = parent?.selectedOptions[0];
+            const needed = !parentWrap?.hidden && (!parent || (chosen?.dataset.requires || '').split(' ').includes(wrap.dataset.registryField));
+            wrap.hidden = !needed;
+            wrap.querySelectorAll('input, select').forEach(field => {
+                field.disabled = !needed;
+                if ('required' in field.dataset) field.required = needed;
+            });
+        });
+        section.addEventListener('change', update);
+        update();
+    });
+
+    /* Order term: "Update" re-prices the order and appears once the term changes. */
+    document.querySelectorAll('select[data-enom-term]').forEach(select => {
+        const button = select.form?.querySelector('[data-enom-requote]');
+        const update = () => { if (button) button.hidden = select.value === select.dataset.enomTerm; };
+        select.addEventListener('change', update);
+        update();
+    });
+
     /* Auto-submit for list sort and filters. */
     document.querySelectorAll('select[data-enom-autosubmit]').forEach(select => select.addEventListener('change', () => select.form.submit()));
 
@@ -212,22 +241,47 @@
             badge.className = 'enom-badge enom-tone-' + tone;
             badge.textContent = text;
             status.appendChild(badge);
-            const price = row.querySelector('[data-slot="price"]');
-            price.innerHTML = '';
-            const amount = state === 'available' ? data.price : (state === 'transferable' ? data.transfer_price : null);
-            if (amount) {
-                const strong = document.createElement('strong');
-                strong.textContent = amount + (data.complimentary || state === 'transferable' ? '' : '/yr');
-                price.appendChild(strong);
-                if (!data.complimentary) {
-                    const note = document.createElement('small');
-                    note.textContent = state === 'transferable' ? 'Transfer, adds 1 year' : 'Renews at ' + (data.renew_price || data.price) + '/yr';
-                    price.appendChild(note);
-                }
+            row.enomData = data;
+            const years = row.querySelector('select[data-slot="years"]');
+            if (state === 'available' && years && data.terms && Object.keys(data.terms).length) {
+                // The registry's term limits for this ending. Keep the client's choice when it still fits.
+                const wanted = years.value || list.dataset.years;
+                years.innerHTML = '';
+                Object.keys(data.terms).map(Number).sort((a, b) => a - b).forEach(n => {
+                    const option = document.createElement('option');
+                    option.value = String(n);
+                    option.textContent = n + (n === 1 ? ' year' : ' years');
+                    years.appendChild(option);
+                });
+                years.value = data.terms[wanted] !== undefined ? String(wanted) : years.options[0].value;
+                years.hidden = years.options.length < 2;
             }
+            showPrice(row);
             if (state === 'yours' && data.url) row.querySelector('[data-slot="yours"]')?.setAttribute('href', data.url);
             if (state === 'available') available++;
+            if (state === 'available' && 'resume' in row.dataset) row.querySelector('[data-when~="available"] button')?.focus();
         };
+        const showPrice = row => {
+            const data = row.enomData || {};
+            const state = row.dataset.state;
+            const price = row.querySelector('[data-slot="price"]');
+            price.innerHTML = '';
+            const years = Number(row.querySelector('select[data-slot="years"]')?.value || 1);
+            const total = state === 'available' && data.terms ? data.terms[years] : null;
+            const amount = state === 'available' ? (total || data.price) : (state === 'transferable' ? data.transfer_price : null);
+            if (!amount) return;
+            const strong = document.createElement('strong');
+            const multi = state === 'available' && years > 1;
+            strong.textContent = amount + (data.complimentary || state === 'transferable' || multi ? '' : '/yr');
+            price.appendChild(strong);
+            const note = document.createElement('small');
+            if (data.complimentary) note.textContent = multi ? 'For ' + years + ' years' : '';
+            else if (state === 'transferable') note.textContent = 'Transfer, adds 1 year';
+            else if (multi) note.textContent = 'For ' + years + ' years, then ' + (data.renew_price || data.price) + '/yr';
+            else note.textContent = 'Renews at ' + (data.renew_price || data.price) + '/yr';
+            if (note.textContent) price.appendChild(note);
+        };
+        list.querySelectorAll('select[data-slot="years"]').forEach(select => select.addEventListener('change', () => showPrice(select.closest('[data-enom-result]'))));
         const request = async domain => {
             const response = await fetch(url, {method: 'POST', credentials: 'same-origin',
                 headers: {'Content-Type': 'application/json', 'Accept': 'application/json', 'X-CSRF-TOKEN': token, 'X-Requested-With': 'XMLHttpRequest'},
