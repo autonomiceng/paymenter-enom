@@ -317,6 +317,78 @@ $candidate->update(['policy' => array_replace($candidate->policy, ['account_fing
 [$result, $calls] = $read($candidate);
 checkAdmission(!$result['allowed'] && $calls === [], 'Captured foreign account fingerprint caused provider reads.');
 
+// ---------------------------------------------------------------- 0.4 multi-year renewals
+// A paid N-year obligation: N x the yearly price, expected expiry base + N, policy term N; Enom's quote is per year and scales.
+$makeYears = function (int $years, string $settlement = '') use (&$counter, $user, $server, $product, $plan, $billing): Operation {
+    atAdmission('2026-11-10');
+    $counter++;
+    $service = Service::create(['user_id' => $user->id, 'product_id' => $product->id, 'plan_id' => $plan->id, 'price' => '15.00', 'quantity' => 1,
+        'currency_code' => 'USD', 'status' => 'active', 'expires_at' => null]);
+    $domain = Domain::create(['service_id' => $service->id, 'user_id' => $user->id, 'server_id' => $server->id,
+        'domain' => 'admission-'.$counter.'.com', 'sld' => 'admission-'.$counter, 'tld' => 'com', 'provider_domain_id' => '456', 'status' => 'active',
+        'provider_expires_at' => '2026-12-01', 'billing_managed' => true, 'authority_generation' => 1, 'confirmed_revision' => 1, 'price_mode' => 'custom',
+        'renewal_policy' => ['enabled' => true]]);
+    $invoice = $billing->invoice($domain->id, $user, null, $years);
+    ExtensionHelper::addPayment($invoice, 'Stripe', $settlement ?: number_format(15 * $years, 2, '.', ''), transactionId: 'admission-years-'.$counter);
+    return Operation::where('invoice_id', $invoice->id)->firstOrFail();
+};
+$three = $makeYears(3);
+checkAdmission((int) $three->term === 3 && $three->amount === '45.00' && $three->expected_expires_at->format('Y-m-d') === '2029-12-01'
+    && $three->policy['term'] === 3 && $three->policy['retail_minor'] === 4500 && $three->state === 'queued', 'Paid three-year renewal obligation shape differs.');
+[$result, $calls] = $read($three);
+checkAdmission($result['allowed'] && $result['command'] === 'Extend' && $result['quote']['complete'] && $result['quote']['term'] === 3
+    && $result['quote']['amount'] === '30.00' && $result['quote']['reason'] === 'ordinary_documented_price_per_year', 'Three-year renewal was not admitted at three times the per-year quote: '.json_encode($result['quote']));
+// Enom's MaxExtension is a hard limit whatever the obligation says.
+[$result] = $read($three, ['max' => '2']);
+checkAdmission(!$result['allowed'] && $result['code'] === 'renewal_term_above_registry_limit', 'Term above MaxExtension was admitted: '.$result['code']);
+[$result] = $read($three, ['max' => '3']);
+checkAdmission($result['allowed'], 'Term equal to MaxExtension was refused.');
+// The expected expiry must be base + term exactly.
+$wrongExpiry = $makeYears(2);
+$wrongExpiry->update(['expected_expires_at' => '2027-12-01']);
+[$result, $calls] = $read($wrongExpiry);
+checkAdmission(!$result['allowed'] && $result['code'] === 'expiry_changed' && $calls === [], 'Two-year renewal with a one-year expected expiry was admitted.');
+// The policy term must match the operation term.
+$policyTerm = $makeYears(2);
+$policyTerm->update(['policy' => array_replace($policyTerm->policy, ['term' => 1])]);
+[$result, $calls] = $read($policyTerm);
+checkAdmission(!$result['allowed'] && $result['code'] === 'renewal_policy_binding_changed' && $calls === [], 'Policy term differing from the operation was admitted.');
+// Grace renewals are one year at a time, even for an obligation issued before expiry.
+$graceTwo = $makeYears(2);
+atAdmission('2026-12-09');
+[$result] = $read($graceTwo, ['expired_status' => 'Expired']);
+checkAdmission(!$result['allowed'] && $result['code'] === 'grace_renewal_one_year_only', 'Multi-year grace renewal was admitted: '.$result['code']);
+// The 10-year registry ceiling: from 2026-12-01 at 2026-11-10 at most nine years; none of the refusals writes.
+atAdmission('2026-11-10');
+$ceiling = $makeYears(1)->domain;
+checkAdmission(DomainBilling::maxRenewalYears($ceiling->fresh()) === 9, 'Ten-year ceiling not derived from today: '.DomainBilling::maxRenewalYears($ceiling->fresh()));
+$state = admissionDatabase();
+foreach ([0, 10, 11] as $years) {
+    try { $billing->invoice($ceiling->id, $user, null, $years); checkAdmission(false, $years.'-year renewal invoice accepted.'); }
+    catch (RuntimeException $error) { checkAdmission(str_contains($error->getMessage(), '10-year'), 'Out-of-range term refusal differs: '.$error->getMessage()); }
+}
+checkAdmission($state === admissionDatabase(), 'Refused renewal terms wrote state.');
+// An expired domain renews one year at a time.
+$expiredDomain = $makeYears(1)->domain;
+atAdmission('2026-12-09');
+checkAdmission(DomainBilling::maxRenewalYears($expiredDomain->fresh()) === 1, 'Expired domain offered more than one renewal year.');
+// Complimentary multi-year: staff only, and the scaled quote is compared with the cap.
+atAdmission('2026-11-10');
+$server->settings()->updateOrCreate(['key' => 'complimentary_cost_cap'], ['value' => '25.00']);
+$freeService = Service::create(['user_id' => $user->id, 'product_id' => $product->id, 'plan_id' => $plan->id, 'price' => '0.00', 'quantity' => 1, 'currency_code' => 'USD', 'status' => 'active']);
+$free = Domain::create(['service_id' => $freeService->id, 'user_id' => $user->id, 'server_id' => $server->id, 'domain' => 'admission-free.com', 'sld' => 'admission-free', 'tld' => 'com',
+    'provider_domain_id' => '456', 'status' => 'active', 'provider_expires_at' => '2026-12-01', 'billing_managed' => true, 'authority_generation' => 1, 'confirmed_revision' => 1,
+    'price_mode' => 'complimentary', 'renewal_policy' => ['enabled' => true]]);
+try { $billing->complimentary($free->id, null, 2); checkAdmission(false, 'The daily run queued a multi-year complimentary renewal.'); }
+catch (RuntimeException) { checkAdmission($free->operations()->doesntExist(), 'Refused complimentary term wrote an operation.'); }
+$freeRenewal = $billing->complimentary($free->id, $staff, 3);
+checkAdmission($freeRenewal->funding_basis === 'complimentary' && (int) $freeRenewal->term === 3 && $freeRenewal->expected_expires_at->format('Y-m-d') === '2029-12-01'
+    && $freeRenewal->policy['term'] === 3 && $freeRenewal->policy['complimentary_cap_minor'] === 2500, 'Staff three-year complimentary renewal shape differs.');
+[$result] = $read($freeRenewal, ['price' => '8.00']);
+checkAdmission($result['allowed'] && $result['quote']['amount'] === '24.00', 'Three years under the complimentary cap were refused: '.$result['code']);
+[$result] = $read($freeRenewal, ['price' => '8.95']);
+checkAdmission(!$result['allowed'] && $result['code'] === 'complimentary_cost_above_limit' && $result['quote']['amount'] === '26.85', 'Scaled complimentary quote above the cap was admitted (a one-year comparison would pass).');
+
 checkAdmission($nativeSchema == DB::select("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'enom_%' ORDER BY name"), 'Admission changed native schema.');
 $successful = true;
 echo json_encode(['checks' => $checks, 'status' => 'passed', 'database' => 'isolated-sqlite-memory', 'provider' => 'injected-read-only-evidence',

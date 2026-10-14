@@ -201,7 +201,10 @@ final class RegistrarClient
         }
         if ((int) $data['errcount'] > 0) {
             $code = $this->safeCode($data['rrpcode'] ?? $data['responsecode'] ?? null);
-            $status = !in_array($command, self::WRITES, true) || $this->definitiveRefusal($data) ? 'rejected' : 'unknown';
+            // A glue change the registry refused reports NsSuccess other than 1 alongside its errors; nothing was created or changed.
+            $hostRefused = in_array($command, ['registernameserver', 'updatenameserver', 'deletenameserver'], true)
+                && (string) ($data['nssuccess'] ?? $data['registernameserver']['nssuccess'] ?? '') !== '1';
+            $status = !in_array($command, self::WRITES, true) || $hostRefused || $this->definitiveRefusal($data) ? 'rejected' : 'unknown';
             return new RegistrarResult($status, $code, $data);
         }
         if (isset($data['errors']) && $data['errors'] !== '') {

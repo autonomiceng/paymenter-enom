@@ -402,7 +402,8 @@ foreach (['preference', 'service'] as $cancel) {
 }
 
 // Native managed sale anchors provider identity for future renewal admission.
-executionClock();
+// The fake advances expiry by a year on Purchase; registering on 2026-12-01 makes the one-year term verify.
+executionClock('2026-12-01');
 $name = 'initial-managed-execution.com';
 $fixtures[$name] = ['expiry' => '2026-12-01', 'price' => '10.00', 'available' => true, 'domain_id' => '987', 'product_type' => 'Register'];
 $calls = []; $writes = [];
@@ -466,7 +467,7 @@ foreach (['missing', 'foreign'] as $identity) {
 }
 
 // Initial lifecycle withdrawal stops Purchase/transfer at claim and final dispatch.
-executionClock();
+executionClock('2026-12-01'); // One year before the registered expiry, so the term verifies.
 $name = 'initial-cost-overrun.com';
 $fixtures[$name] = ['expiry' => '2026-12-01', 'price' => '10.00', 'actual' => '13.00', 'available' => true,
     'domain_id' => '990', 'product_type' => 'Register'];

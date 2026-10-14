@@ -29,12 +29,13 @@ $enomCookieJars = [];
 /**
  * Send one request. $user null means a guest. $csrf true runs the CSRF middleware as in production
  * (the testing environment otherwise skips it) and sends the session's XSRF token unless $token is false.
+ * $options['ip'] sets the client address (per-IP limits); $options['jar'] names a separate guest cookie jar.
  */
 function enomHttp(?User $user, string $method, string $uri, array $data = [], array $options = []): Response
 {
     global $app, $enomHttpKernel, $enomCookieJars;
-    $jar = $user ? enomLogin($user) : 'guest';
-    $server = ['REMOTE_ADDR' => '203.0.113.10', 'HTTP_USER_AGENT' => 'enom-tests'];
+    $jar = $user ? enomLogin($user) : ($options['jar'] ?? 'guest');
+    $server = ['REMOTE_ADDR' => $options['ip'] ?? '203.0.113.10', 'HTTP_USER_AGENT' => 'enom-tests'];
     foreach ($options['headers'] ?? [] as $name => $value) { $server['HTTP_'.strtoupper(str_replace('-', '_', $name))] = $value; }
     $cookies = $enomCookieJars[$jar] ?? [];
     if (($options['csrf'] ?? false) && ($options['token'] ?? true) && isset($cookies['XSRF-TOKEN'])) { $server['HTTP_X_XSRF_TOKEN'] = $cookies['XSRF-TOKEN']; }

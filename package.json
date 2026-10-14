@@ -1,6 +1,6 @@
 {
   "name": "paymenter-enom-development",
-  "version": "0.2.6",
+  "version": "0.4.0",
   "private": true,
   "license": "MIT",
   "description": "Offline development tests for the Paymenter Enom extension",

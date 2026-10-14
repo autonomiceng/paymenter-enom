@@ -40,7 +40,8 @@ function mount(html, {fetch, dialog = true, confirm} = {}) {
     w.eval(scripts[0]);
     return {w, d, errors, submits, dom};
 }
-const submit = (w, form, submitter) => form.requestSubmit(submitter || form.querySelector('button[type="submit"]'));
+// The primary button: the order form's term "Update" button (formnovalidate) re-prices without validating.
+const submit = (w, form, submitter) => form.requestSubmit(submitter || form.querySelector('button[type="submit"]:not([formnovalidate])'));
 
 (async () => {
     // ------------------------------------------------------------ availability check queue

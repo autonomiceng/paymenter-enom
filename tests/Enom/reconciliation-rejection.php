@@ -81,9 +81,20 @@ function fixture(string $action = 'transfer'): array {
 }
 function finances(): array {
     $data = [];
-    foreach (['invoices', 'invoice_items', 'invoice_transactions', 'services', 'jobs', 'failed_jobs'] as $table) { $data[$table] = DB::table($table)->orderBy('id')->get()->toArray(); }
+    foreach (['invoices', 'invoice_items', 'invoice_transactions', 'failed_jobs'] as $table) { $data[$table] = DB::table($table)->orderBy('id')->get()->toArray(); }
+    // Registrar work queued by a rejection would be a replay; the refund notification email is the only allowed job.
+    $data['jobs'] = DB::table('jobs')->orderBy('id')->get()
+        ->reject(fn ($job) => (json_decode($job->payload, true)['displayName'] ?? null) === 'App\\Mail\\Mail')->values()->all();
     return $data;
 }
+/** 0.4: a definite rejection of a paid registration/transfer credits the exact paid amount once and cancels its service. */
+function refundedOnce(Operation $operation, string $before): bool {
+    $operation = $operation->fresh();
+    $credit = App\Models\Credit::where('user_id', $operation->domain->user_id)->where('currency_code', 'USD')->value('amount');
+    return ($operation->cost['refund']['amount'] ?? null) === '15.00' && ($operation->cost['refund']['to'] ?? null) === 'account_credit'
+        && (int) round(((float) $credit - (float) $before) * 100) === 1500 && App\Models\Service::find($operation->service_id)?->status === 'cancelled';
+}
+function creditNow(): string { return (string) (App\Models\Credit::where('currency_code', 'USD')->value('amount') ?? '0'); }
 function reconciler(Operation $operation, array $overrides = [], ?Closure $afterRead = null): array {
     $commands = new ArrayObject;
     $data = $overrides + ['id' => $operation->provider_order_id, 'sld' => $operation->domain->sld, 'tld' => 'com', 'header' => '2', 'detail' => '32', 'errcount' => '0'];
@@ -106,13 +117,17 @@ function reconciler(Operation $operation, array $overrides = [], ?Closure $after
 [$operations, $commands] = reconciler($operation);
 verify($operations->funded($operation), 'Fixture must use a genuine funded native ledger.');
 $before = finances();
+$creditBefore = creditNow();
 $result = $operations->reconcile($operation->id);
 verify($result->state === 'rejected', 'Matching rejected transfer stayed pending.');
 verify($domain->fresh()->status === 'transfer_rejected', 'Rejected transfer still labelled pending.');
 verify($result->payload === null && $intent->fresh()->payload === null && $result->completed_at !== null, 'Terminal rejection retained private payload or lacked completion timestamp.');
 verify($result->safe_code === 'provider_rejected:2', 'Terminal rejection lost bounded refusal code.');
-verify(finances() == $before, 'Rejection changed native finances, dates or queues.');
+verify(finances() == $before, 'Rejection changed native invoices, payments or registrar queues.');
+verify(refundedOnce($result, $creditBefore), 'Definite paid transfer rejection was not credited once with its service cancelled.');
 $operations->reconcile($operation->id); $operations->execute($operation->id);
+app(Paymenter\Extensions\Servers\Enom\Services\Refunds::class)->retryPending();
+verify(refundedOnce($result, $creditBefore), 'Replayed reconciliation or refund retry credited the client again.');
 verify($commands->getArrayCopy() === ['TP_GetOrder'], 'Terminal rejection read again or resent a mutation.');
 foreach ([['id' => '999999'], ['sld' => 'foreign'], ['tld' => 'net'], ['header' => '1'], ['header' => '99'], ['detail' => '5'], ['detail' => '99'], ['detail' => ''], ['id' => ''], ['multiple' => true], ['missing_detail' => true], ['header' => '1', 'errcount' => '1'], ['errcount' => '1']] as $overrides) {
     [$candidateDomain, $candidate, $candidateIntent] = fixture();
@@ -159,13 +174,16 @@ foreach (['register' => 'registration_rejected', 'transfer' => 'transfer_rejecte
     [$initial, $initialOperation] = fixture($action);
     $initialOperation->update(['state' => 'queued', 'provider_order_id' => null]);
     $before = finances();
+    $creditBefore = creditNow();
     $refused = refusalExecutor()->execute($initialOperation->id);
     verify($refused->state === 'rejected' && $initial->fresh()->status === $expected && finances() == $before, 'Initial execution rejection failed presentation or changed native accounting.');
+    verify(refundedOnce($refused, $creditBefore), 'Initial paid '.$action.' rejection was not credited once.');
 }
 [$active, $historical] = fixture('register');
 $historical->update(['state' => 'queued', 'provider_order_id' => null]);
 $active->update(['status' => 'active', 'provider_order_id' => 'confirmed-order', 'provider_expires_at' => '2027-10-13']);
 refusalExecutor()->execute($historical->id);
 verify($active->fresh()->status === 'active' && $active->fresh()->provider_order_id === 'confirmed-order', 'Historical rejection overwrote an active domain.');
+verify($active->fresh()->service->status === 'pending' && !isset($historical->fresh()->cost['refund']), 'A request held against an active domain was refunded or cancelled its service.');
 echo 'Reconciliation rejection: '.$checks.' passed; injected provider reads only; SQLite in memory.'.PHP_EOL;
 $successful = true;
