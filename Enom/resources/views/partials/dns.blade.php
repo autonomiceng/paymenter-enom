@@ -1,123 +1,113 @@
+{{-- Enom DNS tools. Shown only when the server's "Show Enom DNS tools" setting is on. Saving replaces the whole list (registrar API contract). --}}
 @php
-    $dnsPaused = !empty($snapshot['writes_blocked']);
-    $typeLabels = ['A' => 'A, IPv4 address', 'AAAA' => 'AAAA, IPv6 address', 'CNAME' => 'CNAME, alias', 'MX' => 'MX, mail server',
-        'MXE' => 'MXE, mail server IP', 'TXT' => 'TXT, text', 'URL' => 'URL, redirect', 'FRAME' => 'FRAME, masked redirect'];
+    $typeLabels = ['A' => 'A (IPv4)', 'AAAA' => 'AAAA (IPv6)', 'CNAME' => 'CNAME (alias)', 'MX' => 'MX (mail)', 'MXE' => 'MXE (mail IP)', 'TXT' => 'TXT (text)', 'URL' => 'URL (redirect)', 'FRAME' => 'FRAME (masked redirect)'];
+    $dnsRetry = fn (string $kind) => old('_enom_form') === 'domain:'.$domainId.':'.$kind;
 @endphp
-@foreach (['hosts' => 'DNS records', 'srv' => 'SRV records'] as $kind => $label)
-<details class="bg-background-secondary border border-neutral p-5 rounded-lg" @if (old('_enom_form') === 'domain:'.$domainId.':'.$kind) open @endif>
-    <summary class="text-xl font-semibold">{{ $label }}</summary>
-    <div class="mt-4 space-y-4">
-        <p class="text-sm">Saving replaces every record in this list. Rows you remove or leave out are deleted. These records work only while the domain uses Enom nameservers.</p>
-        @if ($available($kind))
+@foreach (['hosts' => ['DNS records', 'Used only while the domain uses the registrar’s nameservers. Use @ for the domain itself. Alias and mail targets end with a dot.'],
+           'srv' => ['SRV records', 'Enter the service without the leading underscore, such as sip. The target ends with a dot.']] as $kind => [$label, $help])
+    <section class="enom-section" aria-labelledby="enom-{{ $kind }}-heading">
+        <div class="enom-section__head"><div><h2 id="enom-{{ $kind }}-heading" class="enom-h2">{{ $label }}</h2><p>{{ $help }}</p></div></div>
+        @if ($can($kind))
             @php
-                $retryDns = old('_enom_form') === 'domain:'.$domainId.':'.$kind;
-                $rows = $retryDns ? old('records', []) : [...$cached[$kind], [], [], []];
-                $fields = $kind === 'hosts' ? ['name' => 'Host', 'type' => 'Type', 'address' => 'Address', 'mx_pref' => 'Mail priority'] : ['service' => 'Service', 'protocol' => 'Protocol', 'priority' => 'Priority', 'weight' => 'Weight', 'port' => 'Port', 'target' => 'Target'];
+                $retry = $dnsRetry($kind);
+                $rows = $retry ? old('records', []) : [...$cached[$kind], [], []];
+                $fields = $kind === 'hosts' ? ['name' => 'Host', 'type' => 'Type', 'address' => 'Value', 'mx_pref' => 'Priority'] : ['service' => 'Service', 'protocol' => 'Protocol', 'priority' => 'Priority', 'weight' => 'Weight', 'port' => 'Port', 'target' => 'Target'];
             @endphp
-            <form method="POST" action="{{ route('enom.domains.manage', [$domainId, $kind]) }}" class="space-y-4">
+            <form method="POST" action="{{ route('enom.domains.manage', [$domainId, $kind]) }}">
                 @include('enom::partials.form-key', ['action' => $kind])
-                <input type="hidden" name="preimage_digest" value="{{ $retryDns ? old('preimage_digest', '') : $snapshot[$kind.'_digest'] }}">
-                <div class="overflow-x-auto">
-                    <table class="enom-table w-full text-sm">
-                        <caption class="sr-only">{{ $label }}. Use the blank rows to add records.</caption>
-                        <thead><tr>@foreach ($fields as $field => $fieldLabel)<th scope="col" class="text-left p-2">{{ $fieldLabel }}</th>@endforeach<th scope="col" class="text-left p-2">Remove</th></tr></thead>
+                <input type="hidden" name="preimage_digest" value="{{ $retry ? old('preimage_digest', '') : $snapshot[$kind.'_digest'] }}">
+                <div class="enom-tablewrap">
+                    <table class="enom-tbl" style="min-width:40rem">
+                        <caption class="enom-sr">{{ $label }}. Blank rows add records.</caption>
+                        <thead><tr>@foreach ($fields as $fieldLabel)<th scope="col">{{ $fieldLabel }}</th>@endforeach<th scope="col">Delete</th></tr></thead>
                         <tbody>
                         @foreach ($rows as $index => $record)
                             <tr x-data="{recordType: @js($record['type'] ?? '')}">
                                 @foreach ($fields as $field => $fieldLabel)
-                                    <td class="p-1">
+                                    <td style="padding:.375rem .5rem">
                                         @if ($field === 'type')
-                                            <select x-model="recordType" class="w-full bg-background border border-neutral rounded-md p-2 focus:border-secondary" name="records[{{ $index }}][type]" aria-label="Record {{ $index + 1 }} type">
-                                                <option value="">Choose type</option>
-                                                @foreach (['A', 'AAAA', 'CNAME', 'MX', 'MXE', 'TXT', 'URL', 'FRAME'] as $type)
-                                                    <option value="{{ $type }}" @selected(($record['type'] ?? '') === $type)>{{ $typeLabels[$type] }}</option>
-                                                @endforeach
+                                            <select x-model="recordType" class="enom-input" name="records[{{ $index }}][type]" aria-label="Record {{ $index + 1 }} type">
+                                                <option value="">Type</option>
+                                                @foreach ($typeLabels as $type => $typeLabel)<option value="{{ $type }}" @selected(($record['type'] ?? '') === $type)>{{ $typeLabel }}</option>@endforeach
                                             </select>
                                         @elseif ($field === 'protocol')
-                                            @php
-                                                $protocolValue = strtolower($record['protocol'] ?? '');
-                                                $protocolError = 'records.'.$index.'.protocol';
-                                                $protocolInvalid = $retryDns && $errors->has($protocolError);
-                                            @endphp
-                                            <select id="srv-{{ $index }}-protocol" class="w-full bg-background border border-neutral rounded-md p-2 focus:border-secondary" name="records[{{ $index }}][protocol]" aria-label="Record {{ $index + 1 }} protocol" @if ($protocolInvalid) aria-invalid="true" aria-describedby="srv-{{ $index }}-protocol-error" @endif>
-                                                <option value="" @selected($protocolValue === '')>Choose protocol</option>
-                                                @if ($protocolValue !== '' && !in_array($protocolValue, ['tcp', 'udp'], true))<option value="{{ $protocolValue }}" selected disabled>Choose TCP or UDP (entered: {{ $protocolValue }})</option>@endif
-                                                <option value="tcp" @selected($protocolValue === 'tcp')>TCP</option>
-                                                <option value="udp" @selected($protocolValue === 'udp')>UDP</option>
+                                            @php $protocol = strtolower($record['protocol'] ?? ''); @endphp
+                                            <select class="enom-input" name="records[{{ $index }}][protocol]" aria-label="Record {{ $index + 1 }} protocol" @if ($retry && $errors->has('records.'.$index.'.protocol')) aria-invalid="true" @endif>
+                                                <option value="" @selected($protocol === '')>Protocol</option>
+                                                <option value="tcp" @selected($protocol === 'tcp')>TCP</option>
+                                                <option value="udp" @selected($protocol === 'udp')>UDP</option>
                                             </select>
-                                            @if ($protocolInvalid)<p id="srv-{{ $index }}-protocol-error" class="text-red-500 text-xs">{{ $errors->first($protocolError) }}</p>@endif
                                         @elseif ($field === 'mx_pref')
-                                            <input x-show="recordType === 'MX'" :disabled="recordType !== 'MX'" class="w-full bg-background border border-neutral rounded-md p-2 focus:border-secondary" type="number" min="0" max="65535" name="records[{{ $index }}][mx_pref]" aria-label="Record {{ $index + 1 }} mail priority" value="{{ ($record['type'] ?? '') === 'MX' ? ($record['mx_pref'] ?? '') : '' }}" placeholder="10">
-                                            <span x-show="recordType !== 'MX'" class="text-xs">MX only</span>
+                                            <input x-show="recordType === 'MX'" :disabled="recordType !== 'MX'" class="enom-input" type="number" min="0" max="65535" name="records[{{ $index }}][mx_pref]" aria-label="Record {{ $index + 1 }} mail priority" value="{{ ($record['type'] ?? '') === 'MX' ? ($record['mx_pref'] ?? '') : '' }}" placeholder="10" style="width:5.5rem">
                                         @else
-                                            <input class="w-full bg-background border border-neutral rounded-md p-2 focus:border-secondary" name="records[{{ $index }}][{{ $field }}]" aria-label="Record {{ $index + 1 }} {{ strtolower($fieldLabel) }}" value="{{ $record[$field] ?? ($field === 'name' ? ($record['host'] ?? '') : '') }}" maxlength="{{ $field === 'address' ? 2048 : 253 }}">
+                                            <input class="enom-input" name="records[{{ $index }}][{{ $field }}]" aria-label="Record {{ $index + 1 }} {{ strtolower($fieldLabel) }}" value="{{ $record[$field] ?? ($field === 'name' ? ($record['host'] ?? '') : '') }}" maxlength="{{ $field === 'address' ? 2048 : 253 }}" spellcheck="false">
                                         @endif
                                     </td>
                                 @endforeach
-                                <td class="p-1"><label class="enom-check text-sm"><input type="checkbox" name="records[{{ $index }}][_delete]" value="1" @checked(($record['_delete'] ?? '') === '1') aria-label="Remove record {{ $index + 1 }}"><span aria-hidden="true">Remove</span></label>@if ($kind === 'srv' && isset($record['host_id']))<input type="hidden" name="records[{{ $index }}][host_id]" value="{{ $record['host_id'] }}">@endif</td>
+                                <td style="padding:.375rem .5rem;text-align:center">
+                                    <input type="checkbox" name="records[{{ $index }}][_delete]" value="1" @checked(($record['_delete'] ?? '') === '1') aria-label="Delete record {{ $index + 1 }}" style="width:1.125rem;height:1.125rem;accent-color:var(--e-accent)">
+                                    @if ($kind === 'srv' && isset($record['host_id']))<input type="hidden" name="records[{{ $index }}][host_id]" value="{{ $record['host_id'] }}">@endif
+                                </td>
                             </tr>
                         @endforeach
                         </tbody>
                     </table>
                 </div>
-                @if ($kind === 'hosts')
-                    <p class="text-sm">Use the blank rows to add records, and leave unused rows empty. Use @ for the domain itself. CNAME and MX targets need a final dot, as in the examples below. Mail priority applies only to MX records. TXT values are saved exactly as you enter them, including spaces.</p>
-                @else
-                    <p class="text-sm">Use the blank rows to add records, and leave unused rows empty. Enter the service name without the leading underscore, such as sip. The target needs a final dot, as in the example below.</p>
-                @endif
-                <p class="text-sm">The list can hold up to 50 records. At least one record must stay. TTL cannot be changed here.</p>
-                @include('enom::partials.confirm', ['confirmation' => 'Replace the whole '.$label.' list with the records above.'])
-                <div class="max-w-[300px]"><x-button.primary type="submit">Save {{ $label }}</x-button.primary></div>
+                <div class="enom-row" style="margin-top:1rem">
+                    <button type="submit" class="enom-btn enom-btn--primary">Save {{ strtolower($label) }}</button>
+                    <span class="enom-small enom-muted">Up to 50 records. Fill a blank row to add one.</span>
+                </div>
             </form>
-            @component('enom::partials.disclosure', ['summary' => $kind === 'hosts' ? 'DNS record examples' : 'SRV record example'])
-                @if ($kind === 'hosts')
-                    @include('enom::partials.code-example', ['caption' => 'Common DNS records, one per row in the table.', 'code' => "Host: @     Type: A      Address: 192.0.2.10\nHost: www   Type: CNAME  Address: example.com.\nHost: @     Type: MX     Address: mail.example.com.   Mail priority: 10\nHost: @     Type: TXT    Address: example-verification=placeholder"])
-                @else
-                    @include('enom::partials.code-example', ['caption' => 'One SRV record for a SIP service.', 'code' => "Service: sip  Protocol: TCP  Priority: 10  Weight: 5  Port: 5060  Target: sip.example.com."])
-                @endif
-            @endcomponent
         @else
-            <p class="text-sm">{{ $dnsPaused ? 'Changes are paused while a registrar request is checked.' : $label.' are not available right now. They need Enom nameservers. Refresh status to check again.' }}</p>
+            <p class="enom-small enom-muted">{{ $paused ? 'Editing is paused.' : $label.' are available only while the domain uses the registrar’s nameservers.' }}</p>
         @endif
-    </div>
-</details>
+    </section>
 @endforeach
-<details class="bg-background-secondary border border-neutral p-5 rounded-lg" @if (old('_enom_form') === 'domain:'.$domainId.':dnssec_add') open @endif>
-    <summary class="text-xl font-semibold">DNSSEC</summary>
-    <div class="mt-4 space-y-4">
-        <p class="text-sm">A DS record publishes your DNS provider's signing key at the registry. It does not sign the zone. Copy the values from your DNS provider. Sandbox requests do not create a working public DNSSEC chain.</p>
+<section class="enom-section" aria-labelledby="enom-dnssec-heading">
+    <div class="enom-section__head"><div><h2 id="enom-dnssec-heading" class="enom-h2">DNSSEC</h2><p>Add the DS record your DNS provider gives you.</p></div></div>
+    <div class="enom-stack">
         @forelse ($cached['dnssec'] as $ds)
-            <div class="border border-neutral p-4 rounded-lg space-y-2">
-                <p class="text-sm break-all">Key tag {{ $ds['key_tag'] ?? 'not recorded' }}, algorithm {{ $ds['algorithm'] ?? 'not recorded' }}, digest type {{ $ds['digest_type'] ?? 'not recorded' }}</p>
-                <p class="text-sm break-all">{{ $ds['digest'] ?? '' }}</p>
-                @if ($available('dnssec_delete'))
-                    <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'dnssec_delete']) }}" class="space-y-2">
+            <div class="enom-row" style="justify-content:space-between;border:1px solid var(--e-line);border-radius:.5rem;padding:.75rem 1rem">
+                <div class="enom-small" style="min-width:0">
+                    <strong>Key tag {{ $ds['key_tag'] ?? '—' }}</strong> · algorithm {{ $ds['algorithm'] ?? '—' }} · digest type {{ $ds['digest_type'] ?? '—' }}
+                    <div class="enom-muted" style="word-break:break-all">{{ $ds['digest'] ?? '' }}</div>
+                </div>
+                @if ($can('dnssec_delete'))
+                    <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'dnssec_delete']) }}"
+                        data-confirm-title="Remove this DS record?" data-confirm-ok="Remove" data-confirm-tone="danger" data-confirm-body="If DNSSEC is still on at your DNS provider, removing the wrong record can make the domain unreachable.">
                         @include('enom::partials.form-key', ['action' => 'dnssec_delete'])
                         @foreach (['algorithm', 'digest_type', 'digest', 'key_tag'] as $field)<input type="hidden" name="ds[{{ $field }}]" value="{{ $ds[$field] ?? '' }}">@endforeach
-                        @include('enom::partials.confirm', ['confirmation' => 'Remove this exact DS record from the registry.'])
-                        <div class="max-w-[300px]"><x-button.secondary type="submit">Remove DS record</x-button.secondary></div>
+                        <button type="submit" class="enom-btn enom-btn--secondary enom-btn--sm">Remove</button>
                     </form>
                 @endif
             </div>
         @empty
-            <p class="text-sm">No DS records on record.</p>
+            <p class="enom-small enom-muted">No DS records.</p>
         @endforelse
-        @if ($available('dnssec_add'))
-            <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'dnssec_add']) }}" class="space-y-4 border-t border-neutral pt-4">
-                @include('enom::partials.form-key', ['action' => 'dnssec_add'])
-                {{-- One grid cell per control, so feedback added beside a control never shifts the others. --}}
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
-                    <div class="min-w-0"><x-form.input name="ds[key_tag]" :value="old('_enom_form') === 'domain:'.$domainId.':dnssec_add' ? old('ds.key_tag', '') : ''" label="Key tag" type="number" min="0" max="65535" required /></div>
-                    <div class="min-w-0"><x-form.select name="ds[algorithm]" label="Algorithm" required>@foreach ([8 => 'RSA/SHA-256', 10 => 'RSA/SHA-512', 13 => 'ECDSA P-256/SHA-256', 14 => 'ECDSA P-384/SHA-384', 3 => 'DSA/SHA-1', 5 => 'RSA/SHA-1', 7 => 'RSA/SHA-1 NSEC3', 12 => 'GOST'] as $number => $algorithmLabel)<option value="{{ $number }}" @selected(old('_enom_form') === 'domain:'.$domainId.':dnssec_add' && old('ds.algorithm') == $number)>{{ $number }}: {{ $algorithmLabel }}</option>@endforeach</x-form.select></div>
-                    <div class="min-w-0"><x-form.select name="ds[digest_type]" label="Digest type" required><option value="2" @selected(old('_enom_form') !== 'domain:'.$domainId.':dnssec_add' || old('ds.digest_type') == 2)>2: SHA-256</option><option value="1" @selected(old('_enom_form') === 'domain:'.$domainId.':dnssec_add' && old('ds.digest_type') == 1)>1: SHA-1</option></x-form.select></div>
-                    <div class="min-w-0"><x-form.input name="ds[digest]" :value="old('_enom_form') === 'domain:'.$domainId.':dnssec_add' ? old('ds.digest', '') : ''" label="Hexadecimal digest" required maxlength="64" autocomplete="off" /></div>
-                </div>
-                <p class="text-sm">A SHA-256 digest is 64 hexadecimal characters. A SHA-1 digest is 40.</p>
-                @include('enom::partials.confirm', ['confirmation' => 'Publish this DS record. It matches the signing key from my DNS provider.'])
-                <div class="max-w-[300px]"><x-button.primary type="submit">Add DS record</x-button.primary></div>
-            </form>
-        @else
-            <p class="text-sm">{{ $dnsPaused ? 'Changes are paused while a registrar request is checked.' : 'DNSSEC changes are not available for this domain.' }}</p>
+        @if ($can('dnssec_add'))
+            @php $dsRetry = $dnsRetry('dnssec_add'); @endphp
+            <details class="enom-more" @if ($dsRetry) open @endif>
+                <summary>Add a DS record</summary>
+                <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'dnssec_add']) }}" data-enom-form style="margin-top:.75rem">
+                    @include('enom::partials.form-key', ['action' => 'dnssec_add'])
+                    <div class="enom-fields">
+                        <div data-field><label class="enom-label" for="ds-key-tag">Key tag</label><input id="ds-key-tag" class="enom-input" name="ds[key_tag]" type="number" min="0" max="65535" required value="{{ $dsRetry ? old('ds.key_tag') : '' }}"></div>
+                        <div data-field><label class="enom-label" for="ds-algorithm">Algorithm</label>
+                            <select id="ds-algorithm" class="enom-input" name="ds[algorithm]" required>
+                                @foreach ([13 => 'ECDSA P-256/SHA-256', 8 => 'RSA/SHA-256', 14 => 'ECDSA P-384/SHA-384', 10 => 'RSA/SHA-512', 7 => 'RSA/SHA-1 NSEC3', 5 => 'RSA/SHA-1', 3 => 'DSA/SHA-1', 12 => 'GOST'] as $number => $algorithmLabel)
+                                    <option value="{{ $number }}" @selected($dsRetry && old('ds.algorithm') == $number)>{{ $number }} · {{ $algorithmLabel }}</option>
+                                @endforeach
+                            </select></div>
+                        <div data-field><label class="enom-label" for="ds-digest-type">Digest type</label>
+                            <select id="ds-digest-type" class="enom-input" name="ds[digest_type]" required>
+                                <option value="2" @selected(!$dsRetry || old('ds.digest_type') == 2)>2 · SHA-256</option>
+                                <option value="1" @selected($dsRetry && old('ds.digest_type') == 1)>1 · SHA-1</option>
+                            </select></div>
+                        <div data-field><label class="enom-label" for="ds-digest">Digest</label><input id="ds-digest" class="enom-input" name="ds[digest]" required maxlength="64" autocomplete="off" spellcheck="false" value="{{ $dsRetry ? old('ds.digest') : '' }}"></div>
+                    </div>
+                    <div style="margin-top:1rem"><button type="submit" class="enom-btn enom-btn--primary">Add DS record</button></div>
+                </form>
+            </details>
         @endif
     </div>
-</details>
+</section>

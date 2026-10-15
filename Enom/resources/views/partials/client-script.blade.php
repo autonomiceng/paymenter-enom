@@ -1,0 +1,265 @@
+{{-- One shared confirmation dialog plus progressive enhancement for every client page. Pages work without it. --}}
+@once
+<dialog class="enom-dialog" id="enom-confirm" aria-labelledby="enom-confirm-title" aria-describedby="enom-confirm-body">
+    <form method="dialog">
+        <h2 id="enom-confirm-title"></h2>
+        <p id="enom-confirm-body"></p>
+        <div class="enom-dialog__actions">
+            <button type="submit" value="cancel" class="enom-btn enom-btn--secondary">Cancel</button>
+            <button type="submit" value="ok" class="enom-btn enom-btn--primary" id="enom-confirm-ok"></button>
+        </div>
+    </form>
+</dialog>
+<p class="enom-sr" aria-live="polite" id="enom-live"></p>
+@verbatim
+<script>
+(() => {
+    const roots = document.querySelectorAll('.enom');
+    roots.forEach(root => root.classList.add('enom-js'));
+    const live = document.getElementById('enom-live');
+    const say = text => { if (live) { live.textContent = ''; setTimeout(() => { live.textContent = text; }, 30); } };
+
+    /* Timestamps in the viewer's own time zone. Calendar dates are plain text and never converted. */
+    const full = new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'});
+    const relative = 'RelativeTimeFormat' in Intl ? new Intl.RelativeTimeFormat(undefined, {numeric: 'auto'}) : null;
+    const ago = date => {
+        const seconds = (date.getTime() - Date.now()) / 1000;
+        const steps = [[60, 'second'], [3600, 'minute', 60], [86400, 'hour', 3600], [604800, 'day', 86400], [2629800, 'week', 604800], [31557600, 'month', 2629800], [Infinity, 'year', 31557600]];
+        for (const [limit, unit, size = 1] of steps) {
+            if (Math.abs(seconds) < limit) return relative.format(Math.round(seconds / size), unit);
+        }
+    };
+    document.querySelectorAll('time[data-enom-time]').forEach(node => {
+        const date = new Date(node.getAttribute('datetime'));
+        if (isNaN(date)) return;
+        node.title = full.format(date);
+        node.textContent = node.dataset.enomTime === 'relative' && relative ? ago(date) : full.format(date);
+    });
+
+    /* Tabs. Without script every section shows and the tab links jump to it. */
+    document.querySelectorAll('[data-enom-tabs]').forEach(list => {
+        const tabs = [...list.querySelectorAll('[data-enom-tab]')];
+        const panels = tabs.map(tab => document.getElementById(tab.dataset.enomTab));
+        list.setAttribute('role', 'tablist');
+        const select = (index, focus) => {
+            tabs.forEach((tab, i) => {
+                const on = i === index;
+                tab.setAttribute('aria-selected', on ? 'true' : 'false');
+                tab.tabIndex = on ? 0 : -1;
+                if (panels[i]) panels[i].hidden = !on;
+            });
+            if (focus) tabs[index].focus();
+        };
+        tabs.forEach((tab, i) => {
+            tab.setAttribute('role', 'tab');
+            tab.setAttribute('aria-controls', tab.dataset.enomTab);
+            panels[i]?.setAttribute('role', 'tabpanel');
+            panels[i]?.setAttribute('aria-labelledby', tab.id);
+            tab.addEventListener('click', event => {
+                event.preventDefault();
+                select(i, false);
+                history.replaceState(null, '', i === 0 ? location.pathname + location.search : '#' + tab.dataset.enomTab);
+            });
+            tab.addEventListener('keydown', event => {
+                const step = {ArrowRight: 1, ArrowLeft: -1}[event.key];
+                if (!step) return;
+                event.preventDefault();
+                select((i + step + tabs.length) % tabs.length, true);
+            });
+        });
+        const fromHash = tabs.findIndex(tab => '#' + tab.dataset.enomTab === location.hash);
+        select(fromHash >= 0 ? fromHash : 0, false);
+        if (fromHash >= 0) requestAnimationFrame(() => window.scrollTo(0, Math.max(0, list.getBoundingClientRect().top + window.scrollY - 160)));
+    });
+
+    /* Confirmation for paid or risky actions only. */
+    const dialog = document.getElementById('enom-confirm');
+    const ask = (form, submitter) => {
+        const data = form.dataset;
+        if (!dialog || typeof dialog.showModal !== 'function') {
+            return window.confirm(data.confirmTitle + '\n\n' + (data.confirmBody || '')) ? Promise.resolve(true) : Promise.resolve(false);
+        }
+        dialog.querySelector('#enom-confirm-title').textContent = data.confirmTitle || 'Are you sure?';
+        dialog.querySelector('#enom-confirm-body').textContent = data.confirmBody || '';
+        const ok = dialog.querySelector('#enom-confirm-ok');
+        ok.textContent = data.confirmOk || 'Continue';
+        ok.className = 'enom-btn ' + (data.confirmTone === 'danger' ? 'enom-btn--danger' : 'enom-btn--primary');
+        dialog.returnValue = '';
+        dialog.showModal();
+        ok.focus();
+        return new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue === 'ok'), {once: true}));
+    };
+    const changed = form => (form.dataset.confirmWhenChanged || '').split(',').filter(Boolean).some(name => {
+        const field = form.querySelector('[name="' + name + '"]');
+        return field && !field.disabled && field.value.trim().toLowerCase() !== (field.defaultValue || '').trim().toLowerCase();
+    });
+
+    /* Inline validation: native constraints, shown next to each field. */
+    const messageFor = field => {
+        const v = field.validity;
+        if (v.valueMissing) return field.tagName === 'SELECT' ? 'Choose an option.' : 'Required.';
+        if (v.typeMismatch && field.type === 'email') return 'Enter an email like name@example.com.';
+        if (v.tooLong) return 'This is too long.';
+        if (v.patternMismatch) return field.dataset.patternMessage || 'Check the format.';
+        return field.validationMessage;
+    };
+    const showError = (field, message) => {
+        const id = field.id + '-client-error';
+        let node = document.getElementById(id);
+        if (!node) {
+            node = document.createElement('p');
+            node.id = id;
+            node.className = 'enom-error';
+            (field.closest('[data-field]') || field.parentElement).appendChild(node);
+        }
+        node.textContent = message || '';
+        node.hidden = !message;
+        if (message) {
+            field.setAttribute('aria-invalid', 'true');
+            field.setAttribute('aria-describedby', [field.getAttribute('aria-describedby'), id].filter(Boolean).join(' ').split(' ').filter((v, i, a) => a.indexOf(v) === i).join(' '));
+        } else if (!field.dataset.serverInvalid) {
+            field.removeAttribute('aria-invalid');
+        }
+    };
+    const hostname = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.?$/i;
+    const nameserverError = value => {
+        const hosts = value.split(/[\s,]+/).map(h => h.trim()).filter(Boolean);
+        if (hosts.length < 2) return 'Enter at least 2 nameservers, one per line.';
+        if (hosts.length > 12) return 'Enter no more than 12 nameservers.';
+        for (const host of hosts) {
+            if (/^[0-9.]+$/.test(host) || host.includes(':')) return 'Use hostnames like ns1.example.com, not IP addresses.';
+            if (!hostname.test(host)) return '“' + host + '” isn’t a valid hostname.';
+        }
+        if (new Set(hosts.map(h => h.toLowerCase().replace(/\.$/, ''))).size !== hosts.length) return 'Each nameserver can only be listed once.';
+        return '';
+    };
+    const fieldError = field => {
+        if (field.disabled || field.type === 'hidden') return '';
+        if (field.matches('[data-enom-nameservers]')) return nameserverError(field.value);
+        return field.checkValidity() ? '' : messageFor(field);
+    };
+    document.querySelectorAll('form[data-enom-form]').forEach(form => {
+        form.noValidate = true;
+        const fields = () => [...form.querySelectorAll('input, select, textarea')].filter(f => f.id);
+        fields().forEach(field => {
+            if (field.getAttribute('aria-invalid') === 'true') field.dataset.serverInvalid = '1';
+            field.addEventListener('blur', () => { if (field.value !== '' || field.dataset.touched) showError(field, fieldError(field)); field.dataset.touched = '1'; });
+            field.addEventListener('input', () => { delete field.dataset.serverInvalid; if (field.getAttribute('aria-invalid') === 'true') showError(field, fieldError(field)); });
+        });
+    });
+
+    document.addEventListener('submit', async event => {
+        const form = event.target;
+        if (!(form instanceof HTMLFormElement) || form.method === 'dialog') return;
+        if (form.matches('[data-enom-form]')) {
+            const invalid = [...form.querySelectorAll('input, select, textarea')].filter(f => f.id).map(f => [f, fieldError(f)]);
+            invalid.forEach(([f, m]) => showError(f, m));
+            const first = invalid.find(([, m]) => m);
+            if (first) {
+                event.preventDefault();
+                first[0].closest('details')?.setAttribute('open', '');
+                first[0].focus();
+                first[0].scrollIntoView({block: 'center', behavior: 'smooth'});
+                say('Check the highlighted fields.');
+                return;
+            }
+        }
+        const needs = form.dataset.confirmTitle && (!form.dataset.confirmWhenChanged || changed(form));
+        if (needs && form.dataset.confirmed !== '1') {
+            event.preventDefault();
+            const submitter = event.submitter;
+            if (await ask(form)) {
+                form.dataset.confirmed = '1';
+                form.requestSubmit ? form.requestSubmit(submitter && submitter.form === form ? submitter : undefined) : form.submit();
+            }
+            return;
+        }
+        form.querySelectorAll('button[type="submit"]').forEach(b => { b.dataset.busy = '1'; setTimeout(() => b.disabled = true, 0); });
+    });
+
+    window.addEventListener('pageshow', () => document.querySelectorAll('.enom button[data-busy]').forEach(b => { b.disabled = false; delete b.dataset.busy; }));
+
+    /* Show/hide dependent sections (custom nameservers, separate contacts). Hidden fields are disabled so they don't submit. */
+    document.querySelectorAll('[data-enom-reveal]').forEach(section => {
+        const controls = [...document.querySelectorAll(section.dataset.enomReveal)];
+        const update = () => {
+            const on = controls.some(c => c.checked) !== ('enomRevealInverse' in section.dataset);
+            section.hidden = !on;
+            section.querySelectorAll('input, select, textarea').forEach(f => { f.disabled = !on; });
+        };
+        document.querySelectorAll(controls.map(c => '[name="' + c.name + '"]').join(',')).forEach(c => c.addEventListener('change', update));
+        update();
+    });
+
+    /* Auto-submit for list sort and filters. */
+    document.querySelectorAll('select[data-enom-autosubmit]').forEach(select => select.addEventListener('change', () => select.form.submit()));
+
+    /* Domain search: check each ending, a few at a time. */
+    document.querySelectorAll('[data-enom-results]').forEach(list => {
+        const url = list.dataset.enomResults;
+        const token = document.querySelector('meta[name="csrf-token"]')?.content || '';
+        const rows = [...list.querySelectorAll('[data-enom-result]')];
+        const label = {available: ['Available', 'ok'], transferable: ['Registered', 'muted'], taken: ['Registered', 'muted'], premium: ['Premium name', 'muted'],
+            managed: ['Already registered here', 'muted'], yours: ['In your account', 'ok'], invalid: ['Not available', 'muted'], error: ['Couldn’t check', 'warn']};
+        let available = 0, done = 0;
+        const render = (row, data) => {
+            const state = label[data.status] ? data.status : 'error';
+            row.dataset.state = state;
+            const [text, tone] = label[state];
+            const status = row.querySelector('[data-slot="status"]');
+            status.innerHTML = '';
+            const badge = document.createElement('span');
+            badge.className = 'enom-badge enom-tone-' + tone;
+            badge.textContent = text;
+            status.appendChild(badge);
+            const price = row.querySelector('[data-slot="price"]');
+            price.innerHTML = '';
+            const amount = state === 'available' ? data.price : (state === 'transferable' ? data.transfer_price : null);
+            if (amount) {
+                const strong = document.createElement('strong');
+                strong.textContent = amount + (data.complimentary || state === 'transferable' ? '' : '/yr');
+                price.appendChild(strong);
+                if (!data.complimentary) {
+                    const note = document.createElement('small');
+                    note.textContent = state === 'transferable' ? 'Transfer, adds 1 year' : 'Renews at ' + (data.renew_price || data.price) + '/yr';
+                    price.appendChild(note);
+                }
+            }
+            if (state === 'yours' && data.url) row.querySelector('[data-slot="yours"]')?.setAttribute('href', data.url);
+            if (state === 'available') available++;
+        };
+        const request = async domain => {
+            const response = await fetch(url, {method: 'POST', credentials: 'same-origin',
+                headers: {'Content-Type': 'application/json', 'Accept': 'application/json', 'X-CSRF-TOKEN': token, 'X-Requested-With': 'XMLHttpRequest'},
+                body: JSON.stringify({domain})});
+            if (response.status === 429) throw new Error('busy');
+            return response.json();
+        };
+        const check = async row => {
+            row.dataset.state = 'checking';
+            const status = row.querySelector('[data-slot="status"]');
+            status.innerHTML = '<span class="enom-checking">Checking</span>';
+            row.querySelector('[data-slot="price"]').innerHTML = '';
+            const note = row.querySelector('[data-slot="retry-note"]');
+            if (note) note.textContent = '';
+            try {
+                let data = await request(row.dataset.domain);
+                // The registrar occasionally fails one lookup under load. Try once more before showing an error.
+                if (data.status === 'error') { await new Promise(r => setTimeout(r, 1200)); data = await request(row.dataset.domain); }
+                render(row, data);
+            } catch (error) {
+                render(row, {status: 'error'});
+                if (note) note.textContent = error.message === 'busy' ? 'Too many searches. Wait a minute, then retry.' : '';
+            }
+            done++;
+            if (done === rows.length) say(available ? available + ' of ' + rows.length + ' names are available.' : 'None of these names are available. Try a different name.');
+        };
+        list.querySelectorAll('[data-enom-retry]').forEach(button => button.addEventListener('click', () => check(button.closest('[data-enom-result]'))));
+        const queue = [...rows];
+        const worker = async () => { while (queue.length) await check(queue.shift()); };
+        Promise.all([worker(), worker()]);
+    });
+})();
+</script>
+@endverbatim
+@endonce

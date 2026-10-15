@@ -1,36 +1,70 @@
+{{-- Contact fields. $prefix: input name prefix (contact or roles[admin]); $errorPrefix: dotted error key (contact or roles.admin);
+     $values: current values; $useOld: read retained input instead; $required: mark required fields; $idPrefix: unique id prefix. --}}
 @php
-    $labels = ['first_name' => 'First name', 'last_name' => 'Last name', 'organization_name' => 'Organization', 'address1' => 'Street address', 'address2' => 'Address line 2', 'city' => 'City', 'state_province' => 'State or province', 'postal_code' => 'Postal code', 'country' => 'Country', 'email_address' => 'Email address', 'phone' => 'Phone', 'phone_ext' => 'Phone extension', 'job_title' => 'Job title', 'fax' => 'Fax'];
+    $required = $required ?? true;
+    $useOld = $useOld ?? false;
+    $values = $values ?? [];
+    $errorPrefix = $errorPrefix ?? 'contact';
+    $idPrefix = $idPrefix ?? 'contact';
     $requiredFields = \Paymenter\Extensions\Servers\Enom\Services\DomainManager::REQUIRED_CONTACT_FIELDS;
-    $retry = old('_enom_form') === ($contactForm ?? '') && (!isset($contactType) || old('contact_type') === $contactType);
-    $contactValues = $retry ? old('contact', []) : $contact;
     $countries = config('app.countries', []);
+    $value = function (string $field) use ($useOld, $values, $errorPrefix) {
+        $v = !empty($useOld) ? old($errorPrefix.'.'.$field, '') : ($values[$field] ?? '');
+        return is_string($v) ? $v : '';
+    };
+    $layout = [
+        'first_name' => ['First name', 'given-name', 'text', ''], 'last_name' => ['Last name', 'family-name', 'text', ''],
+        'organization_name' => ['Organization', 'organization', 'text', 'enom-span'],
+        'email_address' => ['Email', 'email', 'email', ''], 'phone' => ['Phone', 'tel', 'tel', ''],
+        'address1' => ['Street address', 'address-line1', 'text', 'enom-span'], 'address2' => ['Apartment, suite, etc.', 'address-line2', 'text', 'enom-span'],
+        'city' => ['City', 'address-level2', 'text', ''], 'state_province' => ['State or province', 'address-level1', 'text', ''],
+        'postal_code' => ['Postal code', 'postal-code', 'text', ''], 'country' => ['Country', 'country', 'select', ''],
+    ];
+    $extra = ['phone_ext' => ['Phone extension', 'off', 'text'], 'job_title' => ['Job title', 'organization-title', 'text'], 'fax' => ['Fax', 'off', 'tel']];
+    $hasExtra = collect(array_keys($extra))->contains(fn ($f) => $value($f) !== '' || $errors->has($errorPrefix.'.'.$f));
+    $section = $section ?? null; // autocomplete section token keeps browsers from mixing contacts
 @endphp
-<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-    @foreach ($labels as $field => $label)
+<div class="enom-fields">
+    @foreach ($layout as $field => [$label, $auto, $type, $span])
         @php
-            $fieldId = ($contactId ?? 'contact').'-'.$field;
-            $errorKey = 'contact.'.$field;
-            $value = $contactValues[$field] ?? '';
-            $hasError = $retry && $errors->has($errorKey);
+            $id = $idPrefix.'-'.$field;
+            $key = $errorPrefix.'.'.$field;
+            $isRequired = $required && in_array($field, $requiredFields, true);
+            $error = $errors->first($key);
+            $current = $value($field);
+            $described = trim(($field === 'phone' ? $id.'-hint ' : '').($error ? $id.'-error' : ''));
         @endphp
-        <div class="flex flex-col w-full">
-            <label for="{{ $fieldId }}" class="mb-1 text-sm">{{ $label }} @if (in_array($field, $requiredFields))<span class="text-red-500">*</span>@endif</label>
-            @if ($field === 'country')
-                <select id="{{ $fieldId }}" name="contact[country]" data-enom-contact="country" required autocomplete="country" class="block w-full bg-background-secondary border border-neutral rounded-md px-2.5 py-2.5" @if ($hasError) aria-invalid="true" aria-describedby="{{ $fieldId }}-error" @endif>
-                    <option value="" disabled @selected($value === '')>Choose a country</option>
-                    @if ($value !== '' && !array_key_exists(strtoupper($value), $countries))<option value="{{ $value }}" data-enom-unlisted selected>Choose a country (entered: {{ $value }})</option>@endif
+        <div class="{{ $span }}" data-field>
+            <label for="{{ $id }}" class="enom-label">{{ $label }}@if (!in_array($field, $requiredFields, true)) <span class="enom-opt">(optional)</span>@endif</label>
+            @if ($type === 'select')
+                <select id="{{ $id }}" name="{{ $prefix }}[country]" class="enom-input" autocomplete="{{ $section ? $section.' ' : '' }}country" @required($isRequired)
+                    @if ($error) aria-invalid="true" @endif @if ($described) aria-describedby="{{ $described }}" @endif>
+                    <option value="" @selected($current === '')>Choose a country</option>
                     @foreach ($countries as $code => $countryLabel)
-                        @if ($code !== '')
-                            <option value="{{ $code }}" @selected(strtoupper($value) === $code)>{{ $countryLabel }}</option>
-                        @endif
+                        @if ($code !== '')<option value="{{ $code }}" @selected(strtoupper($current) === $code)>{{ $countryLabel }}</option>@endif
                     @endforeach
                 </select>
             @else
-                <input id="{{ $fieldId }}" name="contact[{{ $field }}]" data-enom-contact="{{ $field }}" value="{{ $value }}" type="{{ $field === 'email_address' ? 'email' : ($field === 'phone' ? 'tel' : 'text') }}" maxlength="255" @required(in_array($field, $requiredFields)) class="block w-full bg-background-secondary border border-neutral rounded-md px-2.5 py-2.5" placeholder="{{ $field === 'phone' ? '+1 (555) 234-5678' : $label }}" autocomplete="off" @if ($hasError) aria-invalid="true" @endif @if ($field === 'phone' || $hasError) aria-describedby="{{ $field === 'phone' ? $fieldId.'-hint ' : '' }}{{ $hasError ? $fieldId.'-error' : '' }}" @endif>
+                <input id="{{ $id }}" name="{{ $prefix }}[{{ $field }}]" type="{{ $type }}" value="{{ $current }}" maxlength="255" class="enom-input"
+                    autocomplete="{{ $section ? $section.' ' : '' }}{{ $auto }}" @required($isRequired) @if ($field === 'phone') placeholder="+1 206 555 0100" @endif
+                    @if ($error) aria-invalid="true" @endif @if ($described) aria-describedby="{{ $described }}" @endif>
             @endif
-            @if ($field === 'phone')<p id="{{ $fieldId }}-hint" class="text-xs mt-1">Include a dialing code separated from the number: +1.5552345678 or +44 20 7946 0123. For US/Canada, a ten-digit number is also accepted when its area code and exchange start from 2 to 9. Put extensions in Phone extension.</p>@endif
-            <p id="{{ $fieldId }}-client-error" data-enom-client-error class="text-red-500 text-xs mt-1" hidden></p>
-            @if ($hasError)<p id="{{ $fieldId }}-error" data-enom-server-error class="text-red-500 text-xs mt-1">{{ $errors->first($errorKey) }}</p>@endif
+            @if ($field === 'phone')<p id="{{ $id }}-hint" class="enom-hint">Start with + and your country code.</p>@endif
+            @if ($error)<p id="{{ $id }}-error" class="enom-error">{{ $error }}</p>@endif
         </div>
     @endforeach
+    <details class="enom-more enom-span" @if ($hasExtra) open @endif>
+        <summary>Extension, job title and fax</summary>
+        <div class="enom-fields" style="margin-top:.75rem">
+            @foreach ($extra as $field => [$label, $auto, $type])
+                @php $id = $idPrefix.'-'.$field; $error = $errors->first($errorPrefix.'.'.$field); @endphp
+                <div data-field>
+                    <label for="{{ $id }}" class="enom-label">{{ $label }} <span class="enom-opt">(optional)</span></label>
+                    <input id="{{ $id }}" name="{{ $prefix }}[{{ $field }}]" type="{{ $type }}" value="{{ $value($field) }}" maxlength="255" class="enom-input" autocomplete="{{ $auto }}"
+                        @if ($error) aria-invalid="true" aria-describedby="{{ $id }}-error" @endif>
+                    @if ($error)<p id="{{ $id }}-error" class="enom-error">{{ $error }}</p>@endif
+                </div>
+            @endforeach
+        </div>
+    </details>
 </div>
