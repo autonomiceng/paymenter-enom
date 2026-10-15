@@ -32,8 +32,29 @@ use Throwable;
 #[ExtensionMeta(name: 'Enom', description: 'Sell and manage domain names through an Enom reseller account.', version: '0.3.0', author: 'Autonomic Engineering')]
 class Enom extends Server
 {
+    private static bool $credentialHook = false;
+
+    /**
+     * Native server Create saves settings without their encrypted flag. Encrypt Enom credentials
+     * before the first write. Registered from boot() and from getConfig(), because Paymenter only
+     * boots server extensions that already have a server, and the first one is created through getConfig().
+     */
+    public static function encryptCredentialsOnSave(): void
+    {
+        if (self::$credentialHook) { return; }
+        self::$credentialHook = true;
+        Setting::saving(function (Setting $setting) {
+            if (!in_array($setting->key, ['uid', 'token'], true) || $setting->encrypted || !is_string($setting->value) || $setting->value === ''
+                || $setting->settingable_type !== (new ServerModel)->getMorphClass()
+                || ServerModel::query()->whereKey($setting->settingable_id)->value('extension') !== 'Enom') { return; }
+            $setting->encrypted = true;
+            $setting->value = Crypt::encryptString(trim($setting->value));
+        });
+    }
+
     public function getConfig($values = [])
     {
+        self::encryptCredentialsOnSave();
         $live = ($values['environment'] ?? null) === 'live';
         return [
             ['name' => 'environment', 'label' => 'Enom environment', 'type' => 'select', 'required' => true, 'default' => 'test', 'live' => true,
@@ -44,7 +65,7 @@ class Enom extends Server
             ['name' => 'uid', 'label' => 'Enom account ID', 'type' => 'text', 'required' => true, 'encrypted' => true,
                 'description' => 'The login ID of your Enom reseller account.'],
             ['name' => 'token', 'label' => 'API token', 'type' => 'password', 'required' => true, 'encrypted' => true,
-                'description' => 'Create one in Enom under Resellers → API tokens. Enom also needs this server\'s IP address on its allowlist.'],
+                'description' => 'Create one in Enom under Resellers → API tokens. Enom also needs this server\'s IP address on its allowlist. After saving, test the connection on Domains → Enom setup.'],
             ['name' => 'operations_enabled', 'label' => 'Process orders and changes', 'type' => 'checkbox', 'default' => false, 'database_type' => 'boolean',
                 'description' => 'Sends paid registrations, transfers, renewals and domain changes to Enom. Turn off to pause; waiting work is kept and sent when you turn it back on.'],
             ['name' => 'observations_enabled', 'label' => 'Check domain status daily', 'type' => 'checkbox', 'default' => true, 'database_type' => 'boolean',
@@ -86,22 +107,6 @@ class Enom extends Server
             }
         }
         return null;
-    }
-
-    public function testConfig(): bool|string
-    {
-        try {
-            $environment = $this->config('environment') ?: 'test';
-            $uid = trim((string) $this->config('uid'));
-            $token = trim((string) $this->config('token'));
-            if ($uid === '' || $token === '') { return 'Enter the Enom account ID and API token.'; }
-            $result = (new Api\RegistrarClient($uid, $token, null, null, true, $environment))->execute('GetBalance');
-            if ($result->status === 'success') { return true; }
-            $message = $result->value('errors.err1');
-            return is_string($message) && $message !== '' ? 'Enom says: '.mb_substr($message, 0, 200) : 'Enom did not accept the request. Check the account ID, token and IP allowlist.';
-        } catch (Throwable) {
-            return 'Could not reach Enom.';
-        }
     }
 
     public function getProductConfig($values = [])
@@ -163,14 +168,7 @@ class Enom extends Server
         Event::listen(CartItemCreating::class, function (CartItemCreating $event) {
             if ($event->cartItem->product?->server?->extension === 'Enom') { throw new DisplayException('Search for domains on the Domains page.'); }
         });
-        // Native server Create saves settings without their encrypted flag. Encrypt Enom credentials before the first write.
-        Setting::saving(function (Setting $setting) {
-            if (!in_array($setting->key, ['uid', 'token'], true) || $setting->encrypted || !is_string($setting->value) || $setting->value === ''
-                || $setting->settingable_type !== (new ServerModel)->getMorphClass()
-                || ServerModel::query()->whereKey($setting->settingable_id)->value('extension') !== 'Enom') { return; }
-            $setting->encrypted = true;
-            $setting->value = Crypt::encryptString(trim($setting->value));
-        });
+        self::encryptCredentialsOnSave();
         Event::listen('permissions', fn () => ['admin.enom.manage' => 'Manage domains',
             'admin.enom.fund' => 'Give complimentary domains', 'admin.enom.costs' => 'See Enom costs and margins']);
         Event::listen('navigation.dashboard', fn () => ['name' => 'Domains', 'url' => route('enom.domains.index'), 'icon' => 'ri-global', 'priority' => 12]);

@@ -63,7 +63,11 @@ final class DomainBilling
 
     public function invoice(int $domainId, ?User $actor = null, ?string $nonce = null): Invoice
     {
-        return DB::transaction(function () use ($domainId, $actor) {
+        // Read the owner before the transaction: a plain read inside it would fix an older snapshot.
+        $ownerId = Domain::whereKey($domainId)->value('user_id');
+        return DB::transaction(function () use ($domainId, $actor, $ownerId) {
+            // Client first, like every other writer (orders, pricing, dispatch), to keep one lock order.
+            User::whereKey($ownerId)->lockForUpdate()->first();
             $domain = Domain::lockForUpdate()->findOrFail($domainId);
             $service = Service::lockForUpdate()->findOrFail($domain->service_id);
             $domain->setRelation('service', $service);
@@ -110,7 +114,11 @@ final class DomainBilling
             if (!empty($policy['automatic_spend_paused'])) { throw new RuntimeException('Domain renewal spending requires review.'); }
             if (Pricing::isComplimentary($domain)) { throw new RuntimeException('Complimentary domains renew without an invoice.'); }
             // New invoices charge the current catalogue price; issued invoices above keep theirs.
-            if (Pricing::mode($domain) === 'standard') { Pricing::syncServicePrice($domain); $service->refresh(); }
+            if (Pricing::mode($domain) === 'standard') {
+                if (Pricing::renewalPrice($domain) === null) { throw new RuntimeException('The renewal price for this ending is missing. Set it in TLDs & pricing.'); }
+                Pricing::syncServicePrice($domain);
+                $service->refresh();
+            }
             $amount = $this->minor($service->price);
             if ($amount <= 0) { throw new RuntimeException('A zero-price renewal requires explicit sponsorship.'); }
             $lockedPolicy = $this->lockedPolicy($domain, $service, $policy, $calendar);
@@ -221,7 +229,11 @@ final class DomainBilling
     /** Explicit standing sponsorship never fabricates a customer payment. */
     public function sponsor(int $domainId, ?User $actor = null): ?Operation
     {
-        return DB::transaction(function () use ($domainId, $actor) {
+        // Read the owner before the transaction: a plain read inside it would fix an older snapshot.
+        $ownerId = Domain::whereKey($domainId)->value('user_id');
+        return DB::transaction(function () use ($domainId, $actor, $ownerId) {
+            // Client first, like every other writer (orders, pricing, dispatch), to keep one lock order.
+            User::whereKey($ownerId)->lockForUpdate()->first();
             $domain = Domain::lockForUpdate()->findOrFail($domainId);
             $service = Service::lockForUpdate()->findOrFail($domain->service_id);
             $domain->setRelation('service', $service);
@@ -271,7 +283,11 @@ final class DomainBilling
      */
     public function complimentary(int $domainId, ?User $actor = null): ?Operation
     {
-        return DB::transaction(function () use ($domainId, $actor) {
+        // Read the owner before the transaction: a plain read inside it would fix an older snapshot.
+        $ownerId = Domain::whereKey($domainId)->value('user_id');
+        return DB::transaction(function () use ($domainId, $actor, $ownerId) {
+            // Client first, like every other writer (orders, pricing, dispatch), to keep one lock order.
+            User::whereKey($ownerId)->lockForUpdate()->first();
             $domain = Domain::lockForUpdate()->findOrFail($domainId);
             $service = Service::lockForUpdate()->findOrFail($domain->service_id);
             $domain->setRelation('service', $service);
@@ -342,8 +358,8 @@ final class DomainBilling
             if (!$policy['enabled'] || !$this->scheduledEnabled($domain) || !$domain->provider_expires_at
                 || $this->calendar($domain)['issue'] > now()->toDateString()) { return $this->health($domainId, 'not_due'); }
             if (Pricing::isComplimentary($domain)) {
+                // complimentary() reuses this cycle's request before checking eligibility.
                 $this->assertBinding($domain, $domain->service);
-                $this->assertEligible($domain, $domain->service);
                 return $this->health($domainId, $this->complimentary($domainId) ? 'complimentary' : 'review');
             }
             if ($this->minor($domain->service?->price) === 0) {

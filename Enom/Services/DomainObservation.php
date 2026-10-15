@@ -49,8 +49,7 @@ final class DomainObservation
             if (RateLimiter::remaining($budget, $limit) < count(self::SOURCES)) {
                 return $this->apply($domainId, $capture, [], 'rate_limited');
             }
-            $api = $this->api ?? new EnomApi(new RegistrarClient($configuration['uid'], $configuration['token'], null,
-                fn () => $this->assertAccount((int) $domain->server_id, $account), true));
+            $api = $this->api ?? $this->client((int) $domain->server_id, $configuration, fn () => $this->assertAccount((int) $domain->server_id, $account));
             if (!$api->isReadOnly()) { return $this->apply($domainId, $capture, [], 'read_only_required'); }
             $results = [];
             foreach (self::SOURCES as $source) {
@@ -98,8 +97,7 @@ final class DomainObservation
             // Reserve room for the maximum four commands, including expired inventory.
             if (RateLimiter::remaining($budget, $limit) < 4) { return $this->applyQuote($domainId, $capture, null, 'rate_limited'); }
             $serverId = $capture['binding']['server_id'];
-            $api = $this->api ?? new EnomApi(new RegistrarClient($configuration['uid'], $configuration['token'], null,
-                fn () => $this->assertAccount($serverId, $account), true));
+            $api = $this->api ?? $this->client((int) $serverId, $configuration, fn () => $this->assertAccount($serverId, $account));
             if (!$api->isReadOnly()) { return $this->applyQuote($domainId, $capture, null, 'read_only_required'); }
             try {
                 $evidence = $api->renewalEvidence($capture['binding']['domain'], function (string $kind, $info) use ($serverId, $account, $budget, $capture, $configuration) {
@@ -145,12 +143,20 @@ final class DomainObservation
         return $limit;
     }
 
+    /** Read-only client for the server's own environment and domain endings. */
+    private function client(int $serverId, array $configuration, callable $guard): EnomApi
+    {
+        $suffixes = \Paymenter\Extensions\Servers\Enom\Models\Tld::query()->where('server_id', $serverId)->pluck('tld')
+            ->merge(Domain::query()->where('server_id', $serverId)->distinct()->pluck('tld'))->all();
+        return (new EnomApi(new RegistrarClient(trim($configuration['uid']), trim($configuration['token']), null, $guard, true,
+            RuntimeGuard::environment($configuration))))->withSuffixes($suffixes);
+    }
+
     private function configuration(int $serverId): array
     {
         $configuration = $this->guard ? ($this->guard)($serverId, true) : RuntimeGuard::assertProvider($serverId, true);
         if (!is_array($configuration) || !is_string($configuration['uid'] ?? null) || $configuration['uid'] === ''
-            || !is_string($configuration['token'] ?? null) || $configuration['token'] === ''
-            || !filter_var($configuration['reads_enabled'] ?? $configuration['operations_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+            || !is_string($configuration['token'] ?? null) || $configuration['token'] === '') {
             throw new \RuntimeException('Registrar read permission is unavailable.');
         }
         return $configuration;

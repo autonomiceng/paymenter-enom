@@ -315,6 +315,15 @@ class DomainController extends Controller
         } catch (ModelNotFoundException $exception) {
             throw $exception;
         } catch (Throwable $exception) {
+            if ($exception->getMessage() === 'Domain pricing changed. Search again.') {
+                // Keep what the client typed and show the new price on a fresh quote.
+                try {
+                    $fresh = $this->orders->quote($user, $record->domain, $record->action, 1);
+                    return redirect()->route('enom.domains.order', $fresh['intent_id'])
+                        ->withInput([...$retained, '_enom_form' => 'order:'.$fresh['intent_id']])
+                        ->with('enom_notice', 'The price changed while you were ordering. Check the new total and submit again.');
+                } catch (Throwable) {}
+            }
             report($exception);
             $message = $exception->getMessage() === 'Domain pricing changed. Search again.'
                 ? 'The price changed while you were ordering. Check the name again to see the current price.'
@@ -404,7 +413,8 @@ class DomainController extends Controller
         foreach ([...DomainManager::ACTIONS, 'refresh', 'renew', 'privacy_purchase', 'privacy_renew', 'renewal_preference'] as $action) {
             $keys[$action] = FormKeys::issue($request, 'domain:'.$domain.':'.$action);
         }
-        $privacyPrice = RuntimeGuard::setting((int) $model->server_id, 'privacy_price');
+        $privacyPrice = RuntimeGuard::setting((int) $model->server_id, 'privacy_price')
+            ?? $model->service?->product?->settings->firstWhere('key', 'enom_privacy_price')?->value;
 
         return view('enom::show', [
             'snapshot' => $snapshot, 'keys' => $keys,
@@ -588,7 +598,8 @@ class DomainController extends Controller
             'nameservers' => 'Nameserver change sent. It can take up to 48 hours to reach everyone on the internet.',
             'contacts' => 'Contact change sent. Check the Activity tab for the result.',
             'lock' => $request->input('locked') === '1' ? 'Turning the transfer lock on.' : 'Turning the transfer lock off.',
-            'epp_email', 'epp_sync' => 'Transfer code requested. It will be emailed to the domain owner’s address.',
+            'epp_email' => 'Transfer code requested. Once Enom accepts the request, it emails the code to the domain owner’s address.',
+            'epp_sync' => 'Transfer code reset requested.',
             'privacy_enable' => 'Turning ID Protect on.',
             'privacy_disable' => 'Turning ID Protect off.',
             'hosts', 'srv' => 'DNS change sent.',
@@ -806,7 +817,7 @@ class DomainController extends Controller
             'register' => 'Registration', 'transfer' => 'Transfer in', 'renew' => 'Renewal',
             'privacy_purchase' => 'ID Protect purchase', 'privacy_renew' => 'ID Protect renewal',
             'nameservers' => 'Nameservers changed', 'contacts' => 'Contacts changed',
-            'lock' => 'Transfer lock changed', 'epp_sync' => 'Transfer code reset', 'epp_email' => 'Transfer code emailed',
+            'lock' => 'Transfer lock changed', 'epp_sync' => 'Transfer code reset', 'epp_email' => 'Transfer code email',
             'privacy_enable' => 'ID Protect turned on', 'privacy_disable' => 'ID Protect turned off',
             'hosts' => 'DNS records changed', 'srv' => 'SRV records changed',
             'dnssec_add' => 'DS record added', 'dnssec_delete' => 'DS record removed',

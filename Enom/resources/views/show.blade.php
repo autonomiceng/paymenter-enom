@@ -16,7 +16,8 @@
     $paused = !empty($s['writes_blocked']);
     $renewOn = ($s['renewal_enabled'] ?? true) === true;
     $price = is_array($s['price'] ?? null) ? $s['price'] : [];
-    $free = ($price['mode'] ?? null) === 'complimentary' || (($s['zero_retail'] ?? false) && ($price['mode'] ?? null) !== 'standard');
+    // Only real complimentary authority reads as free. A legacy $0 custom price is shown as unset.
+    $free = ($price['mode'] ?? null) === 'complimentary';
     $amount = $controller::money($price['amount'] ?? null, $price['currency'] ?? 'USD');
     $automation = $s['automation'] ?? [];
     $calendar = $automation['calendar'] ?? [];
@@ -160,12 +161,16 @@
                         @elseif ($free)
                             Renews at no cost.
                         @elseif (!empty($calendar['issue_at']))
-                            Invoice sent @include('enom::partials.date', ['date' => $calendar['issue_at']]), due @include('enom::partials.date', ['date' => $calendar['due_at']]).
+                            @if (\Carbon\CarbonImmutable::parse($calendar['issue_at'])->isFuture())
+                                We’ll invoice you on @include('enom::partials.date', ['date' => $calendar['issue_at']]), due @include('enom::partials.date', ['date' => $calendar['due_at']]).
+                            @else
+                                Invoiced @include('enom::partials.date', ['date' => $calendar['issue_at']]), due @include('enom::partials.date', ['date' => $calendar['due_at']]).
+                            @endif
                         @else
                             We’ll invoice you before it expires.
                         @endif
                     </small></dd></div>
-                <div class="enom-fact"><dt>Renewal price</dt><dd>{{ $free ? 'Complimentary' : ($amount ? $amount.'/yr' : 'Not set') }}</dd></div>
+                <div class="enom-fact"><dt>Renewal price</dt><dd>{{ $free ? 'Complimentary' : ($amount && !($s['zero_retail'] ?? false) ? $amount.'/yr' : 'Not set — contact support') }}</dd></div>
                 <div class="enom-fact"><dt>Transfer lock</dt><dd>{{ $locked === null ? 'Unknown' : ($locked ? 'On' : 'Off') }}</dd></div>
                 @if ($showPrivacy)<div class="enom-fact"><dt>ID Protect</dt><dd>{{ $privacy['enabled'] === true ? 'On' : 'Off' }}</dd></div>@endif
                 <div class="enom-fact"><dt>Nameservers</dt><dd>{{ !$current ? 'Unknown' : ($usingDefault ? 'Default' : 'Custom') }}<small>{{ implode(', ', array_slice($current, 0, 2)) }}{{ count($current) > 2 ? ' +'.(count($current) - 2) : '' }}</small></dd></div>
@@ -348,7 +353,7 @@
                     @endif
                 </div>
                 @if ($can('epp_email') && $eppWaiting)
-                    <p class="enom-small enom-muted">Code sent. You can request another after @include('enom::partials.moment', ['at' => $eppAt]).</p>
+                    <p class="enom-small enom-muted">Transfer code requested. You can ask again after @include('enom::partials.moment', ['at' => $eppAt]).</p>
                 @elseif (!$can('epp_email') && !$paused)
                     <p class="enom-small enom-muted">Transfer codes can’t be requested right now. Refresh and try again.</p>
                 @endif

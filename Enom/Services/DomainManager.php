@@ -114,7 +114,11 @@ class DomainManager
     {
         $roles = array_values(array_filter(array_map(fn ($type) => $contacts[$type] ?? null, ['registrant', 'admin', 'tech', 'auxbilling'])));
         if (count($roles) < 2) { return true; }
-        $normalize = fn (array $contact) => array_map(fn ($value) => is_string($value) ? strtolower(trim($value)) : $value, array_intersect_key($contact, array_flip(self::REQUIRED_CONTACT_FIELDS)));
+        $normalize = function (array $contact) {
+            $values = [];
+            foreach (self::CONTACT_FIELDS as $field) { $values[$field] = strtolower(trim((string) ($contact[$field] ?? ''))); }
+            return $values;
+        };
         $first = $normalize($roles[0]);
         foreach ($roles as $contact) { if ($normalize($contact) !== $first) { return false; } }
         return true;

@@ -36,6 +36,8 @@ class RuntimeGuard
         if (array_key_exists('environment', $config) && !in_array($config['environment'], self::ENVIRONMENTS, true)) {
             throw new RuntimeException('Choose Test or Live as the Enom environment in the server settings.');
         }
+        // Decide before filling in the environment default, which would hide the legacy state.
+        $config['legacy_writes_disabled'] = self::legacyDisabled($config);
         $config['environment'] = self::environment($config);
         $config['enabled'] = (bool) $server->enabled;
         $binding = $config[self::BINDING] ?? null;
@@ -111,7 +113,7 @@ class RuntimeGuard
     public static function assertProvider(int $serverId, bool $readOnly = false): array
     {
         $config = self::configuration($serverId);
-        if (!$readOnly && (!filter_var($config['operations_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN) || self::legacyDisabled($config))) {
+        if (!$readOnly && (!filter_var($config['operations_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN) || $config['legacy_writes_disabled'])) {
             throw new RuntimeException('Processing orders and changes is turned off for this Enom server.');
         }
         return $config;
