@@ -1,0 +1,28 @@
+# Local dependencies and build output
+node_modules/
+vendor/
+dist/
+.scratch/
+.cache/
+__pycache__/
+*.pyc
+
+# Local configuration and private operational material
+.env
+.env.*
+!.env.example
+private/
+backups/
+*.private
+*.private.*
+*.sqlite
+*.sqlite-*
+*.sql
+*.cnf
+*.pem
+*.key
+
+# Editor files
+.idea/
+.vscode/
+*.swp
