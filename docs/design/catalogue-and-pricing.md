@@ -1,6 +1,6 @@
 # Catalogue, pricing and domain management
 
-These contracts describe version 0.3.
+These contracts describe version 0.3. Version 0.4 extends terms, registry details and public search; see [registrar features](registrar-features.md).
 
 ## 1. Environment, credentials and settings
 

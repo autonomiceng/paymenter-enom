@@ -157,24 +157,43 @@ class Catalogue
         $api = $this->operations->apiForServer((int) $tld->server_id, true);
         $details = $api->tldInfo($tld->tld);
         $minimum = $details->value('tlds.tld.registration.minimum');
+        $maximum = $details->value('tlds.tld.registration.maximum');
         $identified = strtolower((string) $details->value('tlds.tld.tld')) === $tld->tld;
         if ($details->status !== 'success' || !$identified || !is_numeric($minimum)) {
-            throw new RuntimeException('Could not confirm that .'.$tld->tld.' can be registered for one year. Try again.');
+            throw new RuntimeException('Could not read .'.$tld->tld.' registration terms from Enom. Try again.');
         }
-        if ((int) $minimum > 1) {
-            throw new InvalidArgumentException('.'.$tld->tld.' must be registered for at least '.(int) $minimum.' years. Only one-year terms are sold for now.');
-        }
+        $min = max(1, (int) $minimum);
+        $max = is_numeric($maximum) ? min(10, max($min, (int) $maximum)) : 10;
+        if ($min > 10) { throw new InvalidArgumentException('.'.$tld->tld.' needs a registration term longer than 10 years.'); }
         $attributes = $api->tldExtendedAttributes($tld->tld);
         if ($attributes->status !== 'success') { throw new RuntimeException('Could not check .'.$tld->tld.' registry requirements with Enom. Try again.'); }
-        if (self::requiresExtraDetails($attributes)) {
-            throw new InvalidArgumentException('.'.$tld->tld.' needs extra registrant details (for example a residency or nexus declaration) that the order form does not collect yet.');
+        try { $fields = RegistryFields::normalize($attributes); } catch (InvalidArgumentException) { $fields = null; }
+        if ($fields === null || !RegistryFields::supported($fields)) {
+            throw new InvalidArgumentException('.'.$tld->tld.' needs registrant details in a form the order page can\'t collect yet.');
         }
+        $tld->min_years = $min;
+        $tld->max_years = $max;
+        $tld->registry_fields = $fields;
         if (Tld::query()->where('tld', $tld->tld)->where('enabled', true)->where('id', '!=', $tld->id)->exists()) {
             throw new InvalidArgumentException('.'.$tld->tld.' is already sold through another Enom server.');
         }
         $tld->enabled = true;
         $tld->save();
         $this->ensureProduct((int) $tld->server_id);
+    }
+
+    /** Registry details the order form collects for this ending. */
+    public function attributesFor(Tld $tld): array
+    {
+        return is_array($tld->registry_fields) ? $tld->registry_fields : [];
+    }
+
+    /** @return list<array{tld: string, register: string, renew: string, transfer: string, min_years: int, max_years: int}> pre-tax */
+    public function publicPrices(): array
+    {
+        return $this->orderable()->map(fn (Tld $tld) => ['tld' => $tld->tld, 'register' => $tld->price('register'),
+            'renew' => $tld->price('renew'), 'transfer' => $tld->price('transfer'),
+            'min_years' => min($tld->terms()), 'max_years' => max($tld->terms())])->values()->all();
     }
 
     /** The hidden native product that domain services belong to. Created on first use. */

@@ -29,13 +29,20 @@ final class RegistrarMoney
         $amount = $extendInfo->status === 'success' && is_array($info) ? self::decimal($info['price'] ?? null) : null;
         $currency = is_array($info) ? self::currency($info['currency'] ?? null) : null;
         $observedAt = self::businessClock($binding);
+        $term = is_int($binding['term'] ?? 1) ? ($binding['term'] ?? 1) : 0;
+        $perYear = $amount;
+        // Enom quotes one year; a multi-year renewal costs that per year.
+        if ($amount !== null && $term >= 1 && $term <= 10) {
+            $minor = (int) str_replace('.', '', $amount) * $term;
+            $amount = intdiv($minor, 100).'.'.str_pad((string) ($minor % 100), 2, '0', STR_PAD_LEFT);
+        }
         $quote = ['state' => $amount === null ? 'unconfirmed' : 'advisory', 'source' => 'GetExtendInfo',
-            'domain' => $binding['domain'] ?? null, 'action' => 'renew', 'term' => 1,
+            'domain' => $binding['domain'] ?? null, 'action' => 'renew', 'term' => $term,
             'amount' => $amount, 'currency' => $currency, 'complete' => false,
             'grace_eligible' => null, 'reason' => 'base_tld_price_only',
             'base_expires_at' => $binding['base_expires_at'] ?? $binding['confirmed_expiry'] ?? $extendInfo->confirmedExpiry()?->format('Y-m-d'),
             'observed_at' => $observedAt?->format(DATE_ATOM)];
-        if (!$check || $check->status !== 'success' || $amount === null || !$observedAt || ($binding['term'] ?? 1) !== 1) { return $quote; }
+        if (!$check || $check->status !== 'success' || $amount === null || !$observedAt || $term < 1 || $term > 10) { return $quote; }
         $domain = $check->value('domains.domain');
         if (is_array($domain) && array_is_list($domain)) { $domain = count($domain) === 1 ? $domain[0] : null; }
         if (!is_array($domain) || !is_string($domain['name'] ?? null)
@@ -49,10 +56,11 @@ final class RegistrarMoney
             return array_replace($quote, ['reason' => 'renewal_currency_unaccepted']);
         }
         if (!is_array($prices) || self::checkPriceCurrency($prices) !== 'USD'
-            || self::decimal($prices['renewal'] ?? null) !== $amount
+            || self::decimal($prices['renewal'] ?? null) !== $perYear
             || (isset($info['currency']) && self::currency($info['currency']) !== 'USD')
             || !is_string($info['registrarhold'] ?? null) || !in_array(strtolower($info['registrarhold']), ['true', '1', 'yes', 'false', '0', 'no'], true)
-            || !is_string($info['maxextension'] ?? null) || !preg_match('/^[1-9]$/D', $info['maxextension'])) { return $quote; }
+            || !is_string($info['maxextension'] ?? null) || !preg_match('/^(?:[1-9]|10)$/D', $info['maxextension'])
+            || (int) $info['maxextension'] < $term) { return $quote; }
         $expiry = self::renewalExpiry($extendInfo, $binding, $authenticatedInfo);
         if (!$expiry) { return $quote; }
         $pastExpiry = $expiry <= $observedAt;
@@ -64,7 +72,7 @@ final class RegistrarMoney
             'currency' => 'USD', 'currency_source' => !array_key_exists('currency', $prices) || $prices['currency'] === ''
                 ? 'documented_check_prices_usd_default' : 'explicit_check_prices_currency',
             'complete' => true, 'grace_eligible' => $pastExpiry ? true : false,
-            'command' => $pastExpiry ? 'UpdateExpiredDomains' : 'Extend', 'reason' => 'ordinary_one_year_documented_price']);
+            'command' => $pastExpiry ? 'UpdateExpiredDomains' : 'Extend', 'reason' => $term === 1 ? 'ordinary_one_year_documented_price' : 'ordinary_documented_price_per_year']);
     }
 
     /**
@@ -152,7 +160,8 @@ final class RegistrarMoney
         // An Extend renewal requires one matching Renew order item.
         // Expired renewal commands and unbound historical orders remain unknown.
         if (!in_array($action, ['register', 'renew'], true)) { return $unknown; }
-        if ($action === 'renew' && (($binding['provider_command'] ?? null) !== 'Extend' || ($binding['term'] ?? null) !== 1)) { return $unknown; }
+        if ($action === 'renew' && (($binding['provider_command'] ?? null) !== 'Extend' || !is_int($binding['term'] ?? null)
+            || $binding['term'] < 1 || $binding['term'] > 10)) { return $unknown; }
         $requiredCommand = $action === 'renew' ? 'extend' : 'purchase';
         $requiredProduct = $action === 'renew' ? 'renew' : 'register';
         $command = $execution?->value('command');

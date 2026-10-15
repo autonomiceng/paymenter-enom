@@ -10,7 +10,10 @@ use Paymenter\Extensions\Servers\Enom\Models\Operation;
 /** Owner-scoped presentation and validated durable management requests. */
 class DomainManager
 {
-    public const ACTIONS = ['nameservers', 'contacts', 'lock', 'epp_sync', 'epp_email', 'privacy_enable', 'privacy_disable', 'hosts', 'srv', 'dnssec_add', 'dnssec_delete'];
+    public const ACTIONS = ['nameservers', 'contacts', 'lock', 'epp_sync', 'epp_email', 'privacy_enable', 'privacy_disable', 'hosts', 'srv', 'dnssec_add', 'dnssec_delete',
+        'glue_add', 'glue_update', 'glue_delete'];
+
+    public const GLUE_ACTIONS = ['glue_add', 'glue_update', 'glue_delete'];
 
     public const DNS_ACTIONS = ['hosts', 'srv', 'dnssec_add', 'dnssec_delete'];
 
@@ -47,7 +50,7 @@ class DomainManager
         $unresolved = $domain->operations()->whereIn('state', DomainOperations::UNRESOLVED_STATES)->pluck('state');
         // Owner-scoped display fields only. Safe codes pass through an allowlist; nothing else is exposed.
         $recent = Operation::query()->where('domain_id', $domain->id)->latest('id')->limit(20)
-            ->get(['id', 'domain_id', 'service_id', 'action', 'state', 'invoice_id', 'invoice_item_id', 'safe_code', 'created_at']);
+            ->get(['id', 'domain_id', 'service_id', 'action', 'state', 'invoice_id', 'invoice_item_id', 'safe_code', 'created_at', 'term', 'cost']);
         // A recorded invoice ID is shown only after exact owner, domain, service and item checks.
         // Unverified or foreign links never enter this DTO, whoever is viewing.
         $links = DomainAdministration::linkedInvoices($recent, [(int) $domain->id => ['service_id' => (int) $domain->service_id, 'user_id' => (int) $domain->user_id]]);
@@ -55,6 +58,10 @@ class DomainManager
             'id' => $operation->id, 'action' => $operation->action,
             'state' => $operation->state, 'created_at' => $operation->created_at,
             'invoice_id' => $links[(int) $operation->id]['id'] ?? null, 'outcome' => DomainPresentation::outcome($operation->safe_code),
+            'term' => (int) $operation->term,
+            // Only the refund summary leaves the encrypted cost record; costs stay private.
+            'refund' => is_array($operation->cost['refund'] ?? null)
+                ? array_intersect_key($operation->cost['refund'], array_flip(['amount', 'currency', 'at'])) : null,
         ]);
         $automation = DomainAdministration::customer($domain);
         $staffHold = DomainOperations::writesPaused($domain);
@@ -62,6 +69,7 @@ class DomainManager
         $dnsTools = RuntimeGuard::flag((int) $domain->server_id, 'dns_tools');
         if (!$dnsTools) { $capabilities = array_diff_key($capabilities, array_flip(self::DNS_ACTIONS)); }
         if (!empty($capabilities['epp_sync'])) { $capabilities['epp_email'] = true; }
+        if ($domain->status === 'active' && !$unresolved->isNotEmpty() && !$staffHold) { $capabilities['glue'] = true; }
         // Complimentary renewals are scheduled automatically; clients cannot trigger extra ones.
         if (Pricing::isComplimentary($domain)) { unset($capabilities['renew']); }
         $lastEpp = $domain->operations()->where('action', 'epp_email')->whereIn('state', ['queued', 'running', 'succeeded'])->latest('id')->value('created_at');
@@ -102,6 +110,34 @@ class DomainManager
         ];
     }
 
+    /** Registries refuse private, reserved and documentation addresses for nameservers. */
+    public static function glueIpError(string $ip): ?string
+    {
+        $binary = filter_var($ip, FILTER_VALIDATE_IP) ? @inet_pton($ip) : false;
+        if ($binary === false) { return 'Enter an IPv4 or IPv6 address.'; }
+        $blocked = strlen($binary) === 4
+            ? ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24',
+                '192.168.0.0/16', '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/3']
+            : ['::/127', '::ffff:0:0/96', '64:ff9b::/96', '100::/64', '2001:db8::/32', '2001::/23', 'fc00::/7', 'fe80::/10', 'ff00::/8'];
+        foreach ($blocked as $range) {
+            [$network, $bits] = explode('/', $range);
+            $net = inet_pton($network);
+            $bytes = intdiv((int) $bits, 8);
+            $rest = (int) $bits % 8;
+            if (strncmp($binary, $net, $bytes) === 0
+                && ($rest === 0 || ((ord($binary[$bytes]) ^ ord($net[$bytes])) & (0xFF << (8 - $rest)) & 0xFF) === 0)) {
+                return 'Use a public IP address; private, shared and example addresses are refused by the registry.';
+            }
+        }
+        return null;
+    }
+
+    /** Capability flag that unlocks an action. */
+    public static function capability(string $action): string
+    {
+        return match (true) { $action === 'epp_email' => 'epp_sync', in_array($action, self::GLUE_ACTIONS, true) => 'glue', default => $action };
+    }
+
     public static function maskEmail(mixed $email): ?string
     {
         if (!is_string($email) || !str_contains($email, '@')) { return null; }
@@ -130,7 +166,7 @@ class DomainManager
         if (!in_array($action, self::ACTIONS, true)) {
             throw new InvalidArgumentException('Choose a supported domain action.');
         }
-        if (($domain->capabilities[$action === 'epp_email' ? 'epp_sync' : $action] ?? false) !== true) {
+        if (($domain->capabilities[self::capability($action)] ?? false) !== true) {
             throw new InvalidArgumentException('This change is not available for this domain right now. Refresh its status and try again.');
         }
         if (in_array($action, self::DNS_ACTIONS, true) && !RuntimeGuard::flag((int) $domain->server_id, 'dns_tools')) {
@@ -164,7 +200,11 @@ class DomainManager
     public static function safeSnapshot(array $snapshot): array
     {
         $result = ['nameservers' => [], 'contacts' => [], 'locked' => null, 'privacy' => [], 'contact_status' => [], 'hosts' => [], 'srv' => [], 'dnssec' => [],
-            'contact_roles' => array_values(array_intersect(['registrant', 'admin', 'tech', 'auxbilling'], is_array($snapshot['contact_roles'] ?? null) ? $snapshot['contact_roles'] : ['registrant', 'admin', 'tech', 'auxbilling']))];
+            'contact_roles' => array_values(array_intersect(['registrant', 'admin', 'tech', 'auxbilling'], is_array($snapshot['contact_roles'] ?? null) ? $snapshot['contact_roles'] : ['registrant', 'admin', 'tech', 'auxbilling'])),
+            'registry' => array_filter(is_array($snapshot['registry'] ?? null) ? $snapshot['registry'] : [],
+                fn ($value, $key) => is_string($key) && preg_match('/^[a-z][a-z0-9_]{1,63}$/D', $key) && is_string($value) && strlen($value) <= 255, ARRAY_FILTER_USE_BOTH),
+            'glue' => array_values(array_filter(array_map(fn ($row) => is_array($row) && is_string($row['host'] ?? null) && is_string($row['ip'] ?? null)
+                ? ['host' => $row['host'], 'ip' => $row['ip']] : null, array_slice(is_array($snapshot['glue'] ?? null) ? $snapshot['glue'] : [], 0, 26))))];
         $nameservers = is_array($snapshot['nameservers'] ?? null) ? $snapshot['nameservers'] : [];
         foreach (array_slice($nameservers, 0, 12) as $server) {
             if (is_string($server) && strlen($server) <= 253) {
@@ -297,6 +337,16 @@ class DomainManager
         }
         if (in_array($action, ['epp_sync', 'epp_email', 'privacy_enable', 'privacy_disable'], true)) {
             return [];
+        }
+        if (in_array($action, self::GLUE_ACTIONS, true)) {
+            $host = strtolower(rtrim(trim((string) ($payload['host'] ?? '')), '.'));
+            if (!preg_match('/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){2,}[a-z0-9-]{2,63}$/D', $host) || strlen($host) > 253) {
+                throw new InputValidationException(['host' => 'Enter a hostname such as ns1.example.com.']);
+            }
+            if ($action === 'glue_delete') { return ['host' => $host]; }
+            $ip = trim((string) ($payload['ip'] ?? ''));
+            if ($error = self::glueIpError($ip)) { throw new InputValidationException(['ip' => $error]); }
+            return ['host' => $host, 'ip' => strtolower($ip)];
         }
         if (in_array($action, ['hosts', 'srv'], true)) {
             $records = $payload['records'] ?? null;

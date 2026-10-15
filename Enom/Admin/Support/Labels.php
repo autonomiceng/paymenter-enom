@@ -120,6 +120,40 @@ final class Labels
         return mb_strimwidth(trim(preg_replace('/\s+/', ' ', $message)), 0, 300, '…');
     }
 
+    /** Request name with its term and, for child nameservers, the host: "Renewal, 3 years". */
+    public static function request(\Paymenter\Extensions\Servers\Enom\Models\Operation $operation): string
+    {
+        $label = self::action($operation->action);
+        if (in_array($operation->action, ['register', 'transfer', 'renew'], true) && (int) $operation->term > 0) {
+            return $label.', '.self::years((int) $operation->term);
+        }
+        if (str_starts_with((string) $operation->action, 'glue_')) {
+            try { $host = $operation->payload['host'] ?? null; } catch (Throwable) { $host = null; }
+            if (is_string($host) && $host !== '' && strlen($host) <= 253) { return $label.', '.$host; }
+        }
+        return $label;
+    }
+
+    public static function years(int $years): string
+    {
+        return $years.' year'.($years === 1 ? '' : 's');
+    }
+
+    /** Account credit given back for a paid request that failed, or null. @return array{amount: string, currency: string, at: ?string}|null */
+    public static function refund(\Paymenter\Extensions\Servers\Enom\Models\Operation $operation): ?array
+    {
+        try { $refund = $operation->cost['refund'] ?? null; } catch (Throwable) { return null; }
+        if (!is_array($refund) || !is_numeric($refund['amount'] ?? null)) { return null; }
+        return ['amount' => (string) $refund['amount'], 'currency' => is_string($refund['currency'] ?? null) ? $refund['currency'] : 'USD',
+            'at' => is_string($refund['at'] ?? null) ? $refund['at'] : null];
+    }
+
+    public static function refundText(\Paymenter\Extensions\Servers\Enom\Models\Operation $operation): ?string
+    {
+        $refund = self::refund($operation);
+        return $refund ? 'Refunded '.self::money($refund['amount'], $refund['currency']).' as credit' : null;
+    }
+
     public static function action(?string $action): string
     {
         return match ($action) {
@@ -131,6 +165,9 @@ final class Labels
             'privacy_enable' => 'ID Protect on',
             'privacy_disable' => 'ID Protect off',
             'provider_renewal_disable' => 'Enom auto-renew off',
+            'glue_add' => 'New child nameserver',
+            'glue_update' => 'Child nameserver change',
+            'glue_delete' => 'Child nameserver removal',
             default => DomainPresentation::action($action),
         };
     }

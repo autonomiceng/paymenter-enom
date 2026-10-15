@@ -48,6 +48,26 @@ final class EnomApi
     public function domainPricing(): RegistrarResult { return $this->client->execute('PE_GetDomainPricing', ['Years' => 1]); }
     public function tldExtendedAttributes(string $tld): RegistrarResult { return $this->client->execute('GetExtAttributes', ['TLD' => strtolower($tld)]); }
     public function tldInfo(string $tld): RegistrarResult { return $this->client->execute('GetTLDDetails', ['TLD' => strtolower($tld)]); }
+    /** Child nameservers (glue). The host must sit under a domain in this account. */
+    public function registerHost(string $host, string $ip): RegistrarResult { return $this->client->execute('RegisterNameServer', ['Add' => 'true', 'NSName' => self::host($host), 'IP' => self::ip($ip)]); }
+    public function updateHost(string $host, string $oldIp, string $newIp): RegistrarResult { return $this->client->execute('UpdateNameServer', ['NS' => self::host($host), 'OldIP' => self::ip($oldIp), 'NewIP' => self::ip($newIp)]); }
+    public function deleteHost(string $host): RegistrarResult { return $this->client->execute('DeleteNameServer', ['NS' => self::host($host)]); }
+    public function hostStatus(string $host): RegistrarResult { return $this->client->execute('CheckNSStatus', ['CheckNSName' => self::host($host)]); }
+
+    private static function host(string $host): string
+    {
+        $host = strtolower(rtrim(trim($host), '.'));
+        if (strlen($host) > 253 || !preg_match('/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){2,}[a-z0-9-]{2,63}$/D', $host)) { throw new \InvalidArgumentException('Invalid nameserver host.'); }
+        return $host;
+    }
+
+    private static function ip(string $ip): string
+    {
+        $ip = trim($ip);
+        if (!filter_var($ip, FILTER_VALIDATE_IP)) { throw new \InvalidArgumentException('Invalid IP address.'); }
+        return $ip;
+    }
+
     public function emailTransferCode(string $domain): RegistrarResult { return $this->call('SynchAuthInfo', $domain, ['EmailEPP' => 'True', 'RunSynchAutoInfo' => 'True']); }
     public function resendTransferApproval(string $domain): RegistrarResult { return $this->call('TP_ResendEmail', $domain); }
 
@@ -101,16 +121,30 @@ final class EnomApi
 
     private function term(int $years): int
     {
-        if ($years !== 1) { throw new \InvalidArgumentException('Only one-year orders are available.'); }
+        if ($years < 1 || $years > 10) { throw new \InvalidArgumentException('Terms are 1 to 10 years.'); }
         return $years;
     }
 
-    public function register(string $domain, array $contacts, array $nameservers = [], int $years = 1): RegistrarResult
+    public function register(string $domain, array $contacts, array $nameservers = [], int $years = 1, array $registry = []): RegistrarResult
     {
         return $this->call('Purchase', $domain, [
             'NumYears' => $this->term($years), 'UnLockRegistrar' => 0, 'RenewName' => 0,
             'EmailNotify' => 0, 'UseCreditCard' => 'no', 'QueueOrder' => 0, 'AllowQueuing' => 0, 'IgnoreNSFail' => 'No',
-        ] + $this->contactSets($contacts) + $this->ns($nameservers));
+        ] + $this->contactSets($contacts) + $this->ns($nameservers) + self::registryFields($registry));
+    }
+
+    /** Registry fields (GetExtAttributes names such as us_nexus) as request parameters. */
+    private static function registryFields(array $registry): array
+    {
+        $fields = [];
+        foreach ($registry as $name => $value) {
+            if (!is_string($name) || !preg_match('/^[a-z][a-z0-9_]{1,63}$/D', $name) || !is_string($value) || $value === ''
+                || strlen($value) > 255 || preg_match('/[\x00-\x1f\x7f]/', $value)) {
+                throw new \InvalidArgumentException('Invalid registry details.');
+            }
+            $fields[$name] = $value;
+        }
+        return $fields;
     }
 
     public function renew(string $domain, int $years = 1): RegistrarResult
@@ -163,7 +197,7 @@ final class EnomApi
             'extend' => $extend, 'check' => $check, 'expired' => $expired];
     }
 
-    public function transfer(string $domain, array $contacts, string $epp): RegistrarResult
+    public function transfer(string $domain, array $contacts, string $epp, array $registry = []): RegistrarResult
     {
         $parts = $this->parse($domain);
         if ($epp === '' || strlen($epp) > 512 || preg_match('/[\x00-\x1f\x7f]/', $epp)) {
@@ -172,7 +206,7 @@ final class EnomApi
         return $this->client->execute('TP_CreateOrder', [
             'OrderType' => 'Autoverification', 'DomainCount' => 1, 'SLD1' => $parts['sld'], 'TLD1' => $parts['tld'],
             'AuthInfo1' => $epp, 'PreConfig' => 0, 'Lock' => 1, 'Renew' => 0, 'UseCreditCard' => 'no',
-        ] + $this->contactSets($contacts));
+        ] + $this->contactSets($contacts) + self::registryFields($registry));
     }
 
     public function updateContact(string $domain, string $type, array $fields): RegistrarResult
