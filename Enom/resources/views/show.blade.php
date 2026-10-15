@@ -1,291 +1,415 @@
 @component('layouts.app', ['title' => $snapshot['domain'], 'sidebar' => true])
 @php
+    $controller = \Paymenter\Extensions\Servers\Enom\Http\Controllers\DomainController::class;
     $present = \Paymenter\Extensions\Servers\Enom\Services\DomainPresentation::class;
-    $domainId = $snapshot['id'];
-    $domainName = $snapshot['domain'];
-    $cached = $snapshot['cached'];
-    $capabilities = $snapshot['capabilities'];
-    $available = fn ($action) => ($capabilities[$action] ?? false) === true;
-    $automation = $snapshot['automation'] ?? [];
-    $managed = !empty($automation['managed']);
-    $renewalOn = ($snapshot['renewal_enabled'] ?? true) === true;
-    $zeroRetail = ($snapshot['zero_retail'] ?? false) === true;
-    $expiryText = $present::day($snapshot['provider_expires_at'] ?? null);
-    $progress = is_array($snapshot['progress'] ?? null) ? $snapshot['progress'] : [];
-    // A registration or transfer the registrar has not confirmed yet. Renewal copy waits for it.
-    $pendingOrder = in_array($snapshot['status'] ?? null, ['registration_pending', 'transfer_pending'], true);
-    $orderKind = $progress['kind'] ?? (($snapshot['status'] ?? null) === 'transfer_pending' ? 'transfer' : 'registration');
-    $checkedAt = $present::latest($snapshot['last_synced_at'] ?? null, $automation['observed_at'] ?? null);
-    $driftProblem = ($automation['observation_problem'] ?? null) === 'Observed expiry differs from confirmed registrar expiry.';
-    $paused = !empty($snapshot['writes_blocked']);
-    $pausedText = 'Changes are paused while a registrar request is checked.';
-    $unavailable = fn (string $reason) => $paused ? $pausedText : $reason;
+    $s = $snapshot;
+    $domainId = $s['id'];
+    $name = $s['domain'];
+    $cached = $s['cached'];
+    $capabilities = $s['capabilities'] ?? [];
+    $can = fn (string $action) => ($capabilities[$action] ?? false) === true;
+    $status = $s['status'] ?? null;
+    $progress = is_array($s['progress'] ?? null) ? $s['progress'] : null;
+    $pending = in_array($status, ['registration_pending', 'transfer_pending'], true);
+    $failed = in_array($status, ['registration_rejected', 'transfer_rejected'], true);
+    $isTransfer = $status === 'transfer_pending' || $status === 'transfer_rejected';
+    $paused = !empty($s['writes_blocked']);
+    $renewOn = ($s['renewal_enabled'] ?? true) === true;
+    $price = is_array($s['price'] ?? null) ? $s['price'] : [];
+    $free = ($price['mode'] ?? null) === 'complimentary' || (($s['zero_retail'] ?? false) && ($price['mode'] ?? null) !== 'standard');
+    $amount = $controller::money($price['amount'] ?? null, $price['currency'] ?? 'USD');
+    $automation = $s['automation'] ?? [];
+    $calendar = $automation['calendar'] ?? [];
+    $expires = $s['provider_expires_at'] ?? null;
+    $checkedAt = $present::latest($s['last_synced_at'] ?? null, $automation['observed_at'] ?? null);
+    $defaults = array_values($s['default_nameservers'] ?? []);
+    $current = array_values($cached['nameservers'] ?? []);
+    $norm = fn (array $list) => collect($list)->map(fn ($h) => rtrim(strtolower($h), '.'))->sort()->values()->all();
+    $usingDefault = $defaults && $current && $norm($defaults) === $norm($current);
+    $locked = $cached['locked'] ?? null;
+    $privacy = $cached['privacy'] ?? [];
+    $registrant = $cached['contacts']['registrant'] ?? [];
+    $invoiceId = ($progress['invoice_id'] ?? null) ?: ($s['pending_invoice_id'] ?? null);
+    [$badgeLabel] = $controller::badge($status, $progress);
+    $manageable = in_array($status, ['active', 'expired', 'grace', 'redemption', 'needs_review'], true);
+    $showPrivacy = $privacy['exists'] === true || $privacy['allowed'] === true || $can('privacy_purchase') || $can('privacy_renew');
+    $dnsTools = !empty($s['dns_tools']);
+    $eppAt = $s['epp_email_available_at'] ?? null;
+    $eppWaiting = $eppAt && \Carbon\CarbonImmutable::parse($eppAt)->isFuture();
+    $retryFor = fn (string $action) => old('_enom_form') === 'domain:'.$domainId.':'.$action;
+    $tabs = ['overview' => 'Overview', 'nameservers' => 'Nameservers', 'contacts' => 'Contacts', 'transfer' => 'Transfer'];
+    if ($showPrivacy) { $tabs['privacy'] = 'ID Protect'; }
+    if ($dnsTools) { $tabs['dns'] = 'DNS'; }
+    $tabs['activity'] = 'Activity';
+    // Enom keeps only the roles a registry collects (for .com, just the registrant).
+    $heldRoles = is_array($s['contact_roles'] ?? null) && $s['contact_roles'] ? $s['contact_roles'] : ['registrant', 'admin', 'tech', 'auxbilling'];
+    $roles = array_intersect_key(['admin' => 'Administrative', 'tech' => 'Technical', 'auxbilling' => 'Billing'], array_flip($heldRoles));
+    $registrantOnly = !$roles;
 @endphp
-<div class="enom-ui container mt-14 space-y-6">
+<div class="container mt-14 mb-10">
+<div class="enom">
     @include('enom::partials.styles')
-    <a class="enom-link underline" href="{{ route('enom.domains.index') }}">Back to domains</a>
-    <div class="flex flex-wrap justify-between items-center gap-4">
-        <h1 class="text-2xl font-semibold">{{ $domainName }}</h1>
-        <div class="flex flex-wrap gap-4">
-            @include('enom::partials.help-link', ['route' => 'enom.help', 'topic' => null, 'label' => 'Domain help'])
-            <a class="enom-link underline text-sm" href="{{ route('services.show', $snapshot['service_id']) }}">View billing service</a>
+    @include('enom::partials.test-banner', ['test' => $s['test_environment'] ?? false])
+
+    <div>
+        <a class="enom-back" href="{{ route('enom.domains.index') }}"><x-ri-arrow-left-s-line class="enom-i" aria-hidden="true" />Domains</a>
+        <div class="enom-dhead">
+            <div style="min-width:0">
+                <h1 class="enom-title">{{ $name }}</h1>
+                <div class="enom-dhead__meta">
+                    @include('enom::partials.badge', ['status' => $status, 'progress' => $progress])
+                    @if ($expires)<span>{{ in_array($status, ['expired', 'grace', 'redemption'], true) ? 'Expired' : 'Expires' }} <strong>@include('enom::partials.date', ['date' => $expires])</strong></span>@endif
+                    @if (!$pending && !$failed)
+                        <form method="POST" action="{{ route('enom.domains.refresh', $domainId) }}" class="enom-row" style="gap:.25rem">
+                            @include('enom::partials.form-key', ['action' => 'refresh'])
+                            <span>Updated @include('enom::partials.moment', ['at' => $checkedAt, 'style' => 'relative', 'fallback' => 'never'])</span>
+                            <button type="submit" class="enom-btn enom-btn--ghost enom-btn--sm"><x-ri-refresh-line class="enom-i" aria-hidden="true" />Refresh</button>
+                        </form>
+                    @endif
+                </div>
+            </div>
+            @if ($manageable)
+                <form method="POST" action="{{ route('enom.domains.preference', $domainId) }}"
+                    @if ($renewOn) data-confirm-title="Turn off auto-renew?" data-confirm-ok="Turn off auto-renew" data-confirm-tone="danger"
+                        data-confirm-body="{{ $name }} will expire on {{ $expires ? \Carbon\CarbonImmutable::parse($expires)->format('M j, Y') : 'its expiry date' }} unless you renew it. Unpaid renewal invoices for it will be cancelled." @endif>
+                    @include('enom::partials.form-key', ['action' => 'renewal_preference'])
+                    <input type="hidden" name="enabled" value="{{ $renewOn ? '0' : '1' }}">
+                    <button type="submit" class="enom-switch" role="switch" aria-checked="{{ $renewOn ? 'true' : 'false' }}">
+                        <span class="enom-switch__track" aria-hidden="true"></span>Auto-renew
+                    </button>
+                </form>
+            @endif
         </div>
     </div>
-    @include('enom::partials.messages')
-    @if ($paused)
-        <div class="enom-warning border border-neutral p-4 rounded-lg" role="note">
-            <p>{{ !empty($snapshot['needs_review']) ? 'A registrar request needs review by support. Changes to this domain are paused until then.' : 'A registrar request is still being checked. Changes to this domain are paused until it finishes.' }} Your invoices are still available.</p>
+
+    @include('enom::partials.notices', ['fieldKeys' => ['contact', 'nameservers', 'records', 'ds']])
+
+    @if ($paused && !$pending)
+        <div class="enom-notice enom-notice--warn" role="status"><x-ri-time-line aria-hidden="true" />
+            <div>
+                @if (!empty($s['needs_review']))
+                    <strong>Editing is paused.</strong> We’re checking a recent change with the registrar. You can edit this domain again once that’s done.
+                    @if ($supportUrl) <a class="enom-a" href="{{ $supportUrl }}">Contact support</a>@endif
+                @else
+                    <strong>A change is in progress.</strong> You can make more changes once it finishes. Refresh to check.
+                @endif
+            </div>
         </div>
     @endif
+    @if (in_array($status, ['expired', 'grace'], true))
+        <div class="enom-notice enom-notice--bad" role="status"><x-ri-error-warning-fill aria-hidden="true" /><div><strong>This domain has expired.</strong> {{ $can('renew') ? 'Renew it now to keep it.' : 'Contact support to renew it.' }}</div></div>
+    @elseif ($status === 'redemption')
+        <div class="enom-notice enom-notice--bad" role="status"><x-ri-error-warning-fill aria-hidden="true" /><div><strong>This domain is in redemption.</strong> Contact support to restore it before it’s released.</div></div>
+    @endif
 
-    <section class="border border-neutral p-5 rounded-lg space-y-4" aria-labelledby="enom-summary-heading">
-        <h2 id="enom-summary-heading" class="sr-only">Summary</h2>
-        <dl class="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div><dt class="text-sm">Status</dt><dd class="font-semibold">{{ $progress['label'] ?? $present::progress($snapshot['status'] ?? null, null) }}</dd></div>
-            <div><dt class="text-sm">Expires</dt><dd class="font-semibold">{{ $expiryText ?? 'Not confirmed yet' }}</dd></div>
-            <div><dt class="text-sm">Renewal</dt><dd class="font-semibold">{{ $renewalOn ? 'On' : 'Off' }}</dd></div>
-        </dl>
-        @if (!empty($progress['awaiting_payment']) && !empty($progress['invoice_id']))
-            @if ($pendingOrder && !$renewalOn)
-                <p class="text-sm"><a class="enom-link underline" href="{{ route('invoices.show', $progress['invoice_id']) }}">Invoice #{{ $progress['invoice_id'] }}</a> for the {{ $orderKind }} is still on your account. While renewal is off, paying it will not send the {{ $orderKind }} to the registrar. Contact support if the {{ $orderKind }} should go ahead.</p>
+    @if ($pending || $failed)
+        {{-- A registration or transfer that isn't live yet: one focused status card instead of disabled settings. --}}
+        @php
+            $kind = $isTransfer ? 'transfer' : 'registration';
+            $awaiting = $badgeLabel === 'Awaiting payment';
+            $delayed = $badgeLabel === 'Delayed';
+            $step = $failed ? 0 : ($awaiting ? 1 : 2);
+        @endphp
+        <section class="enom-panel enom-status-card" aria-labelledby="enom-status-heading">
+            @if ($failed)
+                <h2 id="enom-status-heading">The {{ $kind }} didn’t go through</h2>
+                <p>The registry didn’t accept this {{ $kind }}. Contact support and we’ll sort out your payment.</p>
+                @if ($supportUrl)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ $supportUrl }}">Contact support</a></div>@endif
+            @elseif ($awaiting)
+                <h2 id="enom-status-heading">Pay the invoice to {{ $isTransfer ? 'start the transfer' : 'register '.$name }}</h2>
+                <p>{{ $isTransfer ? 'The transfer starts' : 'Registration starts' }} as soon as the payment clears.@if (!$renewOn) Auto-renew is off, so contact support before paying if you still want this domain.@endif</p>
+                @if ($invoiceId)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ route('invoices.show', $invoiceId) }}">Pay invoice</a></div>@endif
+            @elseif ($delayed)
+                <h2 id="enom-status-heading">This {{ $kind }} is taking longer than usual</h2>
+                <p>We’re checking it with the registrar and will update this page. You don’t need to do anything.</p>
+                @if ($supportUrl)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--secondary" href="{{ $supportUrl }}">Contact support</a></div>@endif
+            @elseif ($isTransfer)
+                <h2 id="enom-status-heading">Transfer in progress</h2>
+                <p>Your current registrar may email the domain owner to approve the transfer. Most transfers finish within 5 to 7 days.</p>
             @else
-                <p class="text-sm">Pay <a class="enom-link underline" href="{{ route('invoices.show', $progress['invoice_id']) }}">invoice #{{ $progress['invoice_id'] }}</a> in full to start the {{ $progress['kind'] ?? 'request' }}. Nothing is sent to the registrar before then.</p>
+                <h2 id="enom-status-heading">Registering {{ $name }}</h2>
+                <p>This usually takes a few minutes. Refresh this page to see when it’s ready.</p>
+                <div style="margin-top:1.25rem"><a class="enom-btn enom-btn--secondary" href="{{ route('enom.domains.show', $domainId) }}"><x-ri-refresh-line class="enom-i" aria-hidden="true" />Refresh</a></div>
             @endif
+            @if (!$failed)
+                <div class="enom-progress" aria-hidden="true">@for ($i = 1; $i <= 3; $i++)<span @class(['is-done' => $i <= $step])></span>@endfor</div>
+                <div class="enom-progress-labels" aria-hidden="true"><span>Ordered</span><span>Paid</span><span>{{ $isTransfer ? 'Transferred' : 'Registered' }}</span></div>
+                <p class="enom-sr">Step {{ $step }} of 3.</p>
+            @endif
+        </section>
+        @if (count($s['operations'] ?? []))
+            @include('enom::partials.activity', ['operations' => $s['operations']])
         @endif
-        <p class="text-sm">Registrar details checked: {{ $present::moment($checkedAt) ?? 'Not checked yet' }}.</p>
-        @if ($managed && $expiryText && in_array($automation['observation_status'] ?? null, ['stale', 'unknown'], true) && !$driftProblem)
-            <p class="text-sm">The registrar dates have not been confirmed recently. The dates shown may be out of date.</p>
-        @endif
-        <form method="POST" action="{{ route('enom.domains.refresh', $domainId) }}" class="space-y-2">
-            @include('enom::partials.form-key', ['action' => 'refresh'])
-            <p class="text-sm">Reads the latest details from the registrar. It does not change anything.</p>
-            <div class="max-w-[300px]"><x-button.secondary type="submit">Refresh status</x-button.secondary></div>
-        </form>
-    </section>
-
-    <section class="bg-background-secondary border border-neutral p-5 rounded-lg space-y-4" aria-labelledby="enom-renewal-heading">
-        <div class="flex flex-wrap justify-between items-center gap-3">
-            <h2 id="enom-renewal-heading" class="text-xl font-semibold">Renewal and invoices</h2>
-            @include('enom::partials.help-link', ['route' => 'enom.help', 'topic' => 'renewal', 'label' => 'Renewal help'])
-        </div>
-        @include('enom::partials.automation-info')
-
-        @if ($renewalOn && !$zeroRetail && !$pendingOrder)
-            @if ($available('renew'))
-                <form method="POST" action="{{ route('enom.domains.renew', $domainId) }}" class="border-t border-neutral pt-4 space-y-2">
-                    @include('enom::partials.form-key', ['action' => 'renew'])
-                    <h3 class="font-semibold">Renew now</h3>
-                    <p class="text-sm">Creates an invoice for one year at your service renewal price. The renewal is sent to the registrar after the invoice is paid in full.</p>
-                    @include('enom::partials.confirm', ['confirmation' => 'Create a one-year renewal invoice for '.$domainName.'.'])
-                    <div class="max-w-[300px]"><x-button.primary type="submit">Create renewal invoice</x-button.primary></div>
-                </form>
-            @else
-                <p class="text-sm border-t border-neutral pt-4">{{ $unavailable('Renewing now is not available for this domain.') }} Contact support if it needs to renew{{ $expiryText ? ' before '.$expiryText : '' }}.</p>
-            @endif
-        @endif
-
-        <form method="POST" action="{{ route('enom.domains.preference', $domainId) }}" class="border-t border-neutral pt-4 space-y-2">
-            @include('enom::partials.form-key', ['action' => 'renewal_preference'])
-            <input type="hidden" name="enabled" value="{{ $renewalOn ? '0' : '1' }}">
-            @if ($renewalOn)
-                <h3 class="font-semibold">Turn off renewal</h3>
-                @if ($pendingOrder)
-                    <p class="text-sm">Turning renewal off now also affects the {{ $orderKind }}. If the {{ $orderKind }} has not been sent to the registrar yet, it will not be sent, even after its invoice is paid. If it was already sent, it can still complete.</p>
-                    <p class="text-sm">This does not cancel or refund the {{ $orderKind }} invoice. Renewal cannot be turned back on here until the registrar confirms the domain, so contact support if you change your mind.</p>
-                @elseif ($managed && $zeroRetail)
-                    <p class="text-sm">The operator stops renewing this domain. {{ $expiryText ? 'The expiry date on record is '.$expiryText.'.' : '' }} A renewal already sent to the registrar can still complete.</p>
-                    <p class="text-sm">Eligible unpaid renewal invoices are cancelled right away. An invoice can be eligible only if no payment or payment attempt is recorded on it and its renewal was never sent to the registrar. Contact support about any renewal invoice or request that remains.</p>
-                @elseif ($managed)
-                    <p class="text-sm">Eligible unpaid renewal invoices are cancelled right away. Contact support to review any remaining renewal invoice. Do not pay a renewal invoice while renewal is off, because it will not be sent to the registrar.</p>
-                @else
-                    <p class="text-sm">The service is set to cancel at the end of its period, and no renewal is sent to the registrar.</p>
-                @endif
-                @include('enom::partials.confirm', ['confirmation' => 'Turn off renewal for '.$domainName.'.'])
-                <div class="max-w-[300px]"><x-button.secondary type="submit">Turn off renewal</x-button.secondary></div>
-            @else
-                <h3 class="font-semibold">Turn renewal back on</h3>
-                @if ($pendingOrder)
-                    <p class="text-sm">This works only after the registrar confirms the {{ $orderKind }} and the domain has a future expiry date. Until then, turning renewal back on here will not work. Contact support if the {{ $orderKind }} should go ahead.</p>
-                @elseif ($managed && $zeroRetail)
-                    <p class="text-sm">Turning renewal back on lets the operator renew this domain again. Cancelled invoices stay cancelled. This needs an active domain with a future expiry and no request still being checked.</p>
-                @else
-                    <p class="text-sm">Cancelled invoices stay cancelled. This needs an active domain with a future expiry and no request still being checked. If the payment due date has passed, contact support for a new invoice.</p>
-                @endif
-                @include('enom::partials.confirm', ['confirmation' => 'Turn renewal back on for '.$domainName.'.'])
-                <div class="max-w-[300px]"><x-button.secondary type="submit">Turn renewal back on</x-button.secondary></div>
-            @endif
-        </form>
-
-        @component('enom::partials.disclosure', ['summary' => 'Expiry date and invoice due date'])
-            <p>The expiry date is when the registration ends at the registrar. The invoice due date is earlier, so the renewal can be sent before the domain expires.</p>
-            <p>Paying an invoice starts the renewal request. The new expiry date appears here only after the registrar confirms it.</p>
-        @endcomponent
-    </section>
-
-    <details class="bg-background-secondary border border-neutral p-5 rounded-lg" open>
-        <summary class="text-xl font-semibold">Nameservers</summary>
-        <div class="mt-4 space-y-4">
-            <p class="text-sm">Changing nameservers moves DNS for this domain to the servers you list.</p>
-            @if ($available('nameservers'))
-                <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'nameservers']) }}" data-enom-validate class="space-y-3">
-                    @include('enom::partials.validation-feedback')
-                    @include('enom::partials.form-key', ['action' => 'nameservers'])
-                    <x-form.textarea name="nameservers" label="Nameservers, one per line" required rows="4" aria-describedby="enom-nameservers-hint">{{ old('_enom_form') === 'domain:'.$domainId.':nameservers' ? old('nameservers') : implode("\n", $cached['nameservers']) }}</x-form.textarea>
-                    <p id="enom-nameservers-hint" class="text-xs">Enter 2 to 12 hostnames, one per line, such as ns1.example.net. Do not use IP addresses.</p>
-                    <p data-enom-client-error data-enom-client-for="nameservers" class="text-red-500 text-xs mt-1" hidden></p>
-                    @include('enom::partials.confirm', ['confirmation' => 'Replace the whole nameserver list with these nameservers.'])
-                    <div class="max-w-[300px]"><x-button.primary type="submit">Save nameservers</x-button.primary></div>
-                </form>
-                @component('enom::partials.disclosure', ['summary' => 'Nameserver example'])
-                    @include('enom::partials.code-example', ['caption' => 'Two nameservers, one per line.', 'code' => "ns1.example.net\nns2.example.net"])
-                @endcomponent
-            @else
-                <p class="text-sm">{{ $unavailable('Nameserver changes are not available right now. Refresh status to check again.') }}</p>
-                @forelse ($cached['nameservers'] as $server)<p>{{ $server }}</p>@empty<p class="text-sm">No nameservers on record.</p>@endforelse
-            @endif
-        </div>
-    </details>
-
-    @include('enom::partials.dns')
-
-    <details class="bg-background-secondary border border-neutral p-5 rounded-lg" @if (old('_enom_form') === 'domain:'.$domainId.':contacts') open @endif>
-        <summary class="text-xl font-semibold">Contacts</summary>
-        <div class="mt-4 space-y-4">
-            <dl class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-                <div><dt>Contact verification</dt><dd class="font-semibold">{{ $cached['contact_status']['pending_verification'] === null ? 'Not confirmed' : ($cached['contact_status']['pending_verification'] ? 'Waiting for registrar verification' : 'Nothing waiting') }}</dd></div>
-                <div><dt>60-day transfer restriction after a registrant change</dt><dd class="font-semibold">{{ $cached['contact_status']['transfer_locked'] === null ? 'Not confirmed' : ($cached['contact_status']['transfer_locked'] ? 'On' : 'Off') }}</dd></div>
-            </dl>
-            <p class="text-sm">Each form replaces one whole contact. The other contacts stay as they are. A registrant change can need email verification and can block transfers to another registrar for 60 days.</p>
-            @include('enom::partials.help-link', ['route' => 'enom.help', 'topic' => 'contacts', 'label' => 'Contacts help'])
-            @if ($available('contacts'))
-                @foreach (['registrant' => 'Registrant', 'admin' => 'Administrative', 'tech' => 'Technical', 'auxbilling' => 'Billing'] as $type => $label)
-                    <details class="border border-neutral p-4 rounded-lg" @if (old('_enom_form') === 'domain:'.$domainId.':contacts' && old('contact_type') === $type) open @endif>
-                        <summary class="font-semibold">{{ $label }} contact</summary>
-                        <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'contacts']) }}" data-enom-validate class="mt-4 space-y-4">
-                            @include('enom::partials.validation-feedback')
-                            @include('enom::partials.form-key', ['action' => 'contacts'])
-                            <input type="hidden" name="contact_type" value="{{ $type }}">
-                            @include('enom::partials.contact', ['contact' => $cached['contacts'][$type] ?? [], 'contactId' => $type, 'contactForm' => 'domain:'.$domainId.':contacts', 'contactType' => $type])
-                            @include('enom::partials.confirm', ['confirmation' => 'Save this whole '.strtolower($label).' contact and accept any verification the registrar needs.'])
-                            <div class="max-w-[300px]"><x-button.primary type="submit">Save {{ strtolower($label) }} contact</x-button.primary></div>
-                        </form>
-                    </details>
-                @endforeach
-            @else
-                <p class="text-sm">{{ $unavailable('Contact changes are not available right now. Refresh status to check again.') }}</p>
-            @endif
-        </div>
-    </details>
-
-    <details class="bg-background-secondary border border-neutral p-5 rounded-lg">
-        <summary class="text-xl font-semibold">Contact privacy</summary>
-        <div class="mt-4 space-y-4">
-            <dl class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-                <div><dt>Privacy subscription</dt><dd class="font-semibold">{{ $cached['privacy']['exists'] === null ? 'Not confirmed' : ($cached['privacy']['exists'] ? 'Purchased' : 'Not purchased') }}</dd></div>
-                <div><dt>Privacy</dt><dd class="font-semibold">{{ $cached['privacy']['enabled'] === null ? 'Not confirmed' : ($cached['privacy']['enabled'] ? 'On' : 'Off') }}</dd></div>
-            </dl>
-            <p class="text-sm">Privacy is bought one year at a time through an invoice and does not renew by itself. Turning privacy off keeps your paid subscription.</p>
-            @php $privacyShown = false; @endphp
-            @foreach (['purchase' => 'Buy contact privacy, 1 year', 'renew' => 'Renew contact privacy, 1 year'] as $privacyAction => $privacyLabel)
-                @if ($available('privacy_'.$privacyAction))
-                    @php $privacyShown = true; @endphp
-                    <form method="POST" action="{{ route('enom.domains.privacy', [$domainId, $privacyAction]) }}" class="space-y-2">
-                        @include('enom::partials.form-key', ['action' => 'privacy_'.$privacyAction])
-                        <p class="text-sm">Creates an invoice. Privacy is requested from the registrar after the invoice is paid in full.</p>
-                        @include('enom::partials.confirm', ['confirmation' => 'Create an invoice for one year of contact privacy.'])
-                        <div class="max-w-[300px]"><x-button.secondary type="submit">{{ $privacyLabel }}</x-button.secondary></div>
-                    </form>
-                @endif
+    @else
+        <nav class="enom-tabs" data-enom-tabs aria-label="Domain settings">
+            @foreach ($tabs as $tabKey => $tabLabel)
+                <a href="#{{ $tabKey }}" id="tab-{{ $tabKey }}" class="enom-tab" data-enom-tab="{{ $tabKey }}">{{ $tabLabel }}
+                    @if ($tabKey === 'contacts' && ($cached['contact_status']['pending_verification'] ?? null) === true)<span class="enom-dot" title="Needs verification"></span>@endif
+                </a>
             @endforeach
-            @if ($cached['privacy']['exists'] === true && $cached['privacy']['enabled'] !== null)
-                @php $privacyToggle = $cached['privacy']['enabled'] ? 'privacy_disable' : 'privacy_enable'; @endphp
-                @if ($available($privacyToggle))
-                    @php $privacyShown = true; @endphp
-                    <form method="POST" action="{{ route('enom.domains.manage', [$domainId, $privacyToggle]) }}" class="space-y-2">
-                        @include('enom::partials.form-key', ['action' => $privacyToggle])
-                        @include('enom::partials.confirm', ['confirmation' => $cached['privacy']['enabled'] ? 'Turn off privacy for '.$domainName.'. The subscription stays paid.' : 'Turn on privacy for '.$domainName.'.'])
-                        <div class="max-w-[300px]"><x-button.secondary type="submit">{{ $cached['privacy']['enabled'] ? 'Turn off privacy' : 'Turn on privacy' }}</x-button.secondary></div>
+        </nav>
+
+        {{-- Overview --}}
+        <div class="enom-panel enom-tabpanel" id="overview">
+            <dl class="enom-facts">
+                <div class="enom-fact"><dt>Expires</dt><dd>@include('enom::partials.date', ['date' => $expires, 'fallback' => 'Not confirmed yet'])</dd></div>
+                <div class="enom-fact"><dt>Auto-renew</dt><dd>{{ $renewOn ? 'On' : 'Off' }}
+                    <small>
+                        @if (!$renewOn)
+                            The domain expires unless you turn this on.
+                        @elseif ($free)
+                            Renews at no cost.
+                        @elseif (!empty($calendar['issue_at']))
+                            Invoice sent @include('enom::partials.date', ['date' => $calendar['issue_at']]), due @include('enom::partials.date', ['date' => $calendar['due_at']]).
+                        @else
+                            We’ll invoice you before it expires.
+                        @endif
+                    </small></dd></div>
+                <div class="enom-fact"><dt>Renewal price</dt><dd>{{ $free ? 'Complimentary' : ($amount ? $amount.'/yr' : 'Not set') }}</dd></div>
+                <div class="enom-fact"><dt>Transfer lock</dt><dd>{{ $locked === null ? 'Unknown' : ($locked ? 'On' : 'Off') }}</dd></div>
+                @if ($showPrivacy)<div class="enom-fact"><dt>ID Protect</dt><dd>{{ $privacy['enabled'] === true ? 'On' : 'Off' }}</dd></div>@endif
+                <div class="enom-fact"><dt>Nameservers</dt><dd>{{ !$current ? 'Unknown' : ($usingDefault ? 'Default' : 'Custom') }}<small>{{ implode(', ', array_slice($current, 0, 2)) }}{{ count($current) > 2 ? ' +'.(count($current) - 2) : '' }}</small></dd></div>
+            </dl>
+            @if ($renewOn && !$free && $can('renew'))
+                <section class="enom-section" aria-labelledby="enom-renew-heading" style="border-top:0">
+                    <div class="enom-section__head" style="margin-bottom:0;align-items:center">
+                        <div><h2 id="enom-renew-heading" class="enom-h2">Renew now</h2><p>Add a year now instead of waiting for the renewal invoice.</p></div>
+                        <form method="POST" action="{{ route('enom.domains.renew', $domainId) }}" data-confirm-title="Create a renewal invoice?" data-confirm-ok="Create invoice"
+                            data-confirm-body="We’ll create an invoice for {{ $amount }}. {{ $name }} renews for one year once it’s paid.">
+                            @include('enom::partials.form-key', ['action' => 'renew'])
+                            <button type="submit" class="enom-btn enom-btn--primary">Renew for 1 year · {{ $amount }}</button>
+                        </form>
+                    </div>
+                </section>
+            @endif
+            @if (!empty($automation['invoices']))
+                <section class="enom-section" aria-labelledby="enom-invoices-heading">
+                    <h2 id="enom-invoices-heading" class="enom-h2" style="margin-bottom:.5rem">Renewal invoices</h2>
+                    <div class="enom-tablewrap">
+                        <table class="enom-tbl">
+                            <thead><tr><th scope="col">Invoice</th><th scope="col">Status</th><th scope="col">Due</th></tr></thead>
+                            <tbody>
+                                @foreach (array_slice($automation['invoices'], 0, 5) as $invoice)
+                                    @php [$invLabel, $invTone] = match ($invoice['status'] ?? null) { 'paid' => ['Paid', 'ok'], 'pending' => ['Unpaid', 'warn'], 'cancelled' => ['Cancelled', 'muted'], default => ['Unknown', 'muted'] }; @endphp
+                                    <tr>
+                                        <td><a class="enom-a" href="{{ route('invoices.show', $invoice['id']) }}">#{{ $invoice['id'] }}</a></td>
+                                        <td><span class="enom-badge enom-tone-{{ $invTone }}">{{ $invLabel }}</span></td>
+                                        <td class="enom-num">@include('enom::partials.date', ['date' => $invoice['due_at'] ?? null, 'fallback' => '—'])</td>
+                                    </tr>
+                                @endforeach
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            @endif
+        </div>
+
+        {{-- Nameservers --}}
+        <div class="enom-panel enom-tabpanel" id="nameservers">
+            <section class="enom-section" aria-labelledby="enom-ns-heading">
+                <div class="enom-section__head">
+                    <div><h2 id="enom-ns-heading" class="enom-h2">Nameservers</h2><p>These decide where your website and email are hosted. Changes can take up to 48 hours to reach everyone.</p></div>
+                    @if ($usingDefault)<span class="enom-badge enom-tone-info">Using defaults</span>@endif
+                </div>
+                @if ($current)
+                    <ul class="enom-hosts">@foreach ($current as $host)<li>{{ $host }}</li>@endforeach</ul>
+                @else
+                    <p class="enom-muted enom-small">No nameservers on record. Refresh to load them.</p>
+                @endif
+                @if ($can('nameservers') && $defaults && !$usingDefault)
+                    <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'nameservers']) }}" style="margin-top:1.25rem"
+                        data-confirm-title="Switch to the default nameservers?" data-confirm-ok="Use defaults"
+                        data-confirm-body="Your nameservers will change to {{ implode(', ', $defaults) }}. If your website or email is hosted elsewhere, it may stop working.">
+                        @include('enom::partials.form-key', ['action' => 'nameservers'])
+                        <input type="hidden" name="use_default" value="1">
+                        <button type="submit" class="enom-btn enom-btn--secondary">Use default nameservers</button>
+                        <p class="enom-hint">{{ implode(', ', $defaults) }}</p>
                     </form>
                 @endif
-            @endif
-            @if (!$privacyShown)
-                <p class="text-sm">{{ $unavailable('Privacy is not available for this domain right now.') }}</p>
+            </section>
+            @if ($can('nameservers'))
+                <section class="enom-section" aria-labelledby="enom-ns-edit-heading">
+                    <h2 id="enom-ns-edit-heading" class="enom-h2" style="margin-bottom:.75rem">Use custom nameservers</h2>
+                    <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'nameservers']) }}" data-enom-form style="max-width:30rem">
+                        @include('enom::partials.form-key', ['action' => 'nameservers'])
+                        <div data-field>
+                            <label for="enom-ns" class="enom-label">Nameservers, one per line</label>
+                            <textarea id="enom-ns" name="nameservers" rows="4" class="enom-input" data-enom-nameservers spellcheck="false" autocapitalize="none"
+                                aria-describedby="enom-ns-hint{{ $retryFor('nameservers') && $errors->has('nameservers') ? ' enom-ns-error' : '' }}" @if ($retryFor('nameservers') && $errors->has('nameservers')) aria-invalid="true" @endif>{{ $retryFor('nameservers') ? old('nameservers') : implode("\n", $current) }}</textarea>
+                            <p id="enom-ns-hint" class="enom-hint">2 to 12 hostnames, such as ns1.example.com.</p>
+                            @if ($retryFor('nameservers') && $errors->has('nameservers'))<p id="enom-ns-error" class="enom-error">{{ $errors->first('nameservers') }}</p>@endif
+                        </div>
+                        <div style="margin-top:1rem"><button type="submit" class="enom-btn enom-btn--primary">Save nameservers</button></div>
+                    </form>
+                </section>
+            @elseif (!$paused)
+                <section class="enom-section"><p class="enom-small enom-muted">Nameservers can’t be changed right now. Refresh and try again.</p></section>
             @endif
         </div>
-    </details>
 
-    <details class="bg-background-secondary border border-neutral p-5 rounded-lg">
-        <summary class="text-xl font-semibold">Transfer lock and code</summary>
-        <div class="mt-4 space-y-4">
-            <p>Registrar lock: <strong>{{ $cached['locked'] === null ? 'Not confirmed' : ($cached['locked'] ? 'On' : 'Off') }}</strong></p>
-            <p class="text-sm">The registrar lock is separate from the 60-day restriction after a registrant change. Turning the lock off does not by itself make the domain ready to transfer.</p>
-            @if ($available('lock') && $cached['locked'] !== null)
-                <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'lock']) }}" class="space-y-2">
-                    @include('enom::partials.form-key', ['action' => 'lock'])
-                    <input type="hidden" name="locked" value="{{ $cached['locked'] ? '0' : '1' }}">
-                    @include('enom::partials.confirm', ['confirmation' => $cached['locked'] ? 'Turn off the registrar lock for '.$domainName.'.' : 'Turn on the registrar lock for '.$domainName.'.'])
-                    <div class="max-w-[300px]"><x-button.secondary type="submit">{{ $cached['locked'] ? 'Turn off registrar lock' : 'Turn on registrar lock' }}</x-button.secondary></div>
-                </form>
-            @elseif ($cached['locked'] === null)
-                <p class="text-sm">{{ $unavailable('The lock status is not confirmed. Refresh status to check it.') }}</p>
-            @else
-                <p class="text-sm">{{ $unavailable('Lock changes are not available right now. Refresh status to check again.') }}</p>
-            @endif
-            @if ($available('epp_sync'))
-                <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'epp_sync']) }}" class="border-t border-neutral pt-4 space-y-2">
-                    @include('enom::partials.form-key', ['action' => 'epp_sync'])
-                    <h3 class="font-semibold">Sync transfer code</h3>
-                    <p class="text-sm">Asks the registrar to sync this domain's transfer code with the registry. This does not show or email the code.</p>
-                    @include('enom::partials.confirm', ['confirmation' => 'Sync the transfer code without showing or emailing it.'])
-                    <div class="max-w-[300px]"><x-button.secondary type="submit">Sync transfer code</x-button.secondary></div>
-                </form>
-            @else
-                <p class="text-sm border-t border-neutral pt-4">{{ $unavailable('Transfer code sync is not available for this domain.') }}</p>
-            @endif
-            <p class="text-sm">Viewing or emailing your transfer code is not available in this portal. Contact support if you plan to move this domain to another registrar.</p>
-            @include('enom::partials.help-link', ['route' => 'enom.help', 'topic' => 'transfers', 'label' => 'Transfer code help'])
-        </div>
-    </details>
-
-    <section class="border border-neutral p-5 rounded-lg space-y-4" aria-labelledby="enom-requests-heading">
-        <div class="flex flex-wrap justify-between items-center gap-3">
-            <h2 id="enom-requests-heading" class="text-xl font-semibold">Recent requests</h2>
-            @include('enom::partials.help-link', ['route' => 'enom.help', 'topic' => 'statuses', 'label' => 'What statuses mean'])
-        </div>
-        @if (count($snapshot['operations']))
-            <div class="overflow-x-auto">
-                <table class="enom-table w-full text-sm">
-                    <caption class="sr-only">Recent registrar requests for {{ $domainName }}</caption>
-                    <thead>
-                        <tr class="border-b border-neutral">
-                            <th scope="col" class="text-left p-2">Request</th>
-                            <th scope="col" class="text-left p-2">Status</th>
-                            <th scope="col" class="text-left p-2">What it means</th>
-                            <th scope="col" class="text-left p-2">Created</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        @foreach ($snapshot['operations'] as $operation)
-                            <tr class="border-b border-neutral">
-                                <td class="p-2">
-                                    {{ $present::action($operation['action'] ?? null) }}
-                                    @if (!empty($operation['invoice_id']))<br><a class="enom-link underline" href="{{ route('invoices.show', $operation['invoice_id']) }}">Invoice #{{ $operation['invoice_id'] }}</a>@endif
-                                </td>
-                                <td class="p-2 font-semibold">{{ $present::state($operation['state'] ?? null, $operation['outcome'] ?? null) }}</td>
-                                <td class="p-2">{{ $present::stateMeaning($operation['state'] ?? null, $operation['outcome'] ?? null, $operation['action'] ?? null) }}</td>
-                                <td class="p-2 whitespace-nowrap">{{ $present::moment($operation['created_at'] ?? null) ?? 'Not recorded' }}</td>
-                            </tr>
+        {{-- Contacts --}}
+        <div class="enom-panel enom-tabpanel" id="contacts">
+            <section class="enom-section" aria-labelledby="enom-contacts-heading">
+                <div class="enom-section__head"><div><h2 id="enom-contacts-heading" class="enom-h2">{{ $registrantOnly ? 'Registrant contact' : 'Domain owner' }}</h2><p>{{ $registrantOnly ? 'The registry lists this person or organization as the domain’s owner. It’s the only contact this domain needs.' : 'The registry lists this person or organization as the owner.' }}</p></div></div>
+                <div class="enom-stack">
+                    @if (($cached['contact_status']['pending_verification'] ?? null) === true)
+                        <div class="enom-notice enom-notice--warn"><x-ri-mail-line aria-hidden="true" /><div><strong>Verify the owner’s email.</strong> Open the verification email sent to {{ $s['registrant_email_masked'] ?? 'the owner’s address' }} and follow its link, or the domain may be suspended.</div></div>
+                    @endif
+                    @if (($cached['contact_status']['transfer_locked'] ?? null) === true)
+                        <div class="enom-notice"><x-ri-lock-line aria-hidden="true" /><div>The owner changed recently, so this domain can’t move to another registrar for 60 days.</div></div>
+                    @endif
+                    @if ($can('contacts'))
+                        @php
+                            $ownerRetry = $retryFor('contacts') && in_array(old('contact_type'), ['registrant', ''], true);
+                            $applyAll = $ownerRetry ? old('apply_all') === '1' : ($s['contacts_match'] ?? true);
+                        @endphp
+                        <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'contacts']) }}" data-enom-form
+                            data-confirm-title="Change the domain owner?" data-confirm-ok="Save changes"
+                            data-confirm-when-changed="contact[first_name],contact[last_name],contact[organization_name],contact[email_address]"
+                            data-confirm-body="Changing the owner’s name, organization or email may need email verification, and blocks transfers to another registrar for 60 days.">
+                            @include('enom::partials.form-key', ['action' => 'contacts'])
+                            <input type="hidden" name="contact_type" value="registrant">
+                            @include('enom::partials.contact', ['prefix' => 'contact', 'errorPrefix' => 'contact', 'idPrefix' => 'owner', 'values' => $registrant, 'useOld' => $ownerRetry])
+                            @if ($registrantOnly)
+                                <input type="hidden" name="apply_all" value="1">
+                            @else
+                                <input type="hidden" name="apply_all" value="0">
+                                <label class="enom-checkbox" style="margin-top:1.25rem"><input type="checkbox" name="apply_all" value="1" @checked($applyAll)><span>Use this contact for the administrative, technical and billing contacts too</span></label>
+                            @endif
+                            <div style="margin-top:1rem"><button type="submit" class="enom-btn enom-btn--primary">Save contact</button></div>
+                        </form>
+                    @else
+                        <dl class="enom-small" style="display:grid;gap:.25rem">
+                            <dt class="enom-sr">Owner</dt>
+                            <dd><strong>{{ trim(($registrant['first_name'] ?? '').' '.($registrant['last_name'] ?? '')) ?: 'Not loaded yet' }}</strong>{{ !empty($registrant['organization_name']) ? ', '.$registrant['organization_name'] : '' }}</dd>
+                            @if (!empty($registrant['email_address']))<dd class="enom-muted">{{ $registrant['email_address'] }}</dd>@endif
+                            @if (!$paused)<dd class="enom-muted">Contacts can’t be changed right now. Refresh and try again.</dd>@endif
+                        </dl>
+                    @endif
+                </div>
+            </section>
+            @if ($can('contacts') && !$registrantOnly)
+                <section class="enom-section" aria-labelledby="enom-roles-heading">
+                    <div class="enom-section__head"><div><h2 id="enom-roles-heading" class="enom-h2">Other contacts</h2>
+                        <p>{{ ($s['contacts_match'] ?? true) ? 'All contacts currently match the owner.' : 'Some contacts differ from the owner.' }} Edit one here to change only that contact.</p></div></div>
+                    <div class="enom-stack-sm">
+                        @foreach ($roles as $role => $roleLabel)
+                            @php
+                                $roleContact = $cached['contacts'][$role] ?? [];
+                                $roleRetry = $retryFor('contacts') && old('contact_type') === $role;
+                                $preview = trim(($roleContact['first_name'] ?? '').' '.($roleContact['last_name'] ?? ''));
+                            @endphp
+                            <details class="enom-more" @if ($roleRetry) open @endif>
+                                <summary>{{ $roleLabel }}@if ($preview) <span class="enom-muted" style="font-weight:400">· {{ $preview }}</span>@endif</summary>
+                                <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'contacts']) }}" data-enom-form style="margin-top:.75rem">
+                                    @include('enom::partials.form-key', ['action' => 'contacts'])
+                                    <input type="hidden" name="contact_type" value="{{ $role }}">
+                                    @include('enom::partials.contact', ['prefix' => 'contact', 'errorPrefix' => $roleRetry ? 'contact' : 'contact-'.$role, 'idPrefix' => 'c-'.$role, 'values' => $roleContact, 'useOld' => $roleRetry, 'section' => 'section-'.$role])
+                                    <div style="margin-top:1rem"><button type="submit" class="enom-btn enom-btn--secondary">Save {{ strtolower($roleLabel) }} contact</button></div>
+                                </form>
+                            </details>
                         @endforeach
-                    </tbody>
-                </table>
-            </div>
-        @else
-            <p class="text-sm">No requests yet.</p>
-        @endif
-    </section>
+                    </div>
+                </section>
+            @endif
+        </div>
 
-    @include('enom::partials.sandbox')
+        {{-- Transfer --}}
+        <div class="enom-panel enom-tabpanel" id="transfer">
+            <section class="enom-section" aria-labelledby="enom-lock-heading">
+                <div class="enom-section__head" style="align-items:center">
+                    <div><h2 id="enom-lock-heading" class="enom-h2">Transfer lock</h2><p>Stops anyone moving this domain to another registrar. Leave it on unless you’re moving the domain.</p></div>
+                    @if ($can('lock') && $locked !== null)
+                        <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'lock']) }}"
+                            @if ($locked) data-confirm-title="Turn off the transfer lock?" data-confirm-ok="Turn off lock" data-confirm-tone="danger"
+                                data-confirm-body="Anyone with the transfer code could then move {{ $name }} to another registrar. Turn the lock back on if you’re not transferring." @endif>
+                            @include('enom::partials.form-key', ['action' => 'lock'])
+                            <input type="hidden" name="locked" value="{{ $locked ? '0' : '1' }}">
+                            <button type="submit" class="enom-switch" role="switch" aria-checked="{{ $locked ? 'true' : 'false' }}"><span class="enom-switch__track" aria-hidden="true"></span>{{ $locked ? 'On' : 'Off' }}</button>
+                        </form>
+                    @else
+                        <strong>{{ $locked === null ? 'Unknown' : ($locked ? 'On' : 'Off') }}</strong>
+                    @endif
+                </div>
+            </section>
+            <section class="enom-section" aria-labelledby="enom-code-heading">
+                <div class="enom-section__head" style="align-items:center">
+                    <div><h2 id="enom-code-heading" class="enom-h2">Transfer code</h2>
+                        <p>Your new registrar asks for this code. We email it to the domain owner{{ !empty($s['registrant_email_masked']) ? ' at '.$s['registrant_email_masked'] : '' }}.</p></div>
+                    @if ($can('epp_email'))
+                        @if ($eppWaiting)
+                            <button type="button" class="enom-btn enom-btn--secondary" disabled>Email transfer code</button>
+                        @else
+                            <form method="POST" action="{{ route('enom.domains.manage', [$domainId, 'epp_email']) }}">
+                                @include('enom::partials.form-key', ['action' => 'epp_email'])
+                                <button type="submit" class="enom-btn enom-btn--secondary"><x-ri-mail-send-line class="enom-i" aria-hidden="true" />Email transfer code</button>
+                            </form>
+                        @endif
+                    @endif
+                </div>
+                @if ($can('epp_email') && $eppWaiting)
+                    <p class="enom-small enom-muted">Code sent. You can request another after @include('enom::partials.moment', ['at' => $eppAt]).</p>
+                @elseif (!$can('epp_email') && !$paused)
+                    <p class="enom-small enom-muted">Transfer codes can’t be requested right now. Refresh and try again.</p>
+                @endif
+            </section>
+            <section class="enom-section" aria-labelledby="enom-out-heading">
+                <h2 id="enom-out-heading" class="enom-h2" style="margin-bottom:.75rem">Moving to another registrar</h2>
+                <ol class="enom-steps2">
+                    <li><span>Turn off the transfer lock above.</span></li>
+                    <li><span>Email yourself the transfer code.</span></li>
+                    <li><span>Start the transfer at your new registrar and enter the code.</span></li>
+                </ol>
+                <p class="enom-small enom-muted" style="margin-top:1rem">Domains can’t move within 60 days of registration, a previous transfer or an owner change.</p>
+            </section>
+        </div>
+
+        {{-- ID Protect --}}
+        @if ($showPrivacy)
+            <div class="enom-panel enom-tabpanel" id="privacy">
+                <section class="enom-section" aria-labelledby="enom-privacy-heading">
+                    <div class="enom-section__head" style="align-items:center">
+                        <div><h2 id="enom-privacy-heading" class="enom-h2">ID Protect</h2><p>Hides the owner’s name, address, phone and email from public WHOIS lookups.</p></div>
+                        @php $toggle = $privacy['exists'] === true && $privacy['enabled'] !== null ? ($privacy['enabled'] ? 'privacy_disable' : 'privacy_enable') : null; @endphp
+                        @if ($toggle && $can($toggle))
+                            <form method="POST" action="{{ route('enom.domains.manage', [$domainId, $toggle]) }}"
+                                @if ($toggle === 'privacy_disable') data-confirm-title="Turn off ID Protect?" data-confirm-ok="Turn off" data-confirm-tone="danger"
+                                    data-confirm-body="The owner’s name, address, phone and email will be visible in public WHOIS lookups. Your subscription stays active." @endif>
+                                @include('enom::partials.form-key', ['action' => $toggle])
+                                <button type="submit" class="enom-switch" role="switch" aria-checked="{{ $privacy['enabled'] ? 'true' : 'false' }}"><span class="enom-switch__track" aria-hidden="true"></span>{{ $privacy['enabled'] ? 'On' : 'Off' }}</button>
+                            </form>
+                        @else
+                            <strong>{{ $privacy['enabled'] === true ? 'On' : ($privacy['exists'] === true ? 'Off' : 'Not added') }}</strong>
+                        @endif
+                    </div>
+                    @foreach (['purchase' => 'Add ID Protect', 'renew' => 'Renew ID Protect'] as $privacyAction => $privacyLabel)
+                        @if ($can('privacy_'.$privacyAction) && $privacyPrice)
+                            <form method="POST" action="{{ route('enom.domains.privacy', [$domainId, $privacyAction]) }}" style="margin-top:.5rem"
+                                data-confirm-title="{{ $privacyLabel }} for {{ $privacyPrice }}?" data-confirm-ok="Create invoice"
+                                data-confirm-body="We’ll create an invoice for one year. ID Protect {{ $privacyAction === 'purchase' ? 'turns on' : 'renews' }} once it’s paid.">
+                                @include('enom::partials.form-key', ['action' => 'privacy_'.$privacyAction])
+                                <button type="submit" class="enom-btn enom-btn--primary">{{ $privacyLabel }} · {{ $privacyPrice }}/yr</button>
+                            </form>
+                        @endif
+                    @endforeach
+                    @if ($privacy['exists'] === true)<p class="enom-small enom-muted" style="margin-top:1rem">ID Protect renews separately from the domain, one year at a time.</p>@endif
+                </section>
+            </div>
+        @endif
+
+        {{-- DNS (only when the server offers Enom DNS) --}}
+        @if ($dnsTools)
+            <div class="enom-panel enom-tabpanel" id="dns">
+                @include('enom::partials.dns')
+            </div>
+        @endif
+
+        {{-- Activity --}}
+        <div class="enom-tabpanel" id="activity">
+            @include('enom::partials.activity', ['operations' => $s['operations'] ?? []])
+        </div>
+    @endif
 </div>
-@include('enom::partials.form-validation')
-@include('enom::partials.copy-script')
+</div>
+@include('enom::partials.client-script')
 @endcomponent

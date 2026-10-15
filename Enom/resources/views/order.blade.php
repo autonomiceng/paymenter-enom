@@ -1,48 +1,132 @@
-@component('layouts.app', ['title' => 'Domain order', 'sidebar' => true])
+@component('layouts.app', ['title' => ($quote['action'] === 'transfer' ? 'Transfer ' : 'Register ').$quote['domain'], 'sidebar' => true])
 @php
-    $present = \Paymenter\Extensions\Servers\Enom\Services\DomainPresentation::class;
+    $controller = \Paymenter\Extensions\Servers\Enom\Http\Controllers\DomainController::class;
     $isTransfer = $quote['action'] === 'transfer';
+    $free = !empty($quote['complimentary']);
+    $price = $controller::money($quote['amount'], $quote['currency']);
+    $renewal = $controller::money($quote['renewal_amount'], $quote['currency']);
+    $retry = old('_enom_form') === $formId;
+    $same = $retry ? old('same_contact', '1') === '1' : true;
+    $nsMode = $retry ? (old('ns_mode') === 'custom' ? 'custom' : 'default') : 'default';
+    $defaults = $quote['default_nameservers'] ?? [];
+    if (!$defaults) { $nsMode = $retry && old('ns_mode') === 'custom' ? 'custom' : 'default'; }
+    $roleErrors = collect($errors->keys())->contains(fn ($key) => str_starts_with($key, 'roles.'));
+    if ($roleErrors) { $same = false; }
+    $back = route($isTransfer ? 'enom.domains.transfer' : 'enom.domains.search', ['name' => $quote['domain']]);
 @endphp
-<div class="enom-ui container mt-14 space-y-6">
+<div class="container mt-14 mb-10">
+<div class="enom">
     @include('enom::partials.styles')
-    <a class="enom-link underline" href="{{ route('enom.domains.index') }}">Back to domains</a>
-    <h1 class="text-2xl font-semibold">{{ $isTransfer ? 'Transfer' : 'Register' }} {{ $quote['domain'] }}</h1>
-    @include('enom::partials.messages')
-    <section class="border border-neutral p-5 rounded-lg space-y-2" aria-labelledby="enom-price-heading">
-        <h2 id="enom-price-heading" class="sr-only">Price</h2>
-        <p class="text-xl font-semibold">{{ $isTransfer ? 'Transfer' : 'Registration' }}, one year: {{ $quote['currency'] }} {{ $quote['amount'] }}</p>
-        <p>Renews at {{ $quote['currency'] }} {{ $quote['renewal_amount'] }} per year.</p>
-        <p class="text-sm">Quote expires {{ $present::moment($quote['expires_at'] ?? null) ?? 'soon' }}. Availability can change before you pay. The invoice shows tax and the final total.</p>
-    </section>
-    @if ($isTransfer)
-        <section class="border border-neutral p-5 rounded-lg space-y-2" aria-labelledby="enom-transfer-heading">
-            <h2 id="enom-transfer-heading" class="font-semibold">Before you transfer</h2>
-            <ol class="enom-steps text-sm space-y-1">
-                <li>Turn off the registrar lock at your current registrar.</li>
-                <li>Get the transfer code, also called the auth code, from your current registrar.</li>
-            </ol>
-            <p class="text-sm">A transfer can stay in progress for several days while it is approved.</p>
-        </section>
-    @endif
-    <form method="POST" action="{{ route('enom.domains.place') }}" data-enom-validate class="bg-background-secondary border border-neutral p-5 rounded-lg space-y-5">
-        @include('enom::partials.validation-feedback')
+    @include('enom::partials.test-banner', ['test' => $quote['test_environment'] ?? false])
+    <div>
+        <a class="enom-back" href="{{ $back }}"><x-ri-arrow-left-s-line class="enom-i" aria-hidden="true" />{{ $isTransfer ? 'Transfer' : 'Search' }}</a>
+        <h1 class="enom-title">{{ $isTransfer ? 'Transfer' : 'Register' }} {{ $quote['domain'] }}</h1>
+        <p class="enom-lede">{{ $free ? 'Complimentary' : $price.' for the first year' }}. Check the details below, then continue.</p>
+    </div>
+    @include('enom::partials.notices', ['fieldKeys' => ['contact', 'roles', 'epp', 'nameservers']])
+
+    <form method="POST" action="{{ route('enom.domains.place') }}" class="enom-order" data-enom-form>
         @csrf
         <input type="hidden" name="_request_key" value="{{ $orderKey }}">
         <input type="hidden" name="intent_id" value="{{ $quote['intent_id'] }}">
-        <h2 class="text-xl font-semibold">Registrant contact</h2>
-        <p class="text-sm">We use these details for all four domain contacts: registrant, administrative, technical and billing. You can review each one on the domain page later. Contact changes can need verification.</p>
-        @include('enom::partials.contact', ['contact' => [], 'contactId' => 'order-contact', 'contactForm' => 'order:'.$quote['intent_id']])
-        @if ($isTransfer)
-            <x-form.input name="epp" value="" label="Transfer code (auth code)" type="password" required maxlength="255" autocomplete="new-password" aria-describedby="epp-hint" />
-            <p id="epp-hint" class="text-xs">From your current registrar. It is stored encrypted only until the transfer finishes. We clear this field after any error, so enter it again before you continue.</p>
-            <p data-enom-client-error data-enom-client-for="epp" class="text-red-500 text-xs mt-1" hidden></p>
-        @endif
-        @include('enom::partials.confirm', ['confirmation' => 'I confirm the domain, contact details and one-year charge.'])
-        <p class="text-sm">Continuing creates an invoice due in 7 days. We do not email it. Paying it in full starts the registrar request, and your domain page shows when the registrar confirms it.</p>
-        <div class="max-w-[300px]"><x-button.primary type="submit">Continue to invoice</x-button.primary></div>
-        @include('enom::partials.help-link', ['route' => 'enom.help', 'topic' => $isTransfer ? 'ordering' : 'payment', 'label' => $isTransfer ? 'Transfer help' : 'Payment help'])
+        <div class="enom-panel">
+            @if ($isTransfer)
+                <section class="enom-section" aria-labelledby="enom-epp-heading">
+                    <div class="enom-section__head"><div><h2 id="enom-epp-heading" class="enom-h2">Transfer code</h2><p>Get this from your current registrar. It’s sometimes called an auth or EPP code.</p></div></div>
+                    <div data-field style="max-width:26rem">
+                        <label for="enom-epp" class="enom-label">Transfer code</label>
+                        <input id="enom-epp" name="epp" type="text" class="enom-input" required maxlength="255" autocomplete="off" spellcheck="false" autocapitalize="none"
+                            @if ($errors->has('epp')) aria-invalid="true" aria-describedby="enom-epp-error" @endif>
+                        @if ($errors->has('epp'))<p id="enom-epp-error" class="enom-error">{{ $errors->first('epp') }}</p>@endif
+                    </div>
+                </section>
+            @endif
+
+            <section class="enom-section" aria-labelledby="enom-owner-heading">
+                <div class="enom-section__head"><div><h2 id="enom-owner-heading" class="enom-h2">Domain owner</h2><p>The registry lists this person or organization as the owner. We’ve filled it in from your account.</p></div></div>
+                @include('enom::partials.contact', ['prefix' => 'contact', 'errorPrefix' => 'contact', 'idPrefix' => 'owner', 'values' => $prefill, 'useOld' => $retry])
+                <div style="margin-top:1.25rem">
+                    <input type="hidden" name="same_contact" value="0">
+                    <label class="enom-checkbox"><input type="checkbox" id="enom-same" name="same_contact" value="1" @checked($same)><span>Use this contact for the administrative, technical and billing contacts too</span></label>
+                </div>
+            </section>
+
+            <section class="enom-section" id="enom-roles" data-enom-reveal="#enom-same" data-enom-reveal-inverse aria-labelledby="enom-roles-heading" @if ($same) data-start-hidden @endif>
+                <div class="enom-section__head"><div><h2 id="enom-roles-heading" class="enom-h2">Other contacts</h2><p>Leave a contact blank to use the owner’s details.</p></div></div>
+                <div class="enom-stack">
+                    @foreach (['admin' => 'Administrative contact', 'tech' => 'Technical contact', 'auxbilling' => 'Billing contact'] as $role => $roleLabel)
+                        @php $open = collect($errors->keys())->contains(fn ($key) => str_starts_with($key, 'roles.'.$role.'.')) || ($retry && array_filter((array) old('roles.'.$role, []), fn ($v, $k) => $k !== 'country' && is_string($v) && trim($v) !== '', ARRAY_FILTER_USE_BOTH)); @endphp
+                        <details class="enom-more" @if ($open) open @endif>
+                            <summary>{{ $roleLabel }}</summary>
+                            <div style="margin-top:.75rem">
+                                @include('enom::partials.contact', ['prefix' => 'roles['.$role.']', 'errorPrefix' => 'roles.'.$role, 'idPrefix' => 'role-'.$role, 'values' => [], 'useOld' => $retry, 'required' => false, 'section' => 'section-'.$role])
+                            </div>
+                        </details>
+                    @endforeach
+                </div>
+            </section>
+
+            @if (!$isTransfer)
+                <section class="enom-section" aria-labelledby="enom-ns-heading">
+                    <div class="enom-section__head"><div><h2 id="enom-ns-heading" class="enom-h2">Nameservers</h2><p>Nameservers decide where your website and email are hosted. You can change them later.</p></div></div>
+                    <div class="enom-choices" role="radiogroup" aria-labelledby="enom-ns-heading">
+                        <label class="enom-choice">
+                            <input type="radio" name="ns_mode" value="default" id="enom-ns-default" @checked($nsMode === 'default')>
+                            <div>
+                                <strong>Use our default nameservers</strong>
+                                @if ($defaults)
+                                    <span>{{ implode(', ', $defaults) }}</span>
+                                @else
+                                    <span>Your domain starts with the registrar’s standard nameservers.</span>
+                                @endif
+                            </div>
+                        </label>
+                        <label class="enom-choice">
+                            <input type="radio" name="ns_mode" value="custom" id="enom-ns-custom" @checked($nsMode === 'custom')>
+                            <div><strong>Use custom nameservers</strong><span>For example, the ones your web host gave you.</span></div>
+                        </label>
+                    </div>
+                    <div data-enom-reveal="#enom-ns-custom" data-field style="margin-top:1rem;max-width:30rem">
+                        <label for="enom-nameservers" class="enom-label">Custom nameservers</label>
+                        <textarea id="enom-nameservers" name="nameservers" class="enom-input" rows="4" data-enom-nameservers spellcheck="false" autocapitalize="none"
+                            placeholder="ns1.example.com&#10;ns2.example.com" aria-describedby="enom-ns-hint{{ $errors->has('nameservers') ? ' enom-ns-error' : '' }}" @if ($errors->has('nameservers')) aria-invalid="true" @endif>{{ $retry ? old('nameservers') : '' }}</textarea>
+                        <p id="enom-ns-hint" class="enom-hint">2 to 12 hostnames, one per line.</p>
+                        @if ($errors->has('nameservers'))<p id="enom-ns-error" class="enom-error">{{ $errors->first('nameservers') }}</p>@endif
+                    </div>
+                </section>
+            @else
+                <section class="enom-section" aria-labelledby="enom-ns-heading">
+                    <h2 id="enom-ns-heading" class="enom-h2">Nameservers</h2>
+                    <p class="enom-small enom-muted" style="margin-top:.25rem">Your current nameservers stay in place, so your website and email keep working during the transfer.</p>
+                </section>
+            @endif
+        </div>
+
+        <aside class="enom-panel enom-summary" aria-labelledby="enom-summary-heading">
+            <div class="enom-section">
+                <h2 id="enom-summary-heading" class="enom-small enom-muted" style="font-weight:600">Order summary</h2>
+                <p class="enom-domain" style="font-size:1.125rem;margin:.25rem 0 1rem">{{ $quote['domain'] }}</p>
+                <dl>
+                    <dt>{{ $isTransfer ? 'Transfer, 1 year' : 'Registration, 1 year' }}</dt><dd>{{ $free ? 'Complimentary' : $price }}</dd>
+                    <dt>Renews at</dt><dd>{{ $free ? 'No charge' : $renewal.'/yr' }}</dd>
+                </dl>
+                <dl class="enom-total"><dt>Due today</dt><dd>{{ $free ? 'Nothing' : $price }}</dd></dl>
+                <div style="margin-top:1.25rem">
+                    <button type="submit" class="enom-btn enom-btn--primary">{{ $free ? ($isTransfer ? 'Start transfer' : 'Register domain') : 'Continue to payment' }}</button>
+                </div>
+                <p class="enom-small enom-muted" style="margin-top:.75rem">
+                    @if ($free)
+                        This domain is complimentary on your account. Nothing to pay.
+                    @elseif ($isTransfer)
+                        You’ll pay on the next page. The transfer starts once payment clears.
+                    @else
+                        You’ll pay on the next page. Registration starts once payment clears.
+                    @endif
+                </p>
+            </div>
+        </aside>
     </form>
-    @include('enom::partials.sandbox')
 </div>
-@include('enom::partials.form-validation')
+</div>
+@include('enom::partials.client-script')
 @endcomponent
