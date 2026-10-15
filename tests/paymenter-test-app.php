@@ -17,7 +17,13 @@ function paymenterTestApp(): string
         throw new RuntimeException('A pristine Paymenter release is required.');
     }
     $config = $path.'/config/app.php';
-    if (!is_file($config) || preg_match_all('/[\'"]version[\'"]\s*=>\s*[\'"]([^\'"]+)[\'"]/', file_get_contents($config), $versions) !== 1
+    $source = '';
+    if (is_file($config)) {
+        foreach (token_get_all(file_get_contents($config)) as $token) {
+            $source .= is_array($token) ? (in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true) ? ' ' : $token[1]) : $token;
+        }
+    }
+    if (!is_file($config) || preg_match_all('/[\'"]version[\'"]\s*=>\s*[\'"]([^\'"]+)[\'"]/', $source, $versions) !== 1
         || $versions[1][0] !== '1.5.9') {
         throw new RuntimeException('These native harnesses require the tested Paymenter 1.5.9 release.');
     }

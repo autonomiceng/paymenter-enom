@@ -311,7 +311,7 @@ final class RegistrarClient
             foreach ($details as $detail) {
                 $states[] = !is_array($detail) ? 'unknown' : (strtolower((string) ($detail['orderstatus'] ?? '')) === 'open' ? 'pending' : (strtolower((string) ($detail['orderstatus'] ?? '')) === 'closed' ? (strtolower((string) ($detail['status'] ?? '')) === 'successful' ? 'success' : 'rejected') : 'unknown'));
             }
-            $status = in_array('unknown', $states, true) ? 'unknown' : (in_array('pending', $states, true) ? 'pending' : (in_array('rejected', $states, true) ? 'rejected' : 'success'));
+            $status = !$states || in_array('unknown', $states, true) ? 'unknown' : (in_array('pending', $states, true) ? 'pending' : (in_array('rejected', $states, true) ? 'rejected' : 'success'));
             return new RegistrarResult($status, $result->code, $data);
         }
         // Read and nonfinancial-write successes are acknowledgements. Callers verify their postconditions.

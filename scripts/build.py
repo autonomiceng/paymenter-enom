@@ -38,15 +38,17 @@ def runtime_members(source):
         members['Enom/' + relative] = path.read_bytes()
     if 'Enom/Enom.php' not in members or 'Enom/LICENSE' not in members:
         raise ValueError('The extension entry point and MIT license are required')
-    if not members['Enom/LICENSE'].startswith(b'MIT License\n'):
-        raise ValueError('The release must carry the MIT license')
+    if members['Enom/LICENSE'] != (ROOT/'LICENSE').read_bytes():
+        raise ValueError('The release license must match the repository license')
     versions = re.findall(rb"\bversion\s*:\s*['\"]([0-9]+\.[0-9]+\.[0-9]+)['\"]", members['Enom/Enom.php'])
     if len(versions) != 1:
         raise ValueError('One literal ExtensionMeta version is required')
     return versions[0].decode(), members
 
 def build(source, output):
-    source = source.absolute()
+    if source.is_symlink():
+        raise ValueError('A real Enom source directory is required')
+    source = source.resolve()
     output = output.absolute()
     if output.is_symlink() or output.resolve() != output or output.is_relative_to(source):
         raise ValueError('Use a canonical output directory outside Enom/')

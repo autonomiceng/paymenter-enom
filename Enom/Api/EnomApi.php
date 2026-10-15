@@ -441,7 +441,7 @@ final class EnomApi
                 'grace_eligible' => null];
         } elseif ($kind === 'nameservers') {
             $normalized['nameservers'] = self::list($data['dns'] ?? null);
-            $normalized['uses_enom_dns'] = isset($data['usedns']) ? strtolower($data['usedns']) === 'default' : null;
+            $normalized['uses_enom_dns'] = is_string($data['usedns'] ?? null) ? strtolower($data['usedns']) === 'default' : null;
         } elseif ($kind === 'lock') {
             $normalized['locked'] = self::flag($data['reg-lock'] ?? null);
         } elseif ($kind === 'privacy') {

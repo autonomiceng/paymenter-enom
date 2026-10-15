@@ -165,10 +165,10 @@ class Enom extends Server
         View::addNamespace('enom', __DIR__.'/resources/views');
         if (is_file(__DIR__.'/routes/web.php')) { require __DIR__.'/routes/web.php'; }
         Event::listen(Created::class, function (Created $event) {
-            try { app(DomainOperations::class)->bindInvoiceItem($event->invoiceItem); } catch (Throwable) {}
+            try { app(DomainOperations::class)->bindInvoiceItem($event->invoiceItem); } catch (Throwable $e) { report($e); }
         });
         Event::listen(Paid::class, function (Paid $event) {
-            try { app(DomainOperations::class)->acceptPaidInvoice($event->invoice); } catch (Throwable) {}
+            try { app(DomainOperations::class)->acceptPaidInvoice($event->invoice); } catch (Throwable $e) { report($e); }
         });
         Service::updating(fn (Service $service) => app(DomainBilling::class)->preserveNativeDate($service));
         Event::listen(CartItemCreating::class, function (CartItemCreating $event) {
@@ -185,7 +185,7 @@ class Enom extends Server
             if (class_exists($policy)) { Gate::policy(__NAMESPACE__.'\\Models\\'.$model, $policy); }
         }
         Schedule::call(function () {
-            try { app(DomainOperations::class)->sweep(); } catch (Throwable) {}
+            try { app(DomainOperations::class)->sweep(); } catch (Throwable $e) { report($e); }
         })->name('enom-reconcile')->everyFiveMinutes()->withoutOverlapping(5)->onOneServer();
         Schedule::call(function () {
             Domain::whereIn('status', DomainObservation::STATUSES)->orderBy('id')->chunkById(100, function ($domains) {
