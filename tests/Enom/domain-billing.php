@@ -438,9 +438,13 @@ $earlySponsored=$billing->sponsor($earlyFree->id,$staff);
 checkBilling($earlySponsored?->state==='queued'&&$earlySponsored->funding_basis==='sponsored'&&$earlySponsored->invoice_id===null
     &&$earlyFinancial===hash('sha256',serialize(array_map(fn($table)=>DB::table($table)->get()->all(),['invoices','invoice_items','invoice_transactions','credits']))),
     'Explicit early staff sponsorship was blocked by calendar or fabricated financial activity.');
-// Saving native server defaults must not enroll new orders implicitly.
-checkBilling(collect($extension->getConfig())->firstWhere('name','managed_billing')['default']===false,
-    'Native server form defaults implicitly enroll new domain orders.');
+// 0.3: every new order is billing-managed, so the enrolment switch is gone. Saving native defaults still sends nothing:
+// registrar writes stay off, the environment defaults to test and credentials are stored encrypted.
+$serverConfig = collect($extension->getConfig());
+checkBilling($serverConfig->firstWhere('name','managed_billing')===null && $serverConfig->firstWhere('name','operations_enabled')['default']===false
+    && $serverConfig->firstWhere('name','environment')['default']==='test' && $serverConfig->firstWhere('name','uid')['encrypted']===true
+    && $serverConfig->firstWhere('name','token')['encrypted']===true && $serverConfig->firstWhere('name','dns_tools')['default']===false,
+    'Native server form defaults enable registrar writes, live mode, DNS tools or plaintext credentials.');
 // A disabled billing lifecycle is fully inert, including health and cancellation.
 $allBillingRows = function (): array {
     $rows=[];foreach(DB::select("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name") as $table){

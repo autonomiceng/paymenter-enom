@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<interface-response>
+  <Command>GETEXTATTRIBUTES</Command>
+  <APIType>API.NET</APIType>
+  <Language>eng</Language>
+  <ErrCount>0</ErrCount>
+  <ResponseCount>0</ResponseCount>
+  <MinPeriod>1</MinPeriod>
+  <MaxPeriod>10</MaxPeriod>
+  <Server />
+  <Site>eNom</Site>
+  <IsLockable />
+  <IsRealTimeTLD />
+  <TimeDifference>+0.00</TimeDifference>
+  <ExecTime />
+  <Done>true</Done>
+  <TrackingKey />
+  <RequestDateTime />
+  <debug />
+</interface-response>

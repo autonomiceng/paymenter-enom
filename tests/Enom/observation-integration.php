@@ -209,13 +209,25 @@ foreach (['Extend', 'Purchase', 'SetRenew', 'SynchAuthInfo', 'Contacts', 'TP_Cre
 }
 verify($transportCalls === 0 && $guardCalls === 0, 'Write refusal reached a transport or guard.');
 $writeApi = new EnomApi(new RegistrarClient('synthetic', 'secret', fn ($command) => envelope($command, '<RRPCode>200</RRPCode>')));
+// 0.3: the addressable endings are the server catalogue plus endings of existing registrations (com/net/us by default).
+// Anything else is refused before the transport; adding it to the server's suffixes is what admits it.
 foreach (['register', 'renew', 'search'] as $method) {
-    try { $method === 'register' ? $writeApi->register('existing.net', []) : $writeApi->$method('existing.net'); verify(false, 'New .net catalogue/write was allowed.'); }
+    try { $method === 'register' ? $writeApi->register('existing.org', []) : $writeApi->$method('existing.org'); verify(false, 'Ending outside the server catalogue was addressed.'); }
     catch (InvalidArgumentException) { verify(true, 'Catalogue remains bounded.'); }
 }
+$sent = [];
+$countingClient = function () use (&$sent) { return new RegistrarClient('synthetic', 'secret', function ($command, $params) use (&$sent) { $sent[] = $params['SLD'].'.'.$params['TLD']; return envelope($command, '<RRPCode>200</RRPCode>'); }); };
+(new EnomApi($countingClient()))->search('existing.net');
+verify($sent === ['existing.net'], 'Retained existing-registration ending was refused.');
+$catalogueApi = (new EnomApi($countingClient()))->withSuffixes(['ORG', '.io', 'bad suffix!', 'co.uk']);
+verify($catalogueApi->suffixes() === ['com', 'net', 'us', 'org', 'io', 'co.uk'], 'Catalogue suffixes were not normalized or deduplicated.');
+$catalogueApi->search('existing.org'); $catalogueApi->search('name.co.uk');
+verify($sent === ['existing.net', 'existing.org', 'name.co.uk'], 'Catalogue ending was refused or split at the wrong label.');
+try { $catalogueApi->search('xn--bcher-kva.org'); verify(false, 'International name was addressed.'); } catch (InvalidArgumentException) { verify(true, 'IDN remains unavailable.'); }
 verify((new EnomApi($client))->existingRenew('existing.us')->code === 'read_only', 'Explicit existing-domain renewal bypassed read-only mode.');
-try { RuntimeGuard::assertProvider($server->id, true); verify(false, 'Synthetic app passed the application binding guard.'); }
-catch (RuntimeException) { verify(true, 'Application binding guard refused the synthetic app.'); }
+// A server without encrypted credentials still refuses even reads.
+try { RuntimeGuard::assertProvider($server->id, true); verify(false, 'Server without encrypted credentials passed the runtime guard.'); }
+catch (RuntimeException $e) { verify(str_contains($e->getMessage(), 'account ID and API token'), 'Credential refusal lacks its explanation.'); }
 // Actual money needs exact successful order/item/domain/action/term and known USD.
 $binding = ['provider_order_id' => '12345', 'domain' => 'charged.net', 'action' => 'renew', 'term' => 1];
 $costBinding = array_replace($binding, ['action' => 'register']);

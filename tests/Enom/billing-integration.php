@@ -63,6 +63,8 @@ $fake = function (string $command, array $params) use (&$writes, &$providerCalls
         return xml($command, '<Domains><Domain><Name>'.($params['SLD'] ?? 'demo').'.com</Name><RRPCode>'.($check['available'] ? '210' : '211').'</RRPCode><IsPremium>false</IsPremium><IsPlatinum>false</IsPlatinum><IsEAP>false</IsEAP><Properties><Transferable>'.($check['transferable'] ? 'true' : 'false').'</Transferable></Properties></Domain></Domains>');
     }
     if ($command === 'GetDomainExp') { return xml($command, '<ExpirationDate>'.$providerExpiry.'</ExpirationDate>'); }
+    // 0.3 orders are always billing-managed, so registration anchors the provider domain ID from this account's info read.
+    if ($command === 'GetDomainInfo') { return xml($command, '<GetDomainInfo><domainname domainnameid="456">'.($params['SLD'] ?? 'demo').'.'.($params['TLD'] ?? 'com').'</domainname><status><expiration>'.$providerExpiry.'</expiration><belongs-to>synthetic</belongs-to></status></GetDomainInfo>'); }
     if ($command === 'GetExtendInfo') { return xml($command, '<Expiration>'.$providerExpiry.'</Expiration><MaxExtension>9</MaxExtension>'); }
     if ($command === 'Purchase' || $command === 'Extend') {
         $writes[] = $command;
@@ -100,9 +102,16 @@ App\Models\Currency::create(['code' => 'USD', 'name' => 'US Dollar', 'format' =>
 $server = App\Models\Server::create(['name' => 'Synthetic Enom', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
 $server->settings()->create(['key' => 'lead_days', 'value' => 30, 'type' => 'integer']);
 $server->settings()->create(['key' => 'operations_enabled', 'value' => true, 'type' => 'boolean']);
+$server->settings()->create(['key' => 'dns_tools', 'value' => true, 'type' => 'boolean']); // This file exercises SRV/DNSSEC requests.
 $category = App\Models\Category::create(['name' => 'Synthetic domains', 'slug' => 'synthetic-domains']);
 $product = App\Models\Product::create(['name' => 'Synthetic .com', 'category_id' => $category->id, 'server_id' => $server->id, 'hidden' => true]);
-foreach (['enom_tld' => 'com', 'enom_register_price' => '15.00', 'enom_transfer_price' => '15.00', 'enom_privacy_price' => '5.00'] as $key => $value) { $product->settings()->create(['key' => $key, 'value' => $value]); }
+// 0.3: endings and prices come from the enom_tlds catalogue; the hidden product is the server's catalogue product.
+foreach (['enom_catalogue' => '1', 'enom_privacy_price' => '5.00'] as $key => $value) { $product->settings()->create(['key' => $key, 'value' => $value]); }
+// Credentials saved without the encrypted flag are encrypted by the extension's Setting listener before the first write.
+$server->settings()->create(['key' => 'uid', 'value' => 'synthetic']);
+$server->settings()->create(['key' => 'token', 'value' => 'synthetic']);
+Paymenter\Extensions\Servers\Enom\Models\Tld::create(['server_id' => $server->id, 'tld' => 'com', 'enabled' => true, 'pricing_mode' => 'fixed',
+    'register_price' => '15.00', 'renew_price' => '15.00', 'transfer_price' => '15.00']);
 $plan = $product->plans()->create(['name' => 'One year', 'type' => 'recurring', 'billing_unit' => 'year', 'billing_period' => 1]);
 $plan->prices()->create(['currency_code' => 'USD', 'price' => 15, 'setup_fee' => 0]);
 // The upstream direct checkout path must be blocked without a core/template edit.
@@ -114,12 +123,32 @@ try { $checkout->validate(); check(false, 'Native checkout accepted a domain wit
 $nativeCart = App\Models\Cart::create(['user_id' => $user->id, 'currency_code' => 'USD']);
 try { $nativeCart->items()->create(['product_id' => $product->id, 'plan_id' => $plan->id, 'quantity' => 1, 'config_options' => [], 'checkout_config' => []]); check(false, 'Native cart stored an Enom order without intent.'); }
 catch (App\Exceptions\DisplayException) { check(true, 'Native cart refused registrar product.'); }
-$contacts = ['registrant' => ['first_name' => 'Demo', 'last_name' => 'Owner', 'organization_name' => 'Demo', 'address1' => '123 Example Road', 'city' => 'Example', 'postal_code' => '12345', 'country' => 'US', 'email_address' => 'demo@example.invalid', 'phone' => '+1.5551234567']];
+$contacts = ['registrant' => ['first_name' => 'Demo', 'last_name' => 'Owner', 'organization_name' => 'Demo', 'address1' => '123 Example Road', 'city' => 'Example', 'postal_code' => '12345', 'country' => 'US', 'email_address' => 'demo@example.com', 'phone' => '+1.5551234567']];
 $quote = $orders->quote($user, 'billing-demo.com');
 $invoice = $orders->place($user, $quote['intent_id'], $contacts);
 $domain = Paymenter\Extensions\Servers\Enom\Models\Domain::firstOrFail();
 $operation = Paymenter\Extensions\Servers\Enom\Models\Operation::firstOrFail();
 check($operation->state === 'awaiting_payment', 'Initial operation must be bound before payment.');
+// 0.3 ordering: catalogue price, the server's existing catalogue product, always-managed billing and a recorded account binding.
+$expectedAccount = Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard::accountFingerprint(['uid' => 'synthetic']);
+check($quote['amount'] === '15.00' && $quote['renewal_amount'] === '15.00' && $quote['complimentary'] === false && $quote['test_environment'] === true, 'Quote did not use the enabled catalogue prices.');
+check($domain->service->product_id === $product->id && App\Models\Product::count() === 1, 'Ordering created another product instead of reusing the catalogue product.');
+check($domain->billing_managed && $domain->price_mode === null && ($domain->renewal_policy['account_fingerprint'] ?? null) === $expectedAccount, 'New order is not billing-managed with its account fingerprint.');
+check($server->settings()->where('key', 'enom_account_binding')->value('value') === $expectedAccount, 'First order did not bind the server to its Enom account.');
+check($server->settings()->where('key', 'uid')->value('encrypted') && $server->settings()->where('key', 'token')->value('encrypted'), 'Credentials saved without the flag were stored unencrypted.');
+try { $orders->quote($user, 'billing-demo.net'); check(false, 'An ending without an enabled catalogue row was quoted.'); }
+catch (InvalidArgumentException|RuntimeException) { check(true, 'Ending outside the catalogue refused.'); }
+// The rest of this file covers the retained legacy lifecycle: a pre-0.3 domain billed by native service dates.
+// Its order is reshaped to what a 0.2 order with managed billing off recorded: no renewal policy and an unmanaged operation binding.
+check(!empty($operation->policy['billing_managed']) && $operation->policy['account_fingerprint'] === $expectedAccount, 'New order binding lacks its managed account policy.');
+function legacyOrder(App\Models\Invoice $invoice): void {
+    $operation = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $invoice->id)->firstOrFail();
+    Illuminate\Database\Eloquent\Model::withoutEvents(function () use ($operation) {
+        $operation->domain->update(['billing_managed' => false, 'renewal_policy' => null]);
+        $operation->update(['policy' => null]);
+    });
+}
+legacyOrder($invoice);
 check($orders->place($user, $quote['intent_id'], $contacts)->id === $invoice->id, 'Intent replay created another invoice.');
 check(count($writes) === 0, 'Ordering executed a provider write.');
 check($operations->acceptPaidInvoice($invoice) === [], 'Unpaid invoice queued registrar action.');
@@ -258,6 +287,7 @@ $staff = App\Models\User::create(['email' => 'staff@example.invalid', 'password'
 $unknownPurchase = false;
 $fundQuote = $orders->quote($user, 'funded-billing-demo.com');
 $fundInvoice = $orders->place($user, $fundQuote['intent_id'], $contacts);
+legacyOrder($fundInvoice); // Later checks use its native service due date.
 $fundOperation = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $fundInvoice->id)->firstOrFail();
 $beforeFund = count($writes);
 $beforeFundingRows = [
@@ -350,22 +380,20 @@ check($transferOperation->state === 'queued' && $operations->funded($transferOpe
 $transferWrites = count($writes);
 $checkOverrides['race-transfer-demo'] = ['available' => true, 'transferable' => true];
 check($operations->execute($transferOperation->id)->state === 'rejected' && count($writes) === $transferWrites, 'Became-unregistered transfer still reached provider submission.');
-// A verified empty getter permits only the controlled first add. Other and unknown shapes stay unavailable.
+// a verified empty getter on any active domain permits add only.
 $dnssecShape = 'empty';
 $domain = $domain->fresh();
 $originalDomainName = $domain->domain;
 $originalEmail = $user->email;
 $originalOrderId = $domain->provider_order_id;
 $ordinaryEmpty = $operations->refreshSnapshot($user, $domain->id);
-check(!$ordinaryEmpty->capabilities['dnssec_add'] && !$ordinaryEmpty->capabilities['dnssec_delete'], 'Empty DNSSEC enabled an uncontrolled first write.');
+check($ordinaryEmpty->capabilities['dnssec_add'] && !$ordinaryEmpty->capabilities['dnssec_delete'], 'Verified empty DNSSEC did not split add and delete permissions.');
+Illuminate\Database\Eloquent\Model::withoutEvents(fn () => $domain->update(['status' => 'expired']));
+$inactive = $operations->refreshSnapshot($user, $domain->id);
+check(!$inactive->capabilities['dnssec_add'] && !$inactive->capabilities['dnssec_delete'], 'Inactive domain allowed DNSSEC changes.');
+Illuminate\Database\Eloquent\Model::withoutEvents(fn () => $domain->update(['status' => 'active']));
 $user->update(['email' => 'demo@example.com']);
-check(!$operations->refreshSnapshot($user, $domain->id)->capabilities['dnssec_add'], 'First DNSSEC add allowed a non-demo domain.');
 $domain->update(['domain' => 'demo-domain-0123456789abcdef.com']);
-$controlledEmpty = $operations->refreshSnapshot($user, $domain->id);
-check($controlledEmpty->capabilities['dnssec_add'] && !$controlledEmpty->capabilities['dnssec_delete'], 'Controlled empty DNSSEC did not split add and delete permissions.');
-$domain->update(['provider_order_id' => null]);
-check(!$operations->refreshSnapshot($user, $domain->id)->capabilities['dnssec_add'], 'First DNSSEC add allowed an unbound demo domain.');
-$domain->update(['provider_order_id' => $originalOrderId]);
 $dnssecShape = 'unverified_nonempty';
 $unknownDs = $operations->refreshSnapshot($user, $domain->id);
 check(!$unknownDs->capabilities['dnssec_add'] && !$unknownDs->capabilities['dnssec_delete'], 'Unverified nonempty DNSSEC enabled mutations.');
@@ -380,11 +408,12 @@ check($observedDs->capabilities['dnssec_add'] && $observedDs->capabilities['dnss
 check($operations::canonicalRecords('dnssec', $observedDs->snapshot['dnssec']) === $operations::canonicalRecords('dnssec', [$observedTuple]), 'Actual DNSSEC getter did not preserve the submitted public tuple.');
 $user->update(['email' => $originalEmail]);
 $wrongDemoOwner = $operations->refreshSnapshot($user, $domain->id);
-check(!$wrongDemoOwner->capabilities['dnssec_add'] && !$wrongDemoOwner->capabilities['dnssec_delete'], 'Verified nonempty DNSSEC escaped the DNSSEC validation rule.');
+check($wrongDemoOwner->capabilities['dnssec_add'] && $wrongDemoOwner->capabilities['dnssec_delete'], 'Verified nonempty DNSSEC still depends on the removed demo owner identity.');
 $user->update(['email' => 'demo@example.com']);
 $domain->update(['provider_order_id' => null]);
 $unboundDs = $operations->refreshSnapshot($user, $domain->id);
-check(!$unboundDs->capabilities['dnssec_add'] && !$unboundDs->capabilities['dnssec_delete'], 'Verified nonempty DNSSEC allowed an unbound domain.');
+// Adopted active registrations may lack a recorded order ID; a verified read is the only DNSSEC precondition now.
+check($unboundDs->capabilities['dnssec_add'] && $unboundDs->capabilities['dnssec_delete'], 'Verified nonempty DNSSEC refused an active domain without an order ID.');
 $domain->update(['provider_order_id' => $originalOrderId]);
 $domain->update(['status' => 'registration_pending']);
 $inactiveDs = $operations->refreshSnapshot($user, $domain->id);
@@ -426,6 +455,8 @@ $nsCases = [
     'nested' => null,
     'too-many' => array_map(fn ($i) => 'ns'.$i.'.example.com', range(1, 13)),
     'legacy' => array_map(fn ($i) => 'dns'.$i.'.name-services.com', range(1, 5)),
+    // Enom's default DNS set never confirms a request for the customer's own nameservers.
+    'default-fallback' => array_map(fn ($i) => 'dns'.$i.'.name-services.com', range(1, 5)),
     'reconcile' => ['NS2.Example.COM.', 'NS1.EXAMPLE.COM.'],
 ];
 foreach ($nsCases as $case => $readback) {
@@ -454,7 +485,13 @@ foreach ($nsCases as $case => $readback) {
     $nsRequested = $case === 'legacy' ? ['dns1.name-services.com', 'dns2.name-services.com'] : $nsPair;
     $nsOperation = $nsOperations->enqueueManagement($user, $nsDomain->id, 'nameservers', ['confirmed' => true, 'nameservers' => $nsRequested], hash('sha256', 'ns-'.$case));
     $nsResult = $nsOperations->execute($nsOperation->id);
-    if ($case === 'equivalent') {
+    if ($case === 'legacy') {
+        // 0.3: Enom answers a request for any of its own hosts with its whole default set, so two-vs-five default hosts confirm.
+        check($nsResult->state === 'succeeded' && $nsCalls === ['ModifyNS', 'GetDNS'], 'Enom default DNS readback did not confirm a request for its own hosts.');
+        $nsOperations->execute($nsOperation->id);
+        check(count(array_filter($nsCalls, fn ($command) => $command === 'ModifyNS')) === 1, 'Confirmed default nameservers were resent.');
+        check($nsOperations->enqueueManagement($user, $nsDomain->id, 'nameservers', ['confirmed' => true, 'nameservers' => $nsPair], hash('sha256', 'ns-legacy-next'))->wasRecentlyCreated, 'Confirmed default nameservers blocked the next request.');
+    } elseif ($case === 'equivalent') {
         check($nsResult->state === 'succeeded', 'Reversed uppercase dotted nameserver set did not confirm.');
         $nsOperations->execute($nsOperation->id);
         check(count(array_filter($nsCalls, fn ($command) => $command === 'ModifyNS')) === 1, 'Equivalent confirmed nameservers were resent.');
@@ -466,7 +503,7 @@ foreach ($nsCases as $case => $readback) {
         check($nsResult->state === 'uncertain', 'Invalid or incomplete nameserver set was confirmed: '.$case);
         check($nsOperations->reconcile($nsOperation->id)->state === 'uncertain'
             && count(array_filter($nsCalls, fn ($command) => $command === 'ModifyNS')) === 1, 'Invalid NS reconciliation changed history or resent: '.$case);
-        if ($case === 'legacy') {
+        if ($case === 'default-fallback') {
             $blockedRows = Illuminate\Support\Facades\DB::table('enom_operations')->orderBy('id')->get()->toArray();
             $blockedJobs = Illuminate\Support\Facades\DB::table('jobs')->orderBy('id')->get()->toArray();
             $refused = false;
@@ -475,7 +512,7 @@ foreach ($nsCases as $case => $readback) {
             check($refused && $nsOperation->fresh()->state === 'uncertain'
                 && Illuminate\Support\Facades\DB::table('enom_operations')->orderBy('id')->get()->toArray() == $blockedRows
                 && Illuminate\Support\Facades\DB::table('jobs')->orderBy('id')->get()->toArray() == $blockedJobs
-                && count(array_filter($nsCalls, fn ($command) => $command === 'ModifyNS')) === 1, 'Legacy two-vs-five uncertainty accepted a new request or altered history.');
+                && count(array_filter($nsCalls, fn ($command) => $command === 'ModifyNS')) === 1, 'Uncertain nameserver change accepted a new request or altered history.');
         }
     }
 }
@@ -596,14 +633,8 @@ foreach(['purchase','renew'] as $privacyAction){
     check($operations->execute($managedPrivacyOp->id)->state==='succeeded'&&$managedPrivacyService->fresh()->expires_at===null,'Managed privacy failed or fabricated native recurring billing date.');
 }
 require_once $testRoot.'/app/Classes/helpers.php';
-Illuminate\Support\Facades\Auth::login($user);
-$app['view']->share('errors', new Illuminate\Support\ViewErrorBag);
-$app['view']->addLocation($release.'/themes/default/views');
-app('router')->getRoutes()->refreshNameLookups();
-$manager = app(Paymenter\Extensions\Servers\Enom\Services\DomainManager::class);
-$snapshot = $manager->snapshot($user, $domain->id);
-$keys = array_fill_keys([...$manager::ACTIONS, 'refresh', 'renew', 'privacy_purchase', 'privacy_renew', 'renewal_preference'], str_repeat('a', 64));
-$rendered = view('enom::show', ['snapshot' => $snapshot, 'keys' => $keys])->render();
-check(strlen($rendered) > 100 && str_contains($rendered, 'name="_token"'), 'Full native theme/domain page failed to render.');
+require_once dirname(__DIR__).'/enom-domain-page.php';
+$rendered = enomDomainPage($user, $domain->id);
+check(strlen($rendered) > 100 && str_contains($rendered, 'name="_token"') && str_contains($rendered, $domain->fresh()->domain), 'Full native theme/domain page failed to render through the controller.');
 echo json_encode(['passed' => $checks, 'provider_writes_fake' => count($writes), 'database' => 'sqlite::memory:', 'runtime' => $testRoot], JSON_PRETTY_PRINT).PHP_EOL;
 $successful = true;

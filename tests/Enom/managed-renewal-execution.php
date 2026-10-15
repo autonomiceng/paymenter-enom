@@ -89,15 +89,18 @@ $role = App\Models\Role::create(['name' => 'Synthetic renewal funder', 'permissi
 $staff = App\Models\User::create(['email' => 'execution-staff@example.invalid', 'password' => bcrypt('synthetic'), 'role_id' => $role->id]);
 App\Models\Currency::create(['code' => 'USD', 'name' => 'US Dollar', 'format' => '1,000.00', 'prefix' => '$']);
 $server = App\Models\Server::create(['name' => 'Synthetic execution', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
-foreach (['operations_enabled', 'billing_enabled', 'managed_billing'] as $key) {
+foreach (['operations_enabled', 'billing_enabled'] as $key) {
     $server->settings()->create(['key' => $key, 'value' => true, 'type' => 'boolean']);
 }
-$server->settings()->create(['key' => 'uid', 'value' => 'offline-account']);
+// 0.3 ordering binds the server account from its stored credentials, which must be encrypted.
+$server->settings()->create(['key' => 'uid', 'value' => 'offline-account', 'encrypted' => true]);
+$server->settings()->create(['key' => 'token', 'value' => 'synthetic-token-do-not-store', 'encrypted' => true]);
 $category = App\Models\Category::create(['name' => 'Execution test', 'slug' => 'execution-test']);
 $product = App\Models\Product::create(['name' => 'Managed domain', 'category_id' => $category->id, 'server_id' => $server->id, 'hidden' => true]);
-foreach (['enom_tld' => 'com', 'enom_register_price' => '15.00', 'enom_transfer_price' => '15.00'] as $key => $value) {
-    $product->settings()->create(['key' => $key, 'value' => $value]);
-}
+// 0.3: orderable endings and prices come from the catalogue; this product is the server's catalogue product.
+$product->settings()->create(['key' => 'enom_catalogue', 'value' => '1']);
+Paymenter\Extensions\Servers\Enom\Models\Tld::create(['server_id' => $server->id, 'tld' => 'com', 'enabled' => true, 'pricing_mode' => 'fixed',
+    'register_price' => '15.00', 'renew_price' => '15.00', 'transfer_price' => '15.00']);
 $plan = $product->plans()->create(['name' => 'One year', 'type' => 'recurring', 'billing_unit' => 'year', 'billing_period' => 1]);
 $plan->prices()->create(['currency_code' => 'USD', 'price' => 15, 'setup_fee' => 0]);
 App\Models\Gateway::create(['name' => 'Synthetic gateway', 'type' => 'gateway', 'extension' => 'Stripe', 'enabled' => true]);
@@ -172,6 +175,12 @@ $make = function (string $kind = 'paid', string $tld = 'com', array $options = [
         'domain' => $name, 'sld' => 'execution-'.$counter, 'tld' => $tld, 'provider_domain_id' => '456',
         'status' => 'active', 'provider_expires_at' => $options['expiry'] ?? '2026-12-01', 'billing_managed' => true,
         'authority_generation' => 1, 'confirmed_revision' => 1, 'renewal_policy' => ['enabled' => true]]);
+    if ($kind === 'complimentary') {
+        // 0.3: the reseller pays; one renewal per cycle at a quote under the server's complimentary cost limit.
+        $service->update(['price' => '0.00']);
+        $domain->update(['price_mode' => 'complimentary']);
+        return $billing->complimentary($domain->id, $staff);
+    }
     if ($kind === 'sponsored') {
         $domain->update(['sponsorship' => ['enabled' => true, 'standing' => true, 'approved_by' => $staff->id,
             'reason' => 'Isolated sponsorship approval', 'limit_minor' => 1200, 'currency' => 'USD', 'term' => 1],
@@ -401,7 +410,7 @@ $orders = new DomainOrders($operations);
 $quote = $orders->quote($user, $name);
 $contacts = ['registrant' => ['first_name' => 'Synthetic', 'last_name' => 'Owner',
     'organization_name' => 'Synthetic', 'address1' => '123 Example Road', 'city' => 'Example', 'postal_code' => '12345',
-    'country' => 'US', 'email_address' => 'execution-owner@example.invalid', 'phone' => '+1.5551234567']];
+    'country' => 'US', 'email_address' => 'execution-owner@example.com', 'phone' => '+1.5551234567']];
 $invoice = $orders->place($user, $quote['intent_id'], $contacts);
 ExtensionHelper::addPayment($invoice, 'Stripe', '15.00', transactionId: 'execution-initial-payment');
 $initial = Operation::where('invoice_id', $invoice->id)->firstOrFail();
@@ -718,6 +727,54 @@ foreach(['execute','reconcile'] as $calendarPath){
     checkExecution(count($writes)===1&&$preciseMoney===executionNativeMoney()&&$preciseDomain->fresh()->service->expires_at===null,
         'Completed date reconciliation replayed provider spending or changed native financial history/date.');
 }
+// 0.3 complimentary renewals: the quote must be complete and at or under complimentary_cost_cap; a confirmed overrun pauses spending.
+executionClock();
+$server->settings()->create(['key' => 'complimentary_cost_cap', 'value' => '11.00']);
+$complimentary = $make('complimentary');
+checkExecution($complimentary->state === 'queued' && $complimentary->funding_basis === 'complimentary' && $complimentary->invoice_id === null
+    && $complimentary->amount === '0.00' && $complimentary->policy['complimentary_cap_minor'] === 1100 && (int) $complimentary->authorized_by === $staff->id,
+    'Complimentary renewal was not queued with its cost limit.');
+checkExecution($billing->complimentary($complimentary->domain_id)?->id === $complimentary->id && $billing->complimentary($complimentary->domain_id, $staff)?->id === $complimentary->id,
+    'Repeat in the same cycle created another complimentary renewal.');
+$before = executionNativeMoney();
+$result = $operations->execute($complimentary->id);
+if ($result->state === 'pending') { $result = $operations->reconcile($complimentary->id); }
+checkExecution($result->state === 'succeeded' && count($writes) === 1 && $writes[0][0] === 'Extend' && $result->invoice_id === null, 'Complimentary renewal under the limit failed: '.$result->safe_code);
+checkExecution($before === executionNativeMoney(), 'Complimentary renewal created customer financial activity.');
+foreach ([[['price' => '11.01'], 'complimentary_cost_above_limit'], [['unknown_quote' => true], 'complimentary_quote_unconfirmed']] as [$options, $code]) {
+    $over = $make('complimentary', options: $options);
+    $result = $operations->execute($over->id);
+    checkExecution($result->state === 'held' && $result->safe_code === $code && $writes === [], 'Complimentary renewal was sent with '.json_encode($options).': '.$result->safe_code);
+}
+$atLimit = $make('complimentary', options: ['price' => '11.00']);
+checkExecution($operations->execute($atLimit->id)->state === 'succeeded' && count($writes) === 1, 'Quote exactly at the limit was refused.');
+// Revoked before sending: no longer funded, held without any registrar request. After sending, the outcome is still recorded.
+$revoked = $make('complimentary');
+$revoked->domain->update(['price_mode' => 'standard']);
+checkExecution(!$operations->funded($revoked->fresh()), 'Revoked complimentary renewal stayed funded before dispatch.');
+$result = $operations->execute($revoked->id);
+checkExecution($result->state === 'held' && $calls === [] && $writes === [], 'Revoked complimentary renewal reached Enom.');
+$sent = $make('complimentary');
+$sent->update(['policy' => $sent->policy + ['dispatch_attempted_at' => now()->toIso8601String()]]);
+$sent->domain->update(['price_mode' => 'standard']);
+checkExecution($operations->funded($sent->fresh()), 'Revocation after dispatch stopped the outcome being recorded.');
+$recorded = $make('complimentary');
+$recorded->domain->update(['price_mode' => 'custom']);
+$recorded->domain->service->update(['price' => '20.00']);
+checkExecution(!$operations->funded($recorded->fresh()), 'Complimentary renewal stayed funded after the service became paid.');
+// A confirmed actual charge above the limit pauses further automatic spending for that domain.
+$overrun = $make('complimentary', options: ['product_type' => 'Renew', 'actual' => '12.50']);
+$result = $operations->execute($overrun->id);
+if ($result->state === 'pending') { $result = $operations->reconcile($overrun->id); }
+checkExecution($result->state === 'succeeded' && ($result->cost['actual']['state'] ?? null) === 'confirmed' && $result->cost['actual']['amount'] === '12.50', 'Overrun fixture did not confirm its actual charge.');
+checkExecution(($result->domain->fresh()->renewal_policy['automatic_spend_paused'] ?? false) === true
+    && ($result->domain->fresh()->observation['cost_health']['state'] ?? null) === 'actual_cost_exceeded', 'Actual complimentary overrun did not pause automatic spending.');
+// Complimentary funding cannot be read-admitted by a staff member lacking admin.enom.fund.
+$heldForFund = $make('complimentary', options: ['price' => '11.01']);
+$operations->execute($heldForFund->id);
+$manageOnly = App\Models\User::create(['email' => 'manage-only@example.invalid', 'password' => bcrypt('synthetic'),
+    'role_id' => App\Models\Role::create(['name' => 'Manage only', 'permissions' => ['admin.enom.manage']])->id]);
+checkExecution(!$operations->canReadmitHeld($heldForFund->fresh(), $manageOnly) && $operations->canReadmitHeld($heldForFund->fresh(), $staff), 'Readmission of a held complimentary renewal ignored admin.enom.fund.');
 checkExecution($nativeSchema == DB::select("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'enom_%' ORDER BY name"), 'Native schema changed.');
 $successful = true;
 echo json_encode(['checks' => $checks, 'status' => 'passed', 'database' => 'isolated-sqlite-memory',

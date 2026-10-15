@@ -29,10 +29,18 @@ rejects('nameservers', $confirmed + ['nameservers' => ['ns1.example.com']], 'can
 rejects('nameservers', $confirmed + ['nameservers' => ['ns1.example.com', 'ns1.example.com']], 'duplicate nameservers');
 rejects('nameservers', $confirmed + ['nameservers' => ['https://ns1.example.com', 'ns2.example.com']], 'URL not nameserver');
 rejects('purchase', $confirmed, 'paid action cannot bypass orders');
-$contact = ['first_name' => 'Demo', 'last_name' => 'Customer', 'organization_name' => 'Sandbox', 'address1' => '123 Demo Road', 'city' => 'Test', 'postal_code' => '12345', 'country' => 'us', 'email_address' => 'demo@example.test', 'phone' => '+1.5551234567'];
+$contact = ['first_name' => 'Demo', 'last_name' => 'Customer', 'organization_name' => 'Sandbox', 'address1' => '123 Demo Road', 'city' => 'Test', 'postal_code' => '12345', 'country' => 'us', 'email_address' => 'demo@example.com', 'phone' => '+1.5551234567'];
 $contacts = Manager::validatePayload('contacts', $confirmed + ['contact_type' => 'registrant', 'contact' => $contact + ['token' => 'private', 'epp' => 'secret']]);
 check($contacts['contact_type'] === 'registrant' && $contacts['contact']['country'] === 'US', 'one complete contact canonicalized');
 check(!isset($contacts['contact']['token']) && !isset($contacts['contact']['epp']), 'unknown contact fields stripped');
+// 0.3: one request may set every role, and addresses at reserved test domains are refused before reaching Enom.
+check(Manager::validatePayload('contacts', $confirmed + ['contact_type' => 'all', 'contact' => $contact])['contact_type'] === 'all', 'all-roles contact accepted');
+rejects('contacts', $confirmed + ['contact_type' => 'billing', 'contact' => $contact], 'unknown contact role refused');
+foreach (['demo@example.invalid', 'demo@example.test', 'demo@host.example', 'demo@machine.local', 'demo@localhost'] as $reserved) {
+    $reservedContact = $contact; $reservedContact['email_address'] = $reserved;
+    rejects('contacts', $confirmed + ['contact_type' => 'registrant', 'contact' => $reservedContact], 'reserved email domain refused: '.$reserved);
+}
+foreach (['epp_email', 'epp_sync'] as $noPayload) { check(Manager::validatePayload($noPayload, $confirmed) === [], $noPayload.' carries no payload'); }
 foreach (['+1 (555) 234-5678', '+15552345678', '1-555-234-5678', '(555) 234-5678', '5552345678'] as $phone) {
     $browserContact = $contact; $browserContact['phone'] = $phone;
     check(Manager::validatePayload('contacts', $confirmed + ['contact_type' => 'registrant', 'contact' => $browserContact])['contact']['phone'] === '+1.5552345678', 'safe browser US phone normalized: '.$phone);
@@ -88,7 +96,7 @@ $badDs = $ds; $badDs['algorithm'] = '15';
 rejects('dnssec_add', $confirmed + ['ds' => $badDs], 'unsupported provider algorithm');
 $safe = Manager::safeSnapshot(['nameservers' => ['ns1.example.test'], 'epp' => 'private', 'token' => 'private', 'raw_xml' => 'private', 'contacts' => ['registrant' => $contact + ['epp' => 'private']], 'privacy' => ['allowed' => true, 'price' => 'private'], 'dnssec' => [$ds + ['request' => 'private']]]);
 check(!str_contains(json_encode($safe), 'private'), 'snapshot excludes credentials, EPP, provider raw and arbitrary fields');
-check($safe['contacts']['registrant']['email_address'] === 'demo@example.test', 'authorized contact fields retained');
+check($safe['contacts']['registrant']['email_address'] === 'demo@example.com', 'authorized contact fields retained');
 check(Manager::digest($records) !== Manager::digest(array_reverse($records)), 'DNS preimage detects full list changes');
 check(Manager::safeSnapshot(['nameservers' => 'bad', 'contacts' => 'bad', 'hosts' => 'bad'])['hosts'] === [], 'malformed cache shape safely omitted');
 $unknownContactStatus = ['pending_verification' => null, 'transfer_locked' => null];

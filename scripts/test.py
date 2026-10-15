@@ -13,11 +13,13 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 PHP_TEST = ROOT/'scripts/php-test'
 SUITES = {
-    'provider': ['provider-contracts.php', 'registrar-money.php', 'contact-read-regressions.php', 'ui-input-contracts.php'],
+    'provider': ['provider-contracts.php', 'registrar-money.php', 'contact-read-regressions.php', 'ui-input-contracts.php',
+                 'catalogue-contracts.php', 'registrar-client.php'],
     'native': ['billing-integration.php', 'domain-billing.php', 'domain-administration.php', 'managed-renewal-execution.php',
                'renewal-admission.php', 'renewal-lifecycle-proof.php', 'observation-integration.php', 'reconciliation-rejection.php',
                'reconciliation-registration.php', 'capability-readbacks.php', 'provider-disposition.php', 'native-date-missing-schema.php',
-               'request-gates.php', 'staff-funding-gates.php'],
+               'request-gates.php', 'staff-funding-gates.php', 'catalogue-integration.php', 'runtime-guard.php', 'management-actions.php',
+               'pricing-complimentary.php'],
     'ui': ['automation-ui.php', 'automation-ui-edge-cases.php', 'readmission-ui-regressions.php', 'ui-concurrency-regressions.php',
            'ui-controller-regressions.php', 'ui-live-validation-pipeline.php', 'ui-admin-hub.php', 'ui-domain-validation-controller.php',
            'ui-ownership.php', 'ui-type-regressions.php', 'ui-views.php', 'uiux-regressions.php', 'presentation-regressions.php',

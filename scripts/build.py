@@ -10,7 +10,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_SUFFIXES = {'.php', '.json', '.css', '.js', '.svg'}
-RUNTIME_DIRECTORIES = {'Admin', 'Api', 'Http', 'Jobs', 'Models', 'Services', 'database', 'resources', 'routes'}
+RUNTIME_DIRECTORIES = {'Admin', 'Api', 'Http', 'Jobs', 'Models', 'Policies', 'Services', 'database', 'resources', 'routes'}
 
 def runtime_members(source):
     if source.is_symlink() or not source.is_dir():
