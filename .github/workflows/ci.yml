@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    env:
+      COMPOSER_CACHE_DIR: ${{ github.workspace }}/.cache/composer
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: shivammathur/setup-php@44454db4f0199b8b9685a5d763dc37cbf79108e1 # 2.36.0
+        with:
+          php-version: '8.3'
+          extensions: bcmath, ctype, curl, dom, fileinfo, gd, intl, mbstring, openssl, pdo_mysql, pdo_sqlite, sodium, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zip
+          tools: composer:v2
+          coverage: none
+      - uses: jdx/mise-action@6d1e696aa24c1aa1bcc1adea0212707c71ab78a8 # v3.6.1
+        with:
+          version: 2026.10.10
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            .cache/composer
+            ~/.npm
+            .cache/paymenter-1.5.9
+          key: paymenter-1.5.9-${{ runner.os }}-php8.3-${{ hashFiles('mise.toml', 'package-lock.json', 'scripts/bootstrap.py') }}
+      - run: mise run bootstrap
+      - run: mise run test
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: test-failures
+          path: .scratch/tests-*
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  public:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@6d1e696aa24c1aa1bcc1adea0212707c71ab78a8 # v3.6.1
+        with:
+          version: 2026.10.10
+      - run: mise run build
+      - run: mise run check:public
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: public-failures
+          path: .scratch/tests-*
+          include-hidden-files: true
+          if-no-files-found: ignore

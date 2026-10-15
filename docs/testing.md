@@ -1,15 +1,17 @@
 # Offline development tests
 
-Use PHP 8.3 or 8.4, Python 3.10+, and Node 18+ with the pinned local development dependency:
+Install mise, system PHP 8.3 or 8.4 and Composer as described in [CONTRIBUTING](../CONTRIBUTING.md#set-up):
 
 ```bash
-npm ci --ignore-scripts
-python3 scripts/test.py --suite lint --suite package --suite provider
+mise install
+mise run bootstrap
+mise run check
+mise run test
 ```
 
-The native and UI suites require an explicit pristine Paymenter 1.5.9 development release with its Composer dependencies. Set `PAYMENTER_TEST_APP` to its canonical absolute path. The guard checks the Paymenter Composer identity and literal `config/app.php` version. It must have no `.env` or cached configuration and cannot be an installed `/var/www/` application. No dependency download occurs during tests.
+Bootstrap prepares a pristine Paymenter 1.5.9 app at `.cache/paymenter-1.5.9` with Composer dependencies and default theme assets. It reuses valid work on later runs. The test task sets `PAYMENTER_TEST_APP` to the canonical absolute path and `PAYMENTER_TEST_PHP` to system PHP. The guard checks the Composer identity and literal `config/app.php` version. The app must have no `.env` or cached configuration and cannot be an installed `/var/www/` application. Checks and tests download no dependencies.
 
-For an upstream source checkout, prepare a disposable copy as described in [CONTRIBUTING](../CONTRIBUTING.md#set-up). The Git tag uses a `development` version marker, and the source needs its theme assets built. The test copy must have a literal `1.5.9` marker and `public/default/manifest.json`.
+Without mise, run `python3 scripts/bootstrap.py` then `python3 scripts/dev.py test` with the tools from CONTRIBUTING on PATH. To use a separately prepared pristine app:
 
 ```bash
 export PAYMENTER_TEST_APP=/absolute/path/to/pristine-paymenter-1.5.9
@@ -34,7 +36,8 @@ This repository's passing local checks do not claim native upload acceptance, Ma
 Build a fresh native package with:
 
 ```bash
-python3 scripts/build.py --output-dir dist/release
+mise run build
+mise run check:public
 ```
 
-The builder reads only `Enom/`, requires its MIT `LICENSE`, and produces a single `Enom/` ZIP wrapper plus a member-hash manifest. Tests, docs, dependencies and private files cannot enter it. It uses fixed timestamps, order, permissions and compression settings, verifies archive readback and refuses existing artifacts. Reproducibility is checked within the same Python/zlib environment. Building never uploads or activates the extension.
+The build task preserves previous releases under `dist/release-<timestamp>` and creates fresh output in `dist/release`. The builder reads only `Enom/`, requires its MIT `LICENSE`, and produces a single `Enom/` ZIP wrapper plus a member-hash manifest. Tests, docs, dependencies and private files cannot enter it. It uses fixed timestamps, order, permissions and compression settings, verifies archive readback and refuses existing artifacts. Reproducibility is checked within the same Python/zlib environment. Public checks require full Git history and scan it plus the unpacked ZIP with pinned gitleaks. Building never uploads or activates the extension.

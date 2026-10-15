@@ -2,40 +2,30 @@
 
 ## Set up
 
-Use PHP 8.3 or 8.4, Python 3.10+ and Node 18+. PHP needs SQLite, XML and mbstring for the offline tests, plus Paymenter's normal extensions for native integration.
-
-Install the development dependency:
+Install [mise](https://mise.jdx.dev/getting-started.html), Git, system PHP 8.3 or 8.4 and Composer 2. PHP needs bcmath, ctype, curl, DOM/XML (including XMLReader and XMLWriter), fileinfo, GD, intl, mbstring, OpenSSL, PDO MySQL, PDO SQLite, sodium, SQLite3, tokenizer and zip. PHP stays on the system because mise PHP support varies by platform. Python, Node and gitleaks are pinned in `mise.toml`.
 
 ```bash
-npm ci --ignore-scripts
+mise install
+mise run bootstrap
 ```
 
-Prepare a separate Paymenter 1.5.9 release with its locked Composer dependencies. Run `composer install --no-scripts --no-plugins` there. The guard requires the literal version `1.5.9` in `config/app.php`. The upstream Git tag uses `development`; when using that source, change only the version marker in a disposable test copy. Keep the copy free of `.env` and cached configuration. Set `PAYMENTER_TEST_APP` to its canonical absolute path and `PAYMENTER_TEST_PHP` to the PHP executable.
-
-When using the upstream source checkout, build its theme assets in that disposable copy:
-
-```bash
-npm ci --ignore-scripts
-npm run build
-```
-
-Use a Node version supported by the upstream lock file; Node 22.22.3 was used for this setup. Confirm `public/default/manifest.json` exists before running the full suite. A packaged release may already include these assets.
+Bootstrap installs the locked npm dependencies with scripts disabled. It clones official [Paymenter v1.5.9](https://github.com/Paymenter/Paymenter/tree/v1.5.9) into `.cache/paymenter-1.5.9`, runs `composer install --no-scripts --no-plugins`, builds the default theme and changes only the version marker to literal `1.5.9`. The app must have no `.env` or cached configuration. Repeated bootstrap runs reuse valid dependencies and assets. Only tool installation and bootstrap need network access.
 
 ## Test
 
 ```bash
-export PAYMENTER_TEST_APP=/absolute/path/to/pristine-paymenter-1.5.9
-export PAYMENTER_TEST_PHP=php
-python3 scripts/test.py
+mise run test
 ```
 
 The complete suite runs lint, package, provider, native and UI checks. For quick offline checks:
 
 ```bash
-python3 scripts/test.py --suite lint --suite package --suite provider
+mise run check
 ```
 
 Read [testing](docs/testing.md) for dependencies, fixtures and coverage limits. Include the commands and results in pull requests.
+
+Without mise, use Python 3.10+, Node 22.23.1, system PHP 8.3/8.4 and Composer 2. Run `python3 scripts/bootstrap.py`, then `python3 scripts/dev.py test`. For a separately prepared pristine app, set `PAYMENTER_TEST_APP` to its canonical absolute path and `PAYMENTER_TEST_PHP` to the PHP executable, then run `python3 scripts/test.py`. Manual fast checks use `python3 scripts/test.py --suite lint --suite package --suite provider`.
 
 ## Change code
 
@@ -54,10 +44,11 @@ Use simple language in docs, UI text and comments. Use Conventional Commits, for
 3. Build into a fresh directory:
 
    ```bash
-   python3 scripts/build.py --output-dir dist/release
+   mise run build
+   mise run check:public
    ```
 
-4. Inspect the ZIP and `manifest.json`. The archive must contain only the `Enom/` runtime and its MIT license. The builder verifies each member against source and refuses to overwrite artifacts.
+4. Inspect the ZIP and `manifest.json` in `dist/release`. The archive must contain only the `Enom/` runtime and its MIT license. The build task preserves previous output under `dist/release-<timestamp>`. Public checks scan full Git history and the unpacked ZIP with gitleaks. Shallow clones must fetch full history first. Without mise, use `python3 scripts/dev.py build` and `python3 scripts/dev.py public` with gitleaks 8.30.1 on PATH. The underlying builder accepts a fresh output path with `python3 scripts/build.py --output-dir <path>` and refuses existing artifacts.
 5. Test installation and retained-data upgrade in a disposable Paymenter application. Verify migrations and the installed version after upload. Record any acceptance checks still missing.
 6. Create a version tag and attach the ZIP, manifest and release notes to the release when publication is authorized.
 
