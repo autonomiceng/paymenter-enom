@@ -41,6 +41,21 @@ class DevelopmentDependencyTests(unittest.TestCase):
             root = Path(temp); self.fixture(root)
             (root/'config/app.php').write_text("<?php return ['version' => '1.6.0'];")
             self.assertNotEqual(self.invoke(root).returncode, 0)
+    def test_commented_literal_with_dynamic_real_version_refused(self):
+        with tempfile.TemporaryDirectory(prefix='enom-pristine-comment-version-') as temp:
+            root = Path(temp); self.fixture(root)
+            for comment in ["// 'version' => '1.5.9'", "# 'version' => '1.5.9'",
+                            "/* 'version' => '1.5.9' */", "/** 'version' => '1.5.9' */"]:
+                with self.subTest(comment=comment):
+                    (root/'config/app.php').write_text("<?php\n" + comment + "\nreturn ['version' => getenv('APP_VERSION')];")
+                    self.assertNotEqual(self.invoke(root).returncode, 0)
+    def test_comments_do_not_count_toward_one_literal_version(self):
+        with tempfile.TemporaryDirectory(prefix='enom-pristine-literal-version-') as temp:
+            root = Path(temp); self.fixture(root)
+            (root/'config/app.php').write_text("<?php /* 'version' => '1.6.0' */ return ['version' /* current */ => '1.5.9'];")
+            self.assertEqual(self.invoke(root).returncode, 0)
+            (root/'config/app.php').write_text("<?php return ['version' => '1.5.9', 'version' => '1.5.9'];")
+            self.assertNotEqual(self.invoke(root).returncode, 0)
     def test_php_transport_functions_are_disabled(self):
         result = subprocess.run([str(ROOT/'scripts/php-test'), '-r',
             "foreach (['curl_exec','fsockopen','stream_socket_client','socket_connect'] as $name) { if (function_exists($name)) { exit(1); } } if (ini_get('allow_url_fopen') !== '0') { exit(2); }"],

@@ -148,6 +148,7 @@ check($order->status === 'success', 'provider order item completion');
 check(EnomApi::normalize('order', $order)['domain'] === 'demo.com' && EnomApi::normalize('order', $order)['term'] === 1, 'order identity and term normalizer');
 check(response('GetOrderDetail', xml('GetOrderDetail', str_replace('<OrderStatus>Closed</OrderStatus>', '<OrderStatus>Open</OrderStatus>', $orderXml)))->status === 'pending', 'open order pending');
 check(response('GetOrderDetail', xml('GetOrderDetail', '<Order><Result>false</Result></Order>'))->status === 'unknown', 'unknown ownership never confirms order');
+check(response('GetOrderDetail', xml('GetOrderDetail', '<Order><Result>True</Result></Order>'))->status === 'unknown', 'order without detail rows remains unknown');
 
 $requests = [];
 $api = new EnomApi(new RegistrarClient('uid', 'token', function ($command, $parameters) use (&$requests) {
@@ -226,6 +227,9 @@ check(EnomApi::normalize('order', response('GetOrderDetail', xml('GetOrderDetail
 
 $dns = response('GetDNS', xml('GetDNS', '<dns>ns1.example.com</dns><dns>ns2.example.com</dns><UseDNS>default</UseDNS>'));
 check(EnomApi::normalize('nameservers', $dns)['nameservers'] === ['ns1.example.com', 'ns2.example.com'], 'repeated DNS tags retained');
+$dnsWithAttributes = response('GetDNS', xml('GetDNS', '<dns>ns1.example.com</dns><UseDNS source="provider">default</UseDNS>'));
+check(is_array($dnsWithAttributes->data['usedns']), 'UseDNS with attributes retains its array shape');
+check(EnomApi::normalize('nameservers', $dnsWithAttributes)['uses_enom_dns'] === null, 'array-shaped UseDNS remains unknown');
 $contacts = response('GetContacts', xml('GetContacts', '<GetContacts><Registrant><FirstName>Demo</FirstName><LastName>Owner</LastName></Registrant><Tech><FirstName>Other</FirstName></Tech></GetContacts>'));
 check(EnomApi::normalize('contacts', $contacts)['contacts']['tech']['first_name'] === 'Other', 'untouched contacts roundtrip');
 $contactStatusApi = new EnomApi(new RegistrarClient('uid', 'token', fn ($command) => xml($command, '<GetContacts><Registrant><FirstName>Demo</FirstName></Registrant><PendingVerification>True</PendingVerification><TransferLock>True</TransferLock></GetContacts>')));

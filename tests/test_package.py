@@ -26,14 +26,23 @@ class PackageTests(unittest.TestCase):
             source = Path(temp)/'Enom'; source.mkdir()
             (source/'Enom.php').write_text("<?php #[ExtensionMeta(version: '0.2.6')]")
             with self.assertRaises(ValueError): builder.runtime_members(source)
-            (source/'LICENSE').write_text('MIT License\nSynthetic testing license.\n')
+            (source/'LICENSE').write_bytes((ROOT/'LICENSE').read_bytes())
             (source/'tests').mkdir(); (source/'tests/secret.php').write_text('<?php')
             with self.assertRaises(ValueError): builder.runtime_members(source)
+    def test_license_must_match_repository_bytes(self):
+        with tempfile.TemporaryDirectory(prefix='enom-package-license-') as temp:
+            source = Path(temp)/'Enom'; source.mkdir()
+            (source/'Enom.php').write_text("<?php #[ExtensionMeta(version: '0.2.6')]")
+            for license_bytes in [b'MIT License\n', (ROOT/'LICENSE').read_bytes() + b'Extra text\n']:
+                with self.subTest(license_bytes=license_bytes):
+                    (source/'LICENSE').write_bytes(license_bytes)
+                    with self.assertRaisesRegex(ValueError, 'license must match'):
+                        builder.runtime_members(source)
     def test_symlink_and_existing_artifact_refused(self):
         with tempfile.TemporaryDirectory(prefix='enom-package-links-') as temp:
             source = Path(temp)/'Enom'; source.mkdir()
             (source/'Enom.php').write_text("<?php #[ExtensionMeta(version: '0.2.6')]")
-            (source/'LICENSE').write_text('MIT License\nSynthetic testing license.\n')
+            (source/'LICENSE').write_bytes((ROOT/'LICENSE').read_bytes())
             (source/'linked.php').symlink_to(source/'Enom.php')
             with self.assertRaises(ValueError): builder.runtime_members(source)
             (source/'linked.php').unlink()
@@ -43,13 +52,31 @@ class PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='enom-package-output-') as temp:
             source = Path(temp)/'Enom'; source.mkdir()
             (source/'Enom.php').write_text("<?php #[ExtensionMeta(version: '0.2.6')]")
-            (source/'LICENSE').write_text('MIT License\nSynthetic testing license.\n')
+            (source/'LICENSE').write_bytes((ROOT/'LICENSE').read_bytes())
             with self.assertRaises(ValueError): builder.build(source, source/'dist')
+            self.assertFalse((source/'dist').exists())
+    def test_symlinked_source_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix='enom-package-source-link-') as temp:
+            root = Path(temp)
+            source = root/'Enom'; source.mkdir()
+            alias = root/'alias'; alias.symlink_to(source, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'real Enom source'):
+                builder.build(alias, root/'output')
+            self.assertFalse((root/'output').exists())
+    def test_output_inside_source_through_another_path_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix='enom-package-source-alias-') as temp:
+            root = Path(temp)
+            source = root/'real'/'Enom'; source.mkdir(parents=True)
+            (source/'Enom.php').write_text("<?php #[ExtensionMeta(version: '0.2.6')]")
+            (source/'LICENSE').write_bytes((ROOT/'LICENSE').read_bytes())
+            alias = root/'alias'; alias.symlink_to(source.parent, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'canonical output directory outside Enom/'):
+                builder.build(alias/'Enom', source/'dist')
             self.assertFalse((source/'dist').exists())
     def test_private_filename_in_runtime_directory_refused(self):
         with tempfile.TemporaryDirectory(prefix='enom-package-private-') as temp:
             source = Path(temp)/'Enom'; source.mkdir()
             (source/'Enom.php').write_text("<?php #[ExtensionMeta(version: '0.2.6')]")
-            (source/'LICENSE').write_text('MIT License\nSynthetic testing license.\n')
+            (source/'LICENSE').write_bytes((ROOT/'LICENSE').read_bytes())
             (source/'Services').mkdir(); (source/'Services/sample.private.php').write_text('<?php')
             with self.assertRaises(ValueError): builder.runtime_members(source)

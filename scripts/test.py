@@ -58,16 +58,24 @@ def main():
     runtime_before = hashes(ROOT/'Enom')
     results = []
     for index, (suite, argv) in enumerate(commands):
-        result = subprocess.run(argv, cwd=ROOT, env=env, capture_output=True, timeout=180)
-        (output/('%03d.stdout.txt' % index)).write_bytes(result.stdout)
-        (output/('%03d.stderr.txt' % index)).write_bytes(result.stderr)
+        timed_out = False
+        try:
+            result = subprocess.run(argv, cwd=ROOT, env=env, capture_output=True, timeout=180)
+            stdout, stderr, exit_code = result.stdout, result.stderr, result.returncode
+        except subprocess.TimeoutExpired as error:
+            stdout, stderr, exit_code = error.stdout or b'', error.stderr or b'', None
+            timed_out = True
+        (output/('%03d.stdout.txt' % index)).write_bytes(stdout)
+        (output/('%03d.stderr.txt' % index)).write_bytes(stderr)
         unchanged = hashes(ROOT/'Enom') == runtime_before
-        results.append({'suite': suite, 'argv': argv, 'exit': result.returncode, 'runtime_unchanged': unchanged})
-        if suite != 'lint' or result.returncode:
-            print(result.stdout.decode(errors='replace').strip(), flush=True)
-            if result.stderr:
-                print(result.stderr.decode(errors='replace').strip(), file=sys.stderr, flush=True)
-        if result.returncode or not unchanged:
+        results.append({'suite': suite, 'argv': argv, 'exit': exit_code, 'timed_out': timed_out, 'runtime_unchanged': unchanged})
+        if suite != 'lint' or exit_code or timed_out:
+            print(stdout.decode(errors='replace').strip(), flush=True)
+            if stderr:
+                print(stderr.decode(errors='replace').strip(), file=sys.stderr, flush=True)
+        if timed_out:
+            print('Command timed out after 180 seconds.', file=sys.stderr, flush=True)
+        if timed_out or exit_code or not unchanged:
             break
     complete = len(results) == len(commands) and all(row['exit'] == 0 and row['runtime_unchanged'] for row in results)
     receipt = {'complete': complete, 'selected_suites': selected, 'results': results, 'runtime_sha256': runtime_before,
