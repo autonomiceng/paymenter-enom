@@ -33,17 +33,21 @@ function pageText(string $html): string { return preg_replace('/\s+/', ' ', html
 $mine = clientDomain($owner, ['domain' => 'owned-site.com']);
 $theirs = clientDomain($other, ['domain' => 'other-secret.com']);
 $before = clientRows();
-foreach (['/domains', '/domains/register', '/domains/transfer', '/domains/help', '/domains/'.$mine->id, '/domains/order/'.str_repeat('a', 48)] as $uri) {
+foreach (['/domains', '/domains/register?name=hello&tld=com&years=2&go=1', '/domains/transfer', '/domains/help', '/domains/'.$mine->id, '/domains/order/'.str_repeat('a', 48)] as $uri) {
     $response = enomHttp(null, 'GET', $uri);
     verify($response->getStatusCode() === 302 && enomRedirectPath($response) === '/login', 'Guest reached GET '.$uri);
 }
-$posts = ['/domains/check', '/domains/quote', '/domains/order', '/domains/'.$mine->id.'/refresh', '/domains/'.$mine->id.'/renew', '/domains/'.$mine->id.'/privacy/purchase',
+$posts = ['/domains/quote', '/domains/order', '/domains/'.$mine->id.'/refresh', '/domains/'.$mine->id.'/renew', '/domains/'.$mine->id.'/privacy/purchase',
     '/domains/'.$mine->id.'/renewal-preference', '/domains/'.$mine->id.'/manage/lock'];
 foreach ($posts as $uri) {
     $response = enomHttp(null, 'POST', $uri, ['domain' => 'x.com', 'locked' => '0', '_request_key' => str_repeat('a', 64)]);
     verify($response->getStatusCode() === 302 && enomRedirectPath($response) === '/login', 'Guest reached POST '.$uri);
 }
-verify(enomHttp(null, 'POST', '/domains/check', ['domain' => 'x.com'], ['json' => true])->getStatusCode() === 401, 'Guest JSON check was not 401.');
+// Search, the price list and the availability check are public; ordering is not.
+verify(enomHttp(null, 'GET', '/domains/register')->getStatusCode() === 200 && enomHttp(null, 'GET', '/domains/pricing')->getStatusCode() === 200, 'Guest could not open the public search or price list.');
+$alias = enomHttp(null, 'GET', '/domains/search?name=hello');
+verify($alias->getStatusCode() === 301 && enomRedirectPath($alias) === '/domains/register', '/domains/search does not redirect to the canonical search page.');
+verify(enomHttp(null, 'POST', '/domains/check', ['domain' => 'x'], ['json' => true])->getStatusCode() === 422, 'Guest JSON check did not validate the name.');
 // Another client's domain does not exist for this user: every page and action is a 404 before any form key check.
 verify(enomHttp($owner, 'GET', '/domains/'.$theirs->id)->getStatusCode() === 404, 'Owner opened another client\'s domain page.');
 foreach (['refresh', 'renew', 'privacy/purchase', 'privacy/renew', 'renewal-preference', 'manage/lock', 'manage/nameservers', 'manage/contacts', 'manage/epp_email', 'manage/hosts'] as $action) {

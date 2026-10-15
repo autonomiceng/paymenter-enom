@@ -216,6 +216,7 @@
     .enom .enom-searchbar { flex-wrap: wrap; }
     .enom .enom-searchbar input { flex-basis: 100%; }
     .enom .enom-searchbar select { flex: 1 1 auto; border-left: 0; border-top: 1px solid var(--e-line); border-radius: .375rem; }
+    .enom .enom-searchbar .enom-btn { flex: 1 1 auto; }
 }
 .enom .enom-endings { display: flex; flex-wrap: wrap; gap: .25rem .875rem; font-size: .8125rem; color: var(--e-muted); margin-top: .75rem; }
 .enom .enom-endings b { color: var(--e-fg); font-weight: 700; }
@@ -260,6 +261,80 @@
     .enom .enom-result__price { grid-column: 1; grid-row: 3; }
     .enom .enom-result__price:empty { display: none; }
     .enom .enom-result__action { grid-column: 2; grid-row: 2 / span 2; align-self: center; min-width: 7.5rem; }
+}
+
+/* Term picker on search rows */
+.enom .enom-result { grid-template-columns: minmax(0, 1fr) auto 12rem 14rem; }
+.enom .enom-buy { display: flex; gap: .5rem; }
+.enom .enom-buy .enom-btn { flex: 1 1 auto; width: auto; }
+.enom select.enom-term { width: 7.25rem; flex: none; min-height: 2.5rem; padding-block: 0; font-size: .8125rem; font-weight: 600; }
+@media (max-width: 639px) {
+    .enom .enom-result { grid-template-columns: minmax(0, 1fr) auto; }
+    .enom .enom-result__action { min-width: 8.5rem; }
+    .enom .enom-buy { flex-direction: column; gap: .375rem; }
+    .enom .enom-buy select.enom-term { width: 100%; }
+}
+
+/* Registration term in the order summary */
+.enom .enom-termpick { margin-bottom: 1rem; }
+.enom .enom-termpick__row { display: flex; gap: .5rem; }
+.enom .enom-termpick__row select { flex: 1 1 auto; }
+.enom .enom-summary .enom-termpick .enom-btn { width: auto; min-height: 2.625rem; font-size: .875rem; }
+
+/* Renew now */
+.enom .enom-renew { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.enom .enom-renew select.enom-term { width: auto; min-width: 11rem; font-size: .875rem; }
+@media (max-width: 639px) { .enom .enom-renew, .enom .enom-renew select.enom-term { width: 100%; } .enom .enom-renew .enom-btn { flex: 1; } }
+
+/* Child nameservers */
+.enom .enom-glue { border: 1px solid var(--e-line); border-radius: .5rem; background: var(--e-bg); margin-bottom: 1.25rem; }
+.enom .enom-glue > li + li { border-top: 1px solid var(--e-line); }
+.enom .enom-glue__item > summary, .enom .enom-glue__static { display: grid; grid-template-columns: minmax(0, 1fr) auto 3.5rem; align-items: center; gap: 1rem;
+    padding: .75rem 1rem; list-style: none; }
+.enom .enom-glue__static { grid-template-columns: minmax(0, 1fr) auto; }
+.enom .enom-glue__item > summary { cursor: pointer; border-radius: .5rem; }
+.enom .enom-glue__item > summary::-webkit-details-marker { display: none; }
+.enom .enom-glue__item > summary:hover { background: color-mix(in srgb, var(--e-line) 22%, transparent); }
+.enom .enom-glue__host { font-weight: 700; font-size: .9375rem; }
+@media (max-width: 639px) {
+    .enom .enom-glue__item > summary, .enom .enom-glue__static { grid-template-columns: minmax(0, 1fr) auto; gap: .125rem 1rem; }
+    .enom .enom-glue__host { grid-column: 1; }
+    .enom .enom-glue__ip { grid-column: 1; grid-row: 2; }
+    .enom .enom-glue__edit { grid-column: 2; grid-row: 1 / span 2; }
+}
+.enom .enom-glue__ip { color: var(--e-muted); font-size: .875rem; }
+.enom .enom-glue__edit { font-size: .8125rem; font-weight: 600; color: var(--e-accent); text-align: right; }
+.enom .enom-glue__edit::before { content: "Edit"; }
+.enom .enom-glue__item[open] .enom-glue__edit { color: var(--e-muted); }
+.enom .enom-glue__item[open] .enom-glue__edit::before { content: "Close"; }
+.enom .enom-glue__panel { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: .75rem 1rem; padding: .25rem 1rem 1rem; }
+.enom .enom-glue__form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .5rem; flex: 1 1 20rem; }
+.enom .enom-glue__form [data-field] { flex: 1 1 14rem; max-width: 20rem; }
+.enom .enom-btn--danger-text { color: var(--e-bad); }
+.enom .enom-btn--danger-text:hover { background: color-mix(in srgb, var(--e-bad) 10%, transparent); }
+.enom .enom-glue__new .enom-h3 { margin-bottom: .75rem; }
+.enom .enom-glue__fields { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto; gap: 1rem; align-items: start; }
+.enom .enom-glue__submit { padding-top: 1.6875rem; }
+@media (max-width: 799px) { .enom .enom-glue__fields { grid-template-columns: minmax(0, 1fr); } .enom .enom-glue__submit { padding-top: 0; } }
+.enom .enom-affix { display: flex; align-items: stretch; border: 1px solid var(--e-line); border-radius: .375rem; background: var(--e-field); transition: border-color .15s, box-shadow .15s; }
+.enom .enom-affix:focus-within { border-color: var(--e-accent); box-shadow: 0 0 0 3px hsl(var(--color-primary) / .18); }
+.enom .enom-affix:has([aria-invalid="true"]) { border-color: var(--e-bad); }
+/* The typed part sits flush against the suffix, so it reads as one hostname. */
+.enom .enom-affix .enom-input { border: 0; box-shadow: none; background: transparent; min-width: 3.5rem; width: 0; flex: 1 1 0%; padding-right: 0; text-align: right; }
+.enom .enom-affix .enom-input:focus { box-shadow: none; }
+.enom .enom-affix .enom-input::placeholder { text-align: right; }
+.enom .enom-affix__text { display: block; align-self: center; padding-right: .75rem; font-size: .875rem; color: var(--e-muted); min-width: 0; max-width: 75%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+
+/* Activity refund note */
+.enom .enom-refund { display: block; margin-top: .125rem; font-size: .8125rem; color: var(--e-muted); }
+
+/* Price list */
+.enom .enom-pricelist tbody th { font-size: .9375rem; color: var(--e-fg); padding: .875rem 1rem; border-bottom: 1px solid var(--e-line); font-weight: 700; }
+.enom .enom-pricelist tbody tr:last-child th { border-bottom: 0; }
+@media (max-width: 719px) {
+    .enom .enom-pricelist.enom-stackable tr { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .enom .enom-pricelist.enom-stackable tbody th { display: block; padding: 0; border: 0; grid-column: 1 / -1; }
+    .enom .enom-pricelist.enom-stackable td[data-label]::before { display: block; }
 }
 
 /* Order */

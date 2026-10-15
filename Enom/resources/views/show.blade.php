@@ -46,6 +46,12 @@
     $heldRoles = is_array($s['contact_roles'] ?? null) && $s['contact_roles'] ? $s['contact_roles'] : ['registrant', 'admin', 'tech', 'auxbilling'];
     $roles = array_intersect_key(['admin' => 'Administrative', 'tech' => 'Technical', 'auxbilling' => 'Billing'], array_flip($heldRoles));
     $registrantOnly = !$roles;
+    $glue = collect(is_array($s['glue'] ?? null) ? $s['glue'] : ($cached['glue'] ?? []))
+        ->filter(fn ($g) => is_array($g) && is_string($g['host'] ?? null))->values();
+    $glueErrors = collect($errors->getMessages())->filter(fn ($m, $key) => str_starts_with($key, 'glue'))->flatten()->unique();
+    $renewOptions = $renewal['options'] ?? [];
+    $openRenewal = $renewal['open_invoice'] ?? null;
+    $credits = $creditsUrl ?? null;
 @endphp
 <div class="container mt-14 mb-10">
 <div class="enom">
@@ -83,7 +89,7 @@
         </div>
     </div>
 
-    @include('enom::partials.notices', ['fieldKeys' => ['contact', 'nameservers', 'records', 'ds']])
+    @include('enom::partials.notices', ['fieldKeys' => ['contact', 'nameservers', 'records', 'ds', 'host', 'ip', 'glue']])
 
     @if ($paused && !$pending)
         <div class="enom-notice enom-notice--warn" role="status"><x-ri-time-line aria-hidden="true" />
@@ -113,9 +119,30 @@
         @endphp
         <section class="enom-panel enom-status-card" aria-labelledby="enom-status-heading">
             @if ($failed)
+                @php
+                    $order = collect($s['operations'] ?? [])->first(fn ($op) => in_array($op['action'] ?? null, ['register', 'transfer'], true));
+                    $refund = is_array($order['refund'] ?? null) ? $order['refund'] : null;
+                    $refunded = $refund ? $controller::money($refund['amount'] ?? null, $refund['currency'] ?? 'USD') : null;
+                    $retryUrl = $isTransfer ? route('enom.domains.transfer', ['name' => $name]) : route('enom.domains.search', ['name' => $name]);
+                @endphp
                 <h2 id="enom-status-heading">The {{ $kind }} didn’t go through</h2>
-                <p>The registry didn’t accept this {{ $kind }}. Contact support and we’ll sort out your payment.</p>
-                @if ($supportUrl)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ $supportUrl }}">Contact support</a></div>@endif
+                @if ($refunded)
+                    <p>The registry didn’t accept this {{ $kind }}, so we added {{ $refunded }} to your account credit. It’s used automatically on your next invoice.</p>
+                    <div class="enom-row" style="margin-top:1.25rem">
+                        @if ($credits)<a class="enom-btn enom-btn--primary" href="{{ $credits }}">View account credit</a>@endif
+                        @if (!$isTransfer)<a class="enom-btn enom-btn--secondary" href="{{ $retryUrl }}">Search for another name</a>@endif
+                    </div>
+                @elseif ($free || ($order && empty($order['invoice_id'])))
+                    <p>The registry didn’t accept this {{ $kind }}. Nothing was charged.</p>
+                    @if ($isTransfer)
+                        <p class="enom-small enom-muted">To try this transfer again, open a support ticket so we can reuse this order.</p>
+                    @else
+                        <div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ $retryUrl }}">Search for another name</a></div>
+                    @endif
+                @else
+                    <p>The registry didn’t accept this {{ $kind }}. Contact support and we’ll sort out your payment.</p>
+                    @if ($supportUrl)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ $supportUrl }}">Contact support</a></div>@endif
+                @endif
             @elseif ($awaiting)
                 <h2 id="enom-status-heading">Pay the invoice to {{ $isTransfer ? 'start the transfer' : 'register '.$name }}</h2>
                 <p>{{ $isTransfer ? 'The transfer starts' : 'Registration starts' }} as soon as the payment clears.@if (!$renewOn) Auto-renew is off, so contact support before paying if you still want this domain.@endif</p>
@@ -178,12 +205,28 @@
             @if ($renewOn && !$free && $can('renew'))
                 <section class="enom-section" aria-labelledby="enom-renew-heading" style="border-top:0">
                     <div class="enom-section__head" style="margin-bottom:0;align-items:center">
-                        <div><h2 id="enom-renew-heading" class="enom-h2">Renew now</h2><p>Add a year now instead of waiting for the renewal invoice.</p></div>
-                        <form method="POST" action="{{ route('enom.domains.renew', $domainId) }}" data-confirm-title="Create a renewal invoice?" data-confirm-ok="Create invoice"
-                            data-confirm-body="We’ll create an invoice for {{ $amount }}. {{ $name }} renews for one year once it’s paid.">
-                            @include('enom::partials.form-key', ['action' => 'renew'])
-                            <button type="submit" class="enom-btn enom-btn--primary">Renew for 1 year · {{ $amount }}</button>
-                        </form>
+                        <div><h2 id="enom-renew-heading" class="enom-h2">Renew now</h2>
+                            <p>@if ($openRenewal)Your renewal invoice for {{ $controller::yearsLabel((int) $openRenewal['years']) }} is ready. Pay it and the domain renews.@elseif ($renewOptions)Add years now instead of waiting for the renewal invoice.@else This domain is already renewed as far ahead as the registry allows, 10 years from today.@endif</p></div>
+                        @if ($openRenewal)<a class="enom-btn enom-btn--primary" href="{{ $openRenewal['url'] }}">Pay invoice</a>@endif
+                        @if ($renewOptions)
+                            @php $confirmFor = fn ($o) => 'We’ll create an invoice for '.$o['total'].'. '.$name.' renews for '.$controller::yearsLabel($o['years']).' once it’s paid.'; @endphp
+                            <form method="POST" action="{{ route('enom.domains.renew', $domainId) }}" class="enom-renew" data-confirm-title="Create a renewal invoice?" data-confirm-ok="Create invoice"
+                                data-confirm-body="{{ $confirmFor($renewOptions[0]) }}">
+                                @include('enom::partials.form-key', ['action' => 'renew'])
+                                @if (count($renewOptions) > 1)
+                                    <label for="enom-renew-years" class="enom-sr">Renewal term</label>
+                                    <select id="enom-renew-years" name="years" class="enom-input enom-term">
+                                        @foreach ($renewOptions as $option)
+                                            <option value="{{ $option['years'] }}" data-confirm-body="{{ $confirmFor($option) }}">{{ $controller::yearsLabel($option['years']) }}, {{ $option['total'] }}</option>
+                                        @endforeach
+                                    </select>
+                                    <button type="submit" class="enom-btn enom-btn--primary">Renew</button>
+                                @else
+                                    <input type="hidden" name="years" value="{{ $renewOptions[0]['years'] }}">
+                                    <button type="submit" class="enom-btn enom-btn--primary">Renew for {{ $controller::yearsLabel($renewOptions[0]['years']) }}, {{ $renewOptions[0]['total'] }}</button>
+                                @endif
+                            </form>
+                        @endif
                     </div>
                 </section>
             @endif
@@ -250,6 +293,7 @@
             @elseif (!$paused)
                 <section class="enom-section"><p class="enom-small enom-muted">Nameservers can’t be changed right now. Refresh and try again.</p></section>
             @endif
+            @include('enom::partials.glue')
         </div>
 
         {{-- Contacts --}}

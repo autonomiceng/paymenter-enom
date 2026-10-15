@@ -38,7 +38,8 @@ class DomainOrders
     {
         $resolved = app(Catalogue::class)->resolve($input);
         $tld = $resolved['tld'];
-        $existing = Domain::where('domain', $resolved['domain'])->exists();
+        $record = Domain::where('domain', $resolved['domain'])->first();
+        $existing = $record !== null;
         $check = Cache::remember('enom:check:'.$tld->server_id.':'.$resolved['domain'], 60, function () use ($tld, $resolved) {
             $result = $this->operations->apiForServer((int) $tld->server_id, true)->search($resolved['domain']);
             if ($result->status !== 'success') { throw new RuntimeException('Availability could not be checked right now.'); }
@@ -53,7 +54,9 @@ class DomainOrders
         return ['domain' => $resolved['domain'], 'tld' => $tld->tld,
             'available' => !$existing && !$premium && $terms !== [] && !empty($check['available']),
             'transferable' => !$existing && !$premium && empty($check['available']) && !empty($check['transferable']),
-            'premium' => $premium, 'existing' => $existing, 'complimentary' => $complimentary, 'taxed' => $user !== null,
+            // Only the owner learns that a name is in this portal; everyone else just sees it taken.
+            'premium' => $premium, 'existing' => $existing && $user !== null && (int) $record->user_id === (int) $user->id,
+            'complimentary' => $complimentary, 'taxed' => $user !== null,
             'register_price' => $price($tld->price('register')), 'transfer_price' => $price($tld->price('transfer')),
             'renew_price' => $price($tld->price('renew')), 'terms' => $terms, 'register_totals' => $totals];
     }
@@ -110,6 +113,10 @@ class DomainOrders
             'terms' => $intent->action === 'register' ? array_values(array_map('intval', $intent->payload['terms'] ?? [$years])) : [1],
             'min_years' => $tld ? min($tld->terms()) : 1, 'max_years' => $tld ? max($tld->terms()) : 1,
             'new_expiry_estimate' => now()->addYearsNoOverflow($years)->toDateString(),
+            // Every term's total with the client's own tax rule, so the page never re-derives a rounded amount.
+            'totals' => $tld && $intent->action === 'register' && !($intent->payload['complimentary'] ?? false) && ($owner = User::find($intent->user_id))
+                ? array_filter(array_combine($terms = array_values(array_map('intval', $intent->payload['terms'] ?? [$years])),
+                    array_map(fn (int $n) => Pricing::taxed($owner, $tld->registrationTotal($n), $intent->currency), $terms))) : [],
             'registry_fields' => $tld ? app(Catalogue::class)->attributesFor($tld) : [],
             'complimentary' => (bool) ($intent->payload['complimentary'] ?? false),
             'server_id' => (int) $intent->server_id,
@@ -288,7 +295,18 @@ class DomainOrders
         return ['years' => $max > 0 ? range(1, $max) : [], 'price_per_year' => $perYear,
             'totals' => $perYear === null ? [] : array_combine($max > 0 ? range(1, $max) : [], array_map(
                 fn (int $years) => RegistrarMoney::decimal(number_format(((float) $perYear) * $years, 2, '.', '')), $max > 0 ? range(1, $max) : [])),
-            'expires_at' => $domain->provider_expires_at?->toDateString(), 'complimentary' => Pricing::isComplimentary($domain)];
+            'expires_at' => $domain->provider_expires_at?->toDateString(), 'complimentary' => Pricing::isComplimentary($domain),
+            'open_invoice' => self::openRenewalInvoice($domain)];
+    }
+
+    /** The unpaid renewal invoice for this expiry, if one was already issued. */
+    private static function openRenewalInvoice(Domain $domain): ?array
+    {
+        $operation = Operation::where('domain_id', $domain->id)->where('action', 'renew')->where('state', 'awaiting_payment')
+            ->whereNotNull('invoice_id')->latest('id')->first();
+        $invoice = $operation ? Invoice::where('user_id', $domain->user_id)->find($operation->invoice_id) : null;
+        return $invoice && $invoice->status === Invoice::STATUS_PENDING
+            ? ['id' => (int) $invoice->id, 'years' => max(1, (int) $operation->term), 'url' => route('invoices.show', $invoice)] : null;
     }
 
     public function privacy(User $user, int $domainId, string $action, ?string $nonce = null): Invoice

@@ -27,7 +27,11 @@
                 <tbody>
                     @foreach ($rows as [$operation, $what, $label, $tone])
                         <tr>
-                            <td style="font-weight:600">{{ $what }}</td>
+                            <td><span style="font-weight:600">{{ $what }}</span>
+                                @if (is_array($operation['refund'] ?? null) && ($refunded = $controller::money($operation['refund']['amount'] ?? null, $operation['refund']['currency'] ?? 'USD')))
+                                    <span class="enom-refund">Refunded {{ $refunded }} to your @if (\Illuminate\Support\Facades\Route::has('account.credits'))<a class="enom-a" href="{{ route('account.credits') }}">account credit</a>@else account credit @endif</span>
+                                @endif
+                            </td>
                             <td><span class="enom-badge enom-tone-{{ $tone }}">{{ $label }}</span></td>
                             <td class="enom-muted enom-nowrap">@include('enom::partials.moment', ['at' => $operation['created_at'] ?? null, 'fallback' => '—'])</td>
                             <td class="enom-end">@if (!empty($operation['invoice_id']))<a class="enom-a enom-small" href="{{ route('invoices.show', $operation['invoice_id']) }}">Invoice #{{ $operation['invoice_id'] }}</a>@endif</td>

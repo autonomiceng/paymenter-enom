@@ -5,7 +5,19 @@
     $free = !empty($quote['complimentary']);
     $price = $controller::money($quote['amount'], $quote['currency']);
     $renewal = $controller::money($quote['renewal_amount'], $quote['currency']);
+    $years = max(1, (int) ($quote['years'] ?? $quote['term'] ?? 1));
+    $minYears = max(1, (int) ($quote['min_years'] ?? 1));
+    $maxYears = max($minYears, (int) ($quote['max_years'] ?? $minYears));
+    $termOptions = array_values(array_filter(array_map('intval', (array) ($quote['terms'] ?? range($minYears, $maxYears))), fn ($n) => $n >= 1 && $n <= 10)) ?: [$years];
+    $termLabel = $controller::yearsLabel($years);
+    // Totals for other terms, from this quote: the first year at its price, each later year at the renewal price.
+    $firstMinor = (int) round((float) $quote['amount'] * 100) - (int) round((float) $quote['renewal_amount'] * 100) * ($years - 1);
+    // Prefer the backend's per-term totals (computed with the client's tax rule) over re-deriving them here.
+    $termTotal = fn (int $n) => $free ? null : $controller::money(isset($quote['totals'][$n]) ? (string) $quote['totals'][$n]
+        : number_format(($firstMinor + (int) round((float) $quote['renewal_amount'] * 100) * ($n - 1)) / 100, 2, '.', ''), $quote['currency']);
+    $expiry = $isTransfer ? null : ($quote['new_expiry_estimate'] ?? now()->addYears($years)->toDateString());
     $retry = old('_enom_form') === $formId;
+    $chosenYears = $retry && is_numeric(old('years')) ? (int) old('years') : $years;
     $same = $retry ? old('same_contact', '1') === '1' : true;
     $nsMode = $retry ? (old('ns_mode') === 'custom' ? 'custom' : 'default') : 'default';
     $defaults = $quote['default_nameservers'] ?? [];
@@ -21,9 +33,9 @@
     <div>
         <a class="enom-back" href="{{ $back }}"><x-ri-arrow-left-s-line class="enom-i" aria-hidden="true" />{{ $isTransfer ? 'Transfer' : 'Search' }}</a>
         <h1 class="enom-title">{{ $isTransfer ? 'Transfer' : 'Register' }} {{ $quote['domain'] }}</h1>
-        <p class="enom-lede">{{ $free ? 'Complimentary' : $price.' for the first year' }}. Check the details below, then continue.</p>
+        <p class="enom-lede">{{ $free ? 'Complimentary' : $price.' for '.($isTransfer ? 'the transfer' : $termLabel) }}. Check the details below, then continue.</p>
     </div>
-    @include('enom::partials.notices', ['fieldKeys' => ['contact', 'roles', 'epp', 'nameservers']])
+    @include('enom::partials.notices', ['fieldKeys' => ['contact', 'roles', 'epp', 'nameservers', 'registry', 'years']])
 
     <form method="POST" action="{{ route('enom.domains.place') }}" class="enom-order" data-enom-form>
         @csrf
@@ -66,6 +78,10 @@
                 </div>
             </section>
 
+            @if ($registryFields)
+                @include('enom::partials.registry', ['fields' => $registryFields, 'tld' => substr($quote['domain'], strpos($quote['domain'], '.') + 1), 'useOld' => $retry])
+            @endif
+
             @if (!$isTransfer)
                 <section class="enom-section" aria-labelledby="enom-ns-heading">
                     <div class="enom-section__head"><div><h2 id="enom-ns-heading" class="enom-h2">Nameservers</h2><p>Nameservers decide where your website and email are hosted. You can change them later.</p></div></div>
@@ -106,9 +122,28 @@
             <div class="enom-section">
                 <h2 id="enom-summary-heading" class="enom-small enom-muted" style="font-weight:600">Order summary</h2>
                 <p class="enom-domain" style="font-size:1.125rem;margin:.25rem 0 1rem">{{ $quote['domain'] }}</p>
+                @if (!$isTransfer && count($termOptions) > 1)
+                    <div class="enom-termpick" data-field>
+                        <label for="enom-years" class="enom-label">Registration term</label>
+                        <div class="enom-termpick__row">
+                            <select id="enom-years" name="years" class="enom-input" data-enom-term="{{ $years }}" @if ($errors->has('years')) aria-invalid="true" aria-describedby="enom-years-error" @endif>
+                                @foreach ($termOptions as $n)
+                                    <option value="{{ $n }}" @selected($n === $chosenYears)>{{ $controller::yearsLabel($n) }}@if (!$free), {{ $termTotal($n) }}@endif</option>
+                                @endforeach
+                            </select>
+                            <button type="submit" name="requote" value="1" formnovalidate class="enom-btn enom-btn--secondary" data-enom-requote>Update</button>
+                        </div>
+                        @if ($errors->has('years'))<p id="enom-years-error" class="enom-error">{{ $errors->first('years') }}</p>@endif
+                    </div>
+                @else
+                    <input type="hidden" name="years" value="{{ $years }}">
+                @endif
                 <dl>
-                    <dt>{{ $isTransfer ? 'Transfer, 1 year' : 'Registration, 1 year' }}</dt><dd>{{ $free ? 'Complimentary' : $price }}</dd>
-                    <dt>Renews at</dt><dd>{{ $free ? 'No charge' : $renewal.'/yr' }}</dd>
+                    <dt>{{ $isTransfer ? 'Transfer, adds 1 year' : 'Registration, '.$termLabel }}</dt><dd>{{ $free ? 'Complimentary' : $price }}</dd>
+                    <dt>Then renews at</dt><dd>{{ $free ? 'No charge' : $renewal.'/yr' }}</dd>
+                    @if ($expiry)
+                        <dt>Expires about</dt><dd>@include('enom::partials.date', ['date' => $expiry])</dd>
+                    @endif
                 </dl>
                 <dl class="enom-total"><dt>Due today</dt><dd>{{ $free ? 'Nothing' : $price }}</dd></dl>
                 <div style="margin-top:1.25rem">

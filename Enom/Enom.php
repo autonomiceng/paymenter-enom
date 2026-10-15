@@ -29,7 +29,7 @@ use Paymenter\Extensions\Servers\Enom\Services\DomainOperations;
 use RuntimeException;
 use Throwable;
 
-#[ExtensionMeta(name: 'Enom', description: 'Sell and manage domain names through an Enom reseller account.', version: '0.3.0', author: 'Autonomic Engineering')]
+#[ExtensionMeta(name: 'Enom', description: 'Sell and manage domain names through an Enom reseller account.', version: '0.4.0', author: 'Autonomic Engineering')]
 class Enom extends Server
 {
     private static bool $credentialHook = false;
@@ -178,6 +178,8 @@ class Enom extends Server
         Event::listen('permissions', fn () => ['admin.enom.manage' => 'Manage domains',
             'admin.enom.fund' => 'Give complimentary domains', 'admin.enom.costs' => 'See Enom costs and margins']);
         Event::listen('navigation.dashboard', fn () => ['name' => 'Domains', 'url' => route('enom.domains.index'), 'icon' => 'ri-global', 'priority' => 12]);
+        // Everyone, signed in or not, can search for domains from the top navigation.
+        Event::listen('navigation', fn () => Http\Navigation::domains());
         foreach (['Domain', 'Operation', 'Tld'] as $model) {
             $policy = __NAMESPACE__.'\\Policies\\'.$model.'Policy';
             if (class_exists($policy)) { Gate::policy(__NAMESPACE__.'\\Models\\'.$model, $policy); }

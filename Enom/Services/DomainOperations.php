@@ -1337,22 +1337,24 @@ class DomainOperations
         $snapshot = $api->snapshot($domain->domain);
         // Enom can't list child nameservers, so re-check the ones we know about (null = gone).
         $checked = [];
+        $examined = [];
         foreach (array_slice($domain->snapshot['glue'] ?? [], 0, 13) as $row) {
             $host = (string) ($row['host'] ?? '');
-            try { $checked[$host] = $this->currentHostIp($api, $host); } catch (Throwable) {}
+            try { $checked[$host] = $this->currentHostIp($api, $host); $examined[$host] = $row['ip'] ?? null; } catch (Throwable) {}
         }
         $status = $snapshot['read_status'] ?? [];
         $capabilities = ['renew' => $domain->status === 'active', 'epp_sync' => $domain->status === 'active', 'glue' => $domain->status === 'active'];
         foreach (['nameservers', 'contacts', 'hosts', 'srv'] as $action) { $capabilities[$action] = ($status[$action] ?? null) === 'success'; }
         $capabilities['lock'] = ($status['lock'] ?? null) === 'success' && is_bool($snapshot['locked'] ?? null);
         $capabilities += $this->stateCapabilities($domain, $snapshot, ['privacy', 'dnssec'], $actor);
-        return DB::transaction(function () use ($domain, $snapshot, $capabilities, $checked) {
+        return DB::transaction(function () use ($domain, $snapshot, $capabilities, $checked, $examined) {
             // Merge into the current row: glue changes committed meanwhile and hosts not re-checked are kept.
             $current = Domain::lockForUpdate()->findOrFail($domain->id);
             $glue = [];
             foreach ($current->snapshot['glue'] ?? [] as $row) {
                 $host = (string) ($row['host'] ?? '');
-                if (!array_key_exists($host, $checked)) { $glue[] = $row; continue; }
+                // Hosts not re-checked, or changed by a request since we read them, keep their current entry.
+                if (!array_key_exists($host, $checked) || ($row['ip'] ?? null) !== ($examined[$host] ?? null)) { $glue[] = $row; continue; }
                 if ($checked[$host] !== null) { $glue[] = ['host' => $host, 'ip' => $checked[$host]]; }
             }
             $snapshot['glue'] = $glue;

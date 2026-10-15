@@ -46,8 +46,12 @@ class Refunds
                 || self::cents($invoice->remaining) !== 0 || $amount === null || self::cents($amount) <= 0
                 || self::cents($item->price) !== self::cents($amount)
                 || $received < self::cents($invoice->total) || $received < self::cents($amount)) { return null; }
-            if (in_array($current->action, ['register', 'transfer', 'renew'], true) && $current->action !== 'renew'
-                && ($item->reference_type !== Service::class || (int) $item->reference_id !== (int) $current->service_id)) { return null; }
+            // The line must belong to this request: registrations/transfers reference their service, managed
+            // renewals and ID Protect lines reference nothing; the domain must still own that service.
+            $serviceLine = in_array($current->action, ['register', 'transfer'], true);
+            if ($serviceLine ? ($item->reference_type !== Service::class || (int) $item->reference_id !== (int) $current->service_id)
+                    : ($item->reference_type !== null && !($item->reference_type === Service::class && (int) $item->reference_id === (int) $current->service_id))
+                || (int) Domain::whereKey($current->domain_id)->value('service_id') !== (int) $current->service_id) { return null; }
             $credit = Credit::where('user_id', $ownerId)->where('currency_code', $invoice->currency_code)->lockForUpdate()->first()
                 ?? new Credit(['user_id' => $ownerId, 'currency_code' => $invoice->currency_code, 'amount' => '0.00']);
             $total = self::cents($credit->amount) + self::cents($amount);

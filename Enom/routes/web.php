@@ -6,14 +6,22 @@ use Paymenter\Extensions\Servers\Enom\Http\Controllers\AdminController;
 use Paymenter\Extensions\Servers\Enom\Http\Controllers\DomainController;
 use Paymenter\Extensions\Servers\Enom\Http\Controllers\HelpController;
 
+// Public: search, availability and the price list work without an account. Ordering needs a login.
+Route::middleware(['web'])->group(function () {
+    Route::get('/domains/register', [DomainController::class, 'search'])->name('enom.domains.search');
+    // Alias kept for links that use the design name. The canonical page is /domains/register.
+    Route::get('/domains/search', [DomainController::class, 'searchAlias'])->name('enom.domains.search.alias');
+    Route::get('/domains/pricing', [DomainController::class, 'pricing'])->name('enom.domains.pricing');
+    // Availability reads, one name per request. No session lock, so a search can check several endings at once.
+    // Signed-in clients get 60 a minute each; guests also share a 30-a-minute limit per IP inside the controller.
+    Route::post('/domains/check', [DomainController::class, 'check'])->name('enom.domains.check')->middleware('throttle:60,1,enom.domains.check');
+});
+
 Route::middleware(['web', 'auth', MustVerfiyEmail::class])->group(function () {
     // Client area.
     Route::get('/domains', [DomainController::class, 'index'])->name('enom.domains.index');
     Route::get('/domains/help', [HelpController::class, 'customer'])->name('enom.help');
-    Route::get('/domains/register', [DomainController::class, 'search'])->name('enom.domains.search');
     Route::get('/domains/transfer', [DomainController::class, 'transfer'])->name('enom.domains.transfer');
-    // Availability reads, one name per request. No session lock, so a search can check several endings at once.
-    Route::post('/domains/check', [DomainController::class, 'check'])->name('enom.domains.check')->middleware('throttle:60,1,enom.domains.check');
     Route::post('/domains/quote', [DomainController::class, 'quote'])->name('enom.domains.quote')->middleware('throttle:20,1,enom.domains.quote')->block(10, 10);
     Route::post('/domains/order', [DomainController::class, 'place'])->name('enom.domains.place')->middleware('throttle:10,1,enom.domains.place')->block(10, 10);
     Route::get('/domains/order/{intent}', [DomainController::class, 'order'])->where('intent', '[a-f0-9]{48}')->name('enom.domains.order');

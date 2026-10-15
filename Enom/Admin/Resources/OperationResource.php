@@ -193,7 +193,7 @@ class OperationResource extends Resource
     /** A paid request that is on hold and was never sent to Enom. The service makes the final check. */
     private static function refundable(Operation $record): bool
     {
-        if ($record->state !== 'held' || $record->funding_basis !== 'paid_invoice' || $record->started_at !== null
+        if ($record->state !== 'held' || $record->funding_basis !== 'paid_invoice'
             || !self::refunds('refundHeld') || !Staff::can(Staff::MANAGE, Staff::INVOICES)) { return false; }
         if (!($service = self::refunds('canRefundHeld'))) { return true; }
         try { return (bool) $service->canRefundHeld($record, Staff::user()); } catch (Throwable) { return false; }

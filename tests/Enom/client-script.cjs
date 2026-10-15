@@ -107,6 +107,22 @@ const submit = (w, form, submitter) => form.requestSubmit(submitter || form.quer
         check(errors.length === 0, 'Complimentary search has no console errors');
         w.close();
     }
+    {
+        // Term picker: the ending's terms replace the options, and the price follows the chosen term.
+        const fetch = async (url, options) => ({status: 200, json: async () => ({domain: JSON.parse(options.body).domain, status: 'available', complimentary: false,
+            price: '$12.00', transfer_price: '$13.00', renew_price: '$14.00', min_years: 2, max_years: 3, terms: {2: '$26.00', 3: '$40.00'}})});
+        const {w, d, errors} = mount(pages.search, {fetch});
+        await sleep(200);
+        const first = d.querySelector('[data-enom-result]');
+        const years = first.querySelector('select[data-slot="years"]');
+        check([...years.options].map(o => o.value).join(',') === '2,3' && years.value === '2' && !years.hidden, 'Term picker starts at the ending minimum');
+        check(first.querySelector('[data-slot="price"] strong').textContent === '$26.00' && first.querySelector('[data-slot="price"] small').textContent === 'For 2 years, then $14.00/yr', 'Price shows the total for the chosen term');
+        years.value = '3';
+        years.dispatchEvent(new w.Event('change'));
+        check(first.querySelector('[data-slot="price"] strong').textContent === '$40.00', 'Changing the term updates the total');
+        check(errors.length === 0, 'Term picker has no console errors');
+        w.close();
+    }
 
     // ------------------------------------------------------------ confirmation dialog
     {
