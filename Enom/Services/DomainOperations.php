@@ -20,6 +20,7 @@ use Paymenter\Extensions\Servers\Enom\Jobs\ReconcileOperation;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Models\Operation;
 use Paymenter\Extensions\Servers\Enom\Models\OrderIntent;
+use Paymenter\Extensions\Servers\Enom\Models\Tld;
 use RuntimeException;
 use Throwable;
 
@@ -38,15 +39,21 @@ class DomainOperations
     public function apiForServer(int $serverId, bool $readOnly = false): EnomApi
     {
         $config = $this->providerConfiguration($serverId, $readOnly);
-        return $this->api ?? new EnomApi(new RegistrarClient($config['uid'], $config['token'], null,
-            function () use ($serverId, $readOnly, $config) {
+        if ($this->api) { return $this->api; }
+        $environment = RuntimeGuard::environment($config);
+        $api = new EnomApi(new RegistrarClient(trim($config['uid']), trim($config['token']), null,
+            function () use ($serverId, $readOnly, $config, $environment) {
                 $current = $this->providerConfiguration($serverId, $readOnly);
                 if (!hash_equals((string) $config['uid'], (string) $current['uid'])
-                    || !hash_equals((string) $config['token'], (string) $current['token'])) {
+                    || !hash_equals((string) $config['token'], (string) $current['token'])
+                    || RuntimeGuard::environment($current) !== $environment) {
                     throw new RuntimeException('Registrar account configuration changed.');
                 }
                 return $current;
-            }, $readOnly));
+            }, $readOnly, $environment));
+        $suffixes = Tld::query()->where('server_id', $serverId)->pluck('tld')
+            ->merge(Domain::query()->where('server_id', $serverId)->distinct()->pluck('tld'))->all();
+        return $api->withSuffixes($suffixes);
     }
 
     public function providerConfiguration(int $serverId, bool $readOnly = false): array
@@ -175,13 +182,14 @@ class DomainOperations
                     $configuration = $this->guard ? ($this->guard)((int) $domain->server_id, true) : RuntimeGuard::configuration((int) $domain->server_id);
                     $uid = $configuration['uid'] ?? null;
                     if (!is_string($uid) || $uid === ''
-                        || isset($policy['account_fingerprint']) && $policy['account_fingerprint'] !== hash('sha256', 'sandbox:'.strtolower($uid))
+                        || isset($policy['account_fingerprint']) && $policy['account_fingerprint'] !== RuntimeGuard::accountFingerprint($configuration)
                         || isset($policy['provider_account_identity']) && $policy['provider_account_identity'] !== hash('sha256', strtolower(trim($uid)))) { return false; }
                 } catch (Throwable) { return false; }
             }
         }
         if ($operation->funding_basis === 'non_billable_management') {
-            return $operation->authorized_by == $domain->user_id && $domain->status === 'active';
+            return $domain->status === 'active' && ((int) $operation->authorized_by === (int) $domain->user_id
+                || (bool) User::find($operation->authorized_by)?->hasPermission('admin.enom.manage'));
         }
         if ($operation->funding_basis === 'operator_funded') {
             $staff = User::find($operation->authorized_by);
@@ -205,6 +213,17 @@ class DomainOperations
                 && (int) ($approval['term'] ?? 0) === (int) $operation->term
                 && is_int($approval['limit_minor'] ?? null) && $approval['limit_minor'] > 0
                 && !$service->cancellation()->exists();
+        }
+        if ($operation->funding_basis === 'complimentary') {
+            // The reseller pays. Still complimentary right now, nothing billed, and a cost cap recorded at creation.
+            // Once sent, a later change of who pays must not stop the outcome being recorded.
+            $sent = array_key_exists('dispatch_attempted_at', $policy) || isset($operation->cost['execution']) || $operation->provider_order_id !== null;
+            return in_array($operation->action, ['register', 'transfer', 'renew'], true)
+                && ($sent || Pricing::isComplimentary($domain) && $this->cents($service->price) === 0) && $domain->billing_managed
+                && $operation->invoice_id === null && $operation->invoice_item_id === null
+                && $this->cents($operation->amount) === 0
+                && is_int($policy['complimentary_cap_minor'] ?? null)
+                && ($operation->action !== 'renew' || $service->status === Service::STATUS_ACTIVE && !$service->cancellation()->exists());
         }
         $invoice = Invoice::with('items', 'transactions')->find($operation->invoice_id);
         $item = $invoice?->items->firstWhere('id', $operation->invoice_item_id);
@@ -293,6 +312,11 @@ class DomainOperations
                 ]]);
                 if (!$updated) { return $claimed->fresh(); }
                 $claimed = $updated;
+                // The reseller pays for complimentary orders: hold anything without a known cost under the cap.
+                if ($claimed->funding_basis === 'complimentary' && ($amount === null || $currency !== 'USD'
+                    || $this->cents($amount) > (int) ($claimed->policy['complimentary_cap_minor'] ?? -1))) {
+                    return $this->finish($claimed, 'held', 'complimentary_cost_above_limit');
+                }
             }
             if ($claimed->action === 'renew' && $domain->billing_managed) {
                 $admission = (new RenewalAdmission($this))->check($claimed, $api);
@@ -354,6 +378,13 @@ class DomainOperations
                 // Capture only bounded identity/acknowledgement, never the provider envelope.
                 $claimed->update(['cost' => array_replace($claimed->cost ?? [], ['execution' => $execution])]);
             }
+            if ($result->status !== 'success') {
+                // Staff-only: Enom's own wording, bounded and stripped of control characters, for support.
+                $text = $result->value('rrptext') ?: $result->value('errors.err1') ?: $result->value('responses.response.responsestring');
+                if (is_string($text) && trim($text) !== '') {
+                    $claimed->update(['cost' => array_replace($claimed->fresh()->cost ?? [], ['provider_message' => mb_substr(preg_replace('/[\x00-\x1f\x7f]+/', ' ', trim($text)), 0, 300)])]);
+                }
+            }
             if ($result->status === 'rejected') { return $this->finish($claimed, 'rejected', $this->rejectionCode($result->code)); }
             if ($result->status === 'pending') { return $this->finish($claimed, 'pending', 'provider_pending'); }
             if ($result->status !== 'success') { return $this->finish($claimed, 'uncertain', 'provider_unknown'); }
@@ -401,6 +432,9 @@ class DomainOperations
                 $this->recordSnapshot($domain, ['privacy' => $snapshot, 'read_status' => ['privacy' => $privacyRead->status]]);
             } elseif ($claimed->action === 'epp_sync') {
                 return $this->finish($claimed, 'succeeded', 'epp_sync_acknowledged');
+            } elseif ($claimed->action === 'epp_email') {
+                // Enom accepted the request to email the registrant. Delivery is not observable.
+                return $this->finish($claimed, 'succeeded', 'epp_email_accepted');
             } else {
                 // Readback confirmation is shared with the customer management module.
                 $kind = match ($claimed->action) { 'contacts' => 'contacts', 'lock' => 'lock', 'privacy_enable', 'privacy_disable' => 'privacy', 'dnssec_add', 'dnssec_delete' => 'dnssec', 'provider_renewal_disable' => 'renewal', default => $claimed->action };
@@ -418,7 +452,9 @@ class DomainOperations
     {
         $payload = $operation->payload ?? [];
         return match ($operation->action) {
-            'register' => $api->register($domain->domain, $payload['contacts'] ?? [], $payload['nameservers'] ?? [], 1),
+            // Register on Enom's default DNS, then apply the chosen nameservers as a separate change.
+            // A refused nameserver must never fail a paid registration.
+            'register' => $api->register($domain->domain, $payload['contacts'] ?? [], [], 1),
             'transfer' => $api->transfer($domain->domain, $payload['contacts'] ?? [], $payload['epp'] ?? ''),
             'renew' => ($operation->policy['provider_command'] ?? null) === 'UpdateExpiredDomains'
                 ? $api->expiredRenew($domain->domain, 1)
@@ -429,6 +465,7 @@ class DomainOperations
             'contacts' => $api->updateContact($domain->domain, $payload['contact_type'], $payload['contact']),
             'lock' => $api->setLock($domain->domain, $payload['locked']),
             'epp_sync' => $api->synchronizeEpp($domain->domain),
+            'epp_email' => $api->emailTransferCode($domain->domain),
             'privacy_enable' => $api->enablePrivacy($domain->domain, true),
             'privacy_disable' => $api->enablePrivacy($domain->domain, false),
             'hosts' => $api->setHosts($domain->domain, $payload['records']),
@@ -464,7 +501,10 @@ class DomainOperations
             'lock' => isset($snapshot['locked']) && $snapshot['locked'] === ($payload['locked'] ?? null),
             'privacy_enable' => ($snapshot['privacy']['enabled'] ?? null) === true,
             'privacy_disable' => ($snapshot['privacy']['enabled'] ?? null) === false,
-            'contacts' => isset($snapshot['contacts'][$payload['contact_type'] ?? '']) && $this->contactsMatch($payload['contact'] ?? [], $snapshot['contacts'][$payload['contact_type']]),
+            'contacts' => ($payload['contact_type'] ?? '') === 'all'
+                ? array_reduce($snapshot['contact_roles'] ?? ['registrant', 'admin', 'tech', 'auxbilling'], fn ($ok, $type) => $ok && isset($snapshot['contacts'][$type])
+                    && $this->contactsMatch($payload['contact'] ?? [], $snapshot['contacts'][$type]), true)
+                : isset($snapshot['contacts'][$payload['contact_type'] ?? '']) && $this->contactsMatch($payload['contact'] ?? [], $snapshot['contacts'][$payload['contact_type']]),
             'hosts', 'srv' => self::canonicalRecords($operation->action, DomainManager::safeSnapshot($snapshot)[$operation->action]) === self::canonicalRecords($operation->action, $payload['records'] ?? []),
             'dnssec_add' => in_array(self::canonicalRecords('dnssec', [$payload['ds'] ?? []])[0] ?? null, self::canonicalRecords('dnssec', $snapshot['dnssec'] ?? []), true),
             'dnssec_delete' => !in_array(self::canonicalRecords('dnssec', [$payload['ds'] ?? []])[0] ?? null, self::canonicalRecords('dnssec', $snapshot['dnssec'] ?? []), true),
@@ -478,7 +518,10 @@ class DomainOperations
     {
         $requestedSet = $this->canonicalNameservers($requested);
         $actualSet = $this->canonicalNameservers($actual);
-        return $requestedSet !== null && $actualSet !== null && $requestedSet === $actualSet;
+        if ($requestedSet === null || $actualSet === null) { return false; }
+        // Enom switches to its whole default DNS set when asked for any of its own hosts.
+        $enomDefault = fn (array $set) => $set !== [] && array_reduce($set, fn ($all, $host) => $all && str_ends_with($host, '.name-services.com'), true);
+        return $requestedSet === $actualSet || $enomDefault($requestedSet) && $enomDefault($actualSet);
     }
 
     private function canonicalNameservers(mixed $values): ?array
@@ -642,8 +685,8 @@ class DomainOperations
             }
             $current->update(['cost' => $cost]);
             $limit = $current->funding_basis === 'sponsored' ? ($current->policy['sponsorship']['limit_minor'] ?? null)
-                : (($cost['quote']['currency'] ?? null) === $actual['currency'] && RegistrarMoney::decimal($cost['quote']['amount'] ?? null) !== null
-                    ? $this->cents($cost['quote']['amount']) : null);
+                : ($current->funding_basis === 'complimentary' ? ($current->policy['complimentary_cap_minor'] ?? null) : (($cost['quote']['currency'] ?? null) === $actual['currency'] && RegistrarMoney::decimal($cost['quote']['amount'] ?? null) !== null
+                    ? $this->cents($cost['quote']['amount']) : null));
             if ($actual['state'] === 'confirmed' && is_int($limit) && $actual['currency'] === $current->currency
                 && $this->cents($actual['amount']) > $limit) {
                 $policy = $domain->renewal_policy ?? [];
@@ -680,6 +723,18 @@ class DomainOperations
             $service->expires_at = $domain->billing_managed ? null : \Carbon\Carbon::instance($expiry)->subDays(RuntimeGuard::leadDays((int) $domain->server_id))->format('Y-m-d');
             $service->save();
             OrderIntent::where('service_id', $service->id)->update(['payload' => null]);
+            if (in_array($operation->action, ['register', 'transfer'], true)) {
+                \Paymenter\Extensions\Servers\Enom\Jobs\RefreshDomain::dispatch((int) $domain->id)->afterCommit()->delay(now()->addSeconds(20));
+            }
+            $chosen = $operation->action === 'register' ? ($operation->payload['nameservers'] ?? []) : [];
+            if (is_array($chosen) && count($chosen) >= 2) {
+                $follow = Operation::firstOrCreate(['operation_key' => 'initial-nameservers:'.$operation->id], [
+                    'domain_id' => $domain->id, 'service_id' => $service->id, 'action' => 'nameservers', 'term' => 1,
+                    'funding_basis' => 'non_billable_management', 'authorized_by' => $domain->user_id, 'state' => 'queued',
+                    'currency' => $service->currency_code, 'amount' => 0, 'payload' => ['nameservers' => array_values($chosen)],
+                    'policy' => $domain->billing_managed ? ['dispatch_marker_version' => 1] : null]);
+                ExecuteOperation::dispatch($follow->id)->afterCommit()->delay(now()->addSeconds(45));
+            }
             $operation->confirmed_expires_at = $expiry->format('Y-m-d');
             return $this->finish($operation, 'succeeded', 'expiry_confirmed');
         });
@@ -910,9 +965,9 @@ class DomainOperations
         try {
             $operation = $operation->fresh() ?? $operation;
             if ($actor && (!$actor->hasPermission('admin.enom.manage')
-                || $operation->funding_basis === 'sponsored' && !$actor->hasPermission('admin.enom.fund'))) { return false; }
+                || in_array($operation->funding_basis, ['sponsored', 'complimentary'], true) && !$actor->hasPermission('admin.enom.fund'))) { return false; }
             return $operation->state === 'held' && $operation->action === 'renew' && $operation->domain?->billing_managed
-                && in_array($operation->funding_basis, ['paid_invoice', 'sponsored'], true)
+                && in_array($operation->funding_basis, ['paid_invoice', 'sponsored', 'complimentary'], true)
                 && $operation->provider_order_id === null && !isset($operation->cost['execution'])
                 && !isset($operation->policy['dispatch_attempted_at'])
                 && count($operation->policy['readmissions'] ?? []) < 10
@@ -1134,7 +1189,7 @@ class DomainOperations
             if ((int) $operation->service_id !== (int) $service->id || $operation->currency !== $service->currency_code) { continue; }
             $uid = $service->product?->server?->settings->firstWhere('key', 'uid')?->value;
             if (isset($operation->policy['account_fingerprint']) && (!is_string($uid) || $uid === ''
-                || $operation->policy['account_fingerprint'] !== hash('sha256', 'sandbox:'.strtolower($uid)))) { continue; }
+                || $operation->policy['account_fingerprint'] !== RuntimeGuard::serverFingerprint($service->product?->server))) { continue; }
             if (isset($operation->policy['provider_account_identity']) && (!is_string($uid) || $uid === ''
                 || $operation->policy['provider_account_identity'] !== hash('sha256', strtolower(trim($uid))))) { continue; }
             if ($operation->provider_order_id || isset($operation->policy['dispatch_attempted_at']) || isset($operation->cost['execution'])) { continue; }
@@ -1153,20 +1208,30 @@ class DomainOperations
 
     public function enqueueManagement(User $actor, int $domainId, string $action, array $payload, string $nonce): Operation
     {
-        $allowed = ['nameservers', 'contacts', 'lock', 'epp_sync', 'privacy_enable', 'privacy_disable', 'hosts', 'srv', 'dnssec_add', 'dnssec_delete', 'provider_renewal_disable'];
+        $allowed = ['nameservers', 'contacts', 'lock', 'epp_sync', 'epp_email', 'privacy_enable', 'privacy_disable', 'hosts', 'srv', 'dnssec_add', 'dnssec_delete', 'provider_renewal_disable'];
         if (!in_array($action, $allowed, true) || !preg_match('/^[a-f0-9]{32,64}$/D', $nonce)) { throw new RuntimeException('Invalid domain request.'); }
         $key = 'management:'.$domainId.':'.$action.':'.hash('sha256', $nonce);
         return DB::transaction(function () use ($actor, $domainId, $action, $payload, $key) {
-            $domain = Domain::where('user_id', $actor->id)->whereKey($domainId)->lockForUpdate()->firstOrFail();
-            if (self::writesPaused($domain)) { throw new InvalidArgumentException('This domain requires staff disposition and binding review before further registrar changes.'); }
-            abort_unless($domain->service && $domain->service->user_id == $actor->id, 404);
+            // Owners change their own domains. Staff with the manage permission may change any domain; the request records who asked.
+            $staff = $actor->hasPermission('admin.enom.manage');
+            $domain = Domain::when(!$staff, fn ($query) => $query->where('user_id', $actor->id))->whereKey($domainId)->lockForUpdate()->firstOrFail();
+            if (self::writesPaused($domain)) { throw new InvalidArgumentException('This domain is on hold for staff review.'); }
+            abort_unless($domain->service && (int) $domain->service->user_id === (int) $domain->user_id, 404);
             if ($existing = Operation::where('operation_key', $key)->where('domain_id', $domainId)->first()) { return $existing; }
             if ($domain->operations()->whereIn('state', self::UNRESOLVED_STATES)->exists()) {
-                throw new InvalidArgumentException('An existing registrar request must complete or be reviewed before a new change.');
+                throw new InvalidArgumentException('Another change to this domain is still being processed. Try again when it finishes.');
+            }
+            if ($action === 'epp_email' && $domain->operations()->where('action', 'epp_email')->whereIn('state', ['queued', 'running', 'succeeded'])
+                ->where('created_at', '>', now()->subMinutes(10))->exists()) {
+                throw new InvalidArgumentException('A transfer code was requested in the last 10 minutes. Check the registrant\'s inbox before asking again.');
             }
             $this->apiForServer((int) $domain->server_id); // Guard only; constructing a client never performs HTTP.
             if ($domain->status !== 'active' || !$this->validService($domain->service, $domain)) { throw new RuntimeException('Domain management is unavailable.'); }
-            if (($domain->capabilities[$action] ?? false) !== true) { throw new RuntimeException('This registrar action is unavailable.'); }
+            $capability = $action === 'epp_email' ? 'epp_sync' : $action;
+            if (($domain->capabilities[$capability] ?? false) !== true) { throw new InvalidArgumentException('This change is not available for this domain right now. Refresh its status and try again.'); }
+            if (in_array($action, ['hosts', 'srv', 'dnssec_add', 'dnssec_delete'], true) && !RuntimeGuard::flag((int) $domain->server_id, 'dns_tools')) {
+                throw new InvalidArgumentException('DNS tools are turned off for this domain.');
+            }
             if ($action !== 'provider_renewal_disable') { $payload = DomainManager::validatePayload($action, $payload + ['confirmed' => true]); }
             $operation = Operation::create(['operation_key' => $key,
                 'domain_id' => $domain->id, 'service_id' => $domain->service_id, 'action' => $action, 'term' => 1,
@@ -1189,7 +1254,14 @@ class DomainOperations
 
     public function refreshSnapshot(User $actor, int $domainId): Domain
     {
-        $domain = $this->ownedDomain($actor, $domainId);
+        $this->ownedDomain($actor, $domainId);
+        return $this->refreshDomain($domainId, $actor);
+    }
+
+    /** Read registrar details for a domain without an ownership check. Callers authorize first. */
+    public function refreshDomain(int $domainId, ?User $actor = null): Domain
+    {
+        $domain = Domain::findOrFail($domainId);
         // Refresh one bounded set per request; callers can choose cached pages while provider is unavailable.
         $snapshot = $this->apiForServer((int) $domain->server_id, true)->snapshot($domain->domain);
         $status = $snapshot['read_status'] ?? [];
@@ -1290,7 +1362,8 @@ class DomainOperations
         if (in_array('privacy', $sections, true)) {
             $privacy = ($status['privacy'] ?? null) === 'success' && ($snapshot['privacy']['allowed'] ?? false) === true;
             foreach (['privacy_enable', 'privacy_disable'] as $action) { $capabilities[$action] = $privacy && ($snapshot['privacy']['exists'] ?? false) === true; }
-            $privacyPrice = $domain->service->product->settings()->where('key', 'enom_privacy_price')->first()?->value;
+            $privacyPrice = RuntimeGuard::setting((int) $domain->server_id, 'privacy_price')
+                ?? $domain->service->product->settings()->where('key', 'enom_privacy_price')->first()?->value;
             $priced = is_numeric($privacyPrice) && (float) $privacyPrice > 0;
             $capabilities['privacy_purchase'] = $priced && $privacy && ($snapshot['privacy']['exists'] ?? null) === false;
             $capabilities['privacy_renew'] = $priced && $privacy && ($snapshot['privacy']['exists'] ?? null) === true && !empty($snapshot['privacy']['expires_at']);
@@ -1299,10 +1372,9 @@ class DomainOperations
             $actor ??= User::find($domain->user_id);
             $verifiedDnssec = ($status['dnssec'] ?? null) === 'success' && ($snapshot['dnssec_shape_verified'] ?? false) === true
                 && is_array($snapshot['dnssec'] ?? null);
-            $controlledDnssecDemo = $actor?->email === 'demo@example.com' && $domain->status === 'active'
-                && $domain->provider_order_id && preg_match('/^demo-domain-[a-f0-9]{16}\\.com$/D', $domain->domain) === 1;
-            $capabilities['dnssec_add'] = $controlledDnssecDemo && $verifiedDnssec;
-            $capabilities['dnssec_delete'] = $controlledDnssecDemo && $verifiedDnssec && $snapshot['dnssec'] !== [];
+            $active = $domain->status === 'active';
+            $capabilities['dnssec_add'] = $active && $verifiedDnssec;
+            $capabilities['dnssec_delete'] = $active && $verifiedDnssec && $snapshot['dnssec'] !== [];
         }
 
         return $capabilities;

@@ -6,9 +6,14 @@ final class RegistrarClient
 {
     public const REQUEST_TIMEOUT_SECONDS = 25;
 
-    private const ENDPOINT = 'https://resellertest.enom.com/interface.asp';
-    private const STAGE = '/srv/paymenter-example';
+    private const ENDPOINTS = [
+        'test' => 'https://resellertest.enom.com/interface.asp',
+        'live' => 'https://reseller.enom.com/interface.asp',
+    ];
     private const BODY_LIMIT = 1048576;
+    /** Catalogue reads list every ending Enom sells and need more room than per-domain commands. */
+    private const CATALOGUE_COMMANDS = ['gettldlist', 'pe_getdomainpricing'];
+    private const CATALOGUE_BODY_LIMIT = 8388608;
     private const COMMANDS = [
         'check', 'gettlddetails', 'getextattributes', 'getbalance', 'getdomaininfo',
         'getregistrationstatus', 'getdomainexp', 'getextendinfo', 'purchase', 'extend',
@@ -19,13 +24,14 @@ final class RegistrarClient
         'setreglock', 'synchauthinfo', 'getwppsinfo', 'purchaseservices', 'renewservices',
         'enableservices', 'disableservices', 'getrenew', 'setrenew', 'gethosts', 'sethosts',
         'getdomainsrvhosts', 'setdomainsrvhosts', 'getdnssec', 'adddnssec', 'deletednssec',
-        'getexpireddomains', 'updateexpireddomains',
+        'getexpireddomains', 'updateexpireddomains', 'gettldlist', 'pe_getdomainpricing', 'pe_getresellerprice',
+        'tp_resendemail', 'checknsstatus',
     ];
     private const WRITES = [
         'purchase', 'extend', 'tp_createorder', 'tp_submitorder', 'tp_updateorderdetail',
         'contacts', 'modifyns', 'setreglock', 'synchauthinfo', 'purchaseservices',
         'renewservices', 'enableservices', 'disableservices', 'setrenew', 'sethosts',
-        'setdomainsrvhosts', 'adddnssec', 'deletednssec', 'updateexpireddomains',
+        'setdomainsrvhosts', 'adddnssec', 'deletednssec', 'updateexpireddomains', 'tp_resendemail',
     ];
     private const READS = [
         'check', 'gettlddetails', 'getextattributes', 'getbalance', 'getdomaininfo',
@@ -33,10 +39,11 @@ final class RegistrarClient
         'queue_getorders', 'queue_getorderdetail', 'tp_getorderstatuses', 'tp_getorder',
         'tp_getorderdetail', 'tp_getdetailsbydomain', 'tp_getordersbydomain', 'tp_gettldinfo',
         'getcontacts', 'getdns', 'getreglock', 'getwppsinfo', 'getrenew', 'gethosts',
-        'getdomainsrvhosts', 'getdnssec', 'getexpireddomains',
+        'getdomainsrvhosts', 'getdnssec', 'getexpireddomains', 'gettldlist', 'pe_getdomainpricing',
+        'pe_getresellerprice', 'checknsstatus',
     ];
 
-    public function __construct(private string $uid, private string $token, private $transport = null, private $guard = null, private bool $readOnly = false)
+    public function __construct(private string $uid, private string $token, private $transport = null, private $guard = null, private bool $readOnly = false, private string $environment = 'test')
     {
         if ($transport !== null && !is_callable($transport)) {
             throw new \InvalidArgumentException('Invalid registrar transport.');
@@ -44,10 +51,14 @@ final class RegistrarClient
         if ($guard !== null && !is_callable($guard)) {
             throw new \InvalidArgumentException('Invalid registrar guard.');
         }
+        if (!isset(self::ENDPOINTS[$environment])) {
+            throw new \InvalidArgumentException('Invalid registrar environment.');
+        }
     }
 
     public function isReadOnly(): bool { return $this->readOnly; }
-    public function __debugInfo(): array { return ['environment' => 'sandbox', 'injected_transport' => $this->transport !== null, 'read_only' => $this->readOnly]; }
+    public function environment(): string { return $this->environment; }
+    public function __debugInfo(): array { return ['environment' => $this->environment, 'injected_transport' => $this->transport !== null, 'read_only' => $this->readOnly]; }
 
     public function execute(string $command, array $parameters = []): RegistrarResult
     {
@@ -84,11 +95,14 @@ final class RegistrarClient
                 || (strtolower($key) === 'usecreditcard' && strtolower((string) $value) !== 'no')) {
                 throw new \InvalidArgumentException('This registrar payment option is unavailable.');
             }
-            if ((in_array($lower, ['renewname', 'renewflag', 'renew', 'wppsrenew', 'autopakrenew', 'emailforwardrenew', 'urlforwardrenew', 'emailnotify', 'emailepp'], true)
+            if ((in_array($lower, ['renewname', 'renewflag', 'renew', 'wppsrenew', 'autopakrenew', 'emailforwardrenew', 'urlforwardrenew', 'emailnotify'], true)
                 && !in_array(strtolower((string) $value), ['0', 'false', 'no', ''], true))
                 || in_array($lower, ['creditcardnumber', 'creditcardexpmonth', 'creditcardexpyear', 'cvv2', 'ccname', 'chargeamount', 'premiumdomain', 'customersuppliedprice'], true)) {
                 throw new \InvalidArgumentException('This registrar billing or notification option is unavailable.');
             }
+        }
+        if (isset($seen['emailepp']) && $normalized !== 'synchauthinfo') {
+            throw new \InvalidArgumentException('This registrar notification option is unavailable.');
         }
         if ($this->guard !== null) {
             try { ($this->guard)($command, $this->readOnly); }
@@ -110,13 +124,12 @@ final class RegistrarClient
 
     private function send(string $command, array $parameters): string
     {
-        $applicationPath = function_exists('base_path') ? base_path() : getcwd();
-        if (!is_string($applicationPath) || realpath($applicationPath) !== self::STAGE || $this->uid === '' || $this->token === ''
-            || (getenv('SSLKEYLOGFILE') !== false && getenv('SSLKEYLOGFILE') !== '')) {
+        if ($this->uid === '' || $this->token === '' || (getenv('SSLKEYLOGFILE') !== false && getenv('SSLKEYLOGFILE') !== '')) {
             throw new \RuntimeException('Registrar runtime guard refused the request.');
         }
-        $curl = curl_init(self::ENDPOINT);
+        $curl = curl_init(self::ENDPOINTS[$this->environment]);
         $body = '';
+        $limit = self::bodyLimit(strtolower($command));
         curl_setopt_array($curl, [
             CURLOPT_POST => true,
             CURLOPT_POSTFIELDS => http_build_query(['Command' => $command, 'UID' => $this->uid, 'PW' => $this->token, 'ResponseType' => 'XML'] + $parameters, '', '&', PHP_QUERY_RFC3986),
@@ -137,8 +150,8 @@ final class RegistrarClient
             CURLOPT_LOW_SPEED_TIME => 10,
             CURLOPT_FRESH_CONNECT => true,
             CURLOPT_FORBID_REUSE => true,
-            CURLOPT_WRITEFUNCTION => static function ($handle, string $chunk) use (&$body): int {
-                if (strlen($body) + strlen($chunk) > self::BODY_LIMIT) {
+            CURLOPT_WRITEFUNCTION => static function ($handle, string $chunk) use (&$body, $limit): int {
+                if (strlen($body) + strlen($chunk) > $limit) {
                     return 0;
                 }
                 $body .= $chunk;
@@ -159,7 +172,7 @@ final class RegistrarClient
 
     private function parse(string $command, string $body): RegistrarResult
     {
-        if (strlen($body) > self::BODY_LIMIT || preg_match('/<!DOCTYPE|<!ENTITY/i', $body)) {
+        if (strlen($body) > self::bodyLimit($command) || preg_match('/<!DOCTYPE|<!ENTITY/i', $body)) {
             return new RegistrarResult('unknown', 'invalid_response');
         }
         $previous = libxml_use_internal_errors(true);
@@ -170,6 +183,7 @@ final class RegistrarClient
                 return new RegistrarResult('unknown', 'invalid_response');
             }
             $count = 0;
+            $this->nodeLimit = in_array($command, self::CATALOGUE_COMMANDS, true) ? 400000 : 20000;
             $data = $this->node($document->documentElement, 0, $count);
         } catch (\Throwable) {
             return new RegistrarResult('unknown', 'invalid_response');
@@ -236,7 +250,9 @@ final class RegistrarClient
         if (in_array($command, ['purchaseservices', 'renewservices'], true) && !$this->id($data['orderid'] ?? null)) {
             return new RegistrarResult('unknown', 'missing_order', $data);
         }
-        if ($command === 'synchauthinfo' && strtolower((string) ($data['infosynched'] ?? '')) !== 'true') {
+        // EmailEPP=True answers with EPPEmailMessage instead of InfoSynched.
+        if ($command === 'synchauthinfo' && strtolower((string) ($data['infosynched'] ?? '')) !== 'true'
+            && !(is_string($data['eppemailmessage'] ?? null) && trim($data['eppemailmessage']) !== '')) {
             return new RegistrarResult('unknown', 'sync_unconfirmed', $data);
         }
         $validPayload = match ($command) {
@@ -320,6 +336,13 @@ final class RegistrarClient
                 || (isset($reactivation['orderid']) && $reactivation['orderid'] !== '')) { return false; }
         }
         $codes = [];
+        $blank = true;
+        foreach (['rrpcode', 'responsecode'] as $field) {
+            if (array_key_exists($field, $data) && $data[$field] !== '') { $blank = false; }
+        }
+        // Enom checks request fields before contacting the registry and answers those refusals
+        // with no code at all. Only recognised field-validation messages count as definite.
+        if ($blank) { return $this->validationRefusal($data); }
         foreach (['rrpcode', 'responsecode'] as $field) {
             if (array_key_exists($field, $data)) {
                 $code = $this->safeCode($data[$field]);
@@ -337,6 +360,20 @@ final class RegistrarClient
             if (preg_match('/^[347](?:01|03|04|05|06|12|13|15|16|17)[0-9]{3}$/D', $code)) { continue; }
             if ($code === '524181') { continue; } // Insufficient reseller account balance.
             return false;
+        }
+        return true;
+    }
+
+    private function validationRefusal(array $data): bool
+    {
+        $messages = [];
+        $source = is_array($data['errors'] ?? null) ? $data['errors'] + $data : $data;
+        foreach ($source as $key => $value) {
+            if (preg_match('/^err[0-9]+$/D', (string) $key) && is_string($value) && trim($value) !== '') { $messages[] = trim($value); }
+        }
+        if (!$messages || count($messages) !== (int) ($data['errcount'] ?? -1)) { return false; }
+        foreach ($messages as $message) {
+            if (!preg_match('/^(?:Invalid [A-Za-z ]+ information\.?|Parameter value policy error;.*|.*\bis (?:not a valid|required|invalid)\b.*|Invalid (?:phone|email|country|postal code|state|nameserver)\b.*)$/i', $message)) { return false; }
         }
         return true;
     }
@@ -369,9 +406,16 @@ final class RegistrarClient
         return is_string($value) && preg_match('/^\d{1,6}$/D', $value) ? $value : null;
     }
 
+    private int $nodeLimit = 20000;
+
+    private static function bodyLimit(string $command): int
+    {
+        return in_array($command, self::CATALOGUE_COMMANDS, true) ? self::CATALOGUE_BODY_LIMIT : self::BODY_LIMIT;
+    }
+
     private function node(\DOMElement $node, int $depth, int &$count): array|string
     {
-        if ($depth > 16 || ++$count > 20000) {
+        if ($depth > 16 || ++$count > $this->nodeLimit) {
             throw new \RuntimeException('Registrar response exceeds limits.');
         }
         $data = [];

@@ -40,7 +40,8 @@ final class RenewalAdmission
             $binding = $this->binding($operation, $domain);
             $clock = now()->toImmutable();
             $expired = $domain->provider_expires_at->lessThanOrEqualTo($clock);
-            $sponsored = $operation->funding_basis === 'sponsored';
+            // Complimentary renewals have the same quote-under-limit rule as legacy sponsorship.
+            $sponsored = in_array($operation->funding_basis, ['sponsored', 'complimentary'], true);
             if ($domain->renewal_policy['automatic_spend_paused'] ?? false) {
                 return $this->refuse('automatic_spend_paused');
             }
@@ -84,13 +85,15 @@ final class RenewalAdmission
             $complete = ($quote['complete'] ?? false) === true;
             if (($expired || $sponsored) && (!$complete || $quote['currency'] !== 'USD' || $operation->currency !== 'USD'
                 || ($expired && ($quote['grace_eligible'] ?? null) !== true))) {
-                return $this->refuse($expired ? 'grace_evidence_unconfirmed' : 'sponsorship_quote_unconfirmed', $quote);
+                return $this->refuse($expired ? 'grace_evidence_unconfirmed' : ($operation->funding_basis === 'complimentary' ? 'complimentary_quote_unconfirmed' : 'sponsorship_quote_unconfirmed'), $quote);
             }
             if ($expired || $sponsored) {
                 $cost = self::minor($quote['amount']);
-                $limit = $sponsored ? ($policy['sponsorship']['limit_minor'] ?? null) : ($policy['original_net_minor'] ?? null);
+                $limit = $sponsored ? ($operation->funding_basis === 'complimentary' ? ($policy['complimentary_cap_minor'] ?? null)
+                    : ($policy['sponsorship']['limit_minor'] ?? null)) : ($policy['original_net_minor'] ?? null);
                 if ($cost === null || !is_int($limit) || $limit < 0 || $cost > $limit) {
-                    return $this->refuse($sponsored ? 'sponsorship_budget_exceeded' : 'grace_original_price_exceeded', $quote);
+                    return $this->refuse($sponsored ? ($operation->funding_basis === 'complimentary' ? 'complimentary_cost_above_limit' : 'sponsorship_budget_exceeded')
+                        : 'grace_original_price_exceeded', $quote);
                 }
             }
             $read();
@@ -139,12 +142,10 @@ final class RenewalAdmission
 
     public static function accountFingerprint(array $configuration): string
     {
-        if (!is_string($configuration['uid'] ?? null) || $configuration['uid'] === ''
-            || !filter_var($configuration['sandbox'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+        if (!is_string($configuration['uid'] ?? null) || $configuration['uid'] === '') {
             throw new \RuntimeException('Registrar account configuration is unavailable.');
         }
-        // Test account fingerprints share the observer account namespace.
-        return hash('sha256', 'sandbox:'.strtolower($configuration['uid']));
+        return RuntimeGuard::accountFingerprint($configuration);
     }
 
     private function localRefusal(Operation $operation, ?Domain $domain): ?string
@@ -177,14 +178,14 @@ final class RenewalAdmission
                 return 'renewal_policy_binding_changed';
             }
         }
-        if (!in_array($operation->funding_basis, ['paid_invoice', 'sponsored'], true) || !$this->operations->funded($operation)) {
+        if (!in_array($operation->funding_basis, ['paid_invoice', 'sponsored', 'complimentary'], true) || !$this->operations->funded($operation)) {
             return 'renewal_funding_invalid';
         }
         if (DomainOperations::hasRenewalBlocker($domain, $operation->id)) {
             return 'renewal_peer_blocked';
         }
         try {
-            $parts = DomainName::parse($domain->domain, ['com', 'net', 'us']);
+            $parts = DomainName::parse($domain->domain, [$domain->tld]);
             if ($parts['domain'] !== $domain->domain || $parts['sld'] !== $domain->sld || $parts['tld'] !== $domain->tld
                 || str_starts_with($parts['sld'], 'xn--')) { return 'renewal_domain_unsupported'; }
         } catch (Throwable) { return 'renewal_domain_unsupported'; }

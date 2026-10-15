@@ -30,4 +30,4 @@ Only registrations explicitly assigned to Enom can be observed, billed or renewe
 
 The runtime supports Paymenter 1.5.9. It owns `enom_domains`, `enom_operations` and `enom_order_intents`, without altering native table definitions or application/auth/gateway/theme files. Future Paymenter versions need ordinary compatibility testing; compatibility beyond the tested version is not asserted.
 
-This version supports the Enom test endpoint only. Configure the application path, URL and database binding in `Services/RuntimeGuard.php`. Store the test account credentials encrypted on the Enom server and enable its `sandbox` setting. Keep processing off until setup is complete. Live mode is unavailable in this version.
+RuntimeGuard selects the test or live environment. Requests require encrypted credentials and the recorded account binding. Live requests also require the confirmed site URL. Processing is off by default.
