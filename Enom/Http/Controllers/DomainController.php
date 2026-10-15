@@ -59,7 +59,8 @@ class DomainController extends Controller
     {
         $user = $request->user();
         $search = self::queryString($request, 'q', 253);
-        $filter = array_key_exists($request->query('status'), self::FILTERS) ? $request->query('status') : '';
+        $status = $request->query('status');
+        $filter = is_string($status) && array_key_exists($status, self::FILTERS) ? $status : '';
         $sort = in_array($request->query('sort'), self::SORTS, true) ? $request->query('sort') : 'expiry';
 
         $query = Domain::query()->where('user_id', $user->id)->with('service.cancellation')
@@ -297,7 +298,7 @@ class DomainController extends Controller
                 try {
                     $nameservers = DomainManager::validatePayload('nameservers', ['confirmed' => '1', 'nameservers' => (string) $request->input('nameservers', '')])['nameservers'];
                 } catch (InvalidArgumentException $exception) {
-                    $errors['nameservers'] = $exception instanceof InputValidationException ? (string) reset($exception->errors) : 'Enter valid nameserver hostnames, one per line.';
+                    $errors['nameservers'] = $exception instanceof InputValidationException ? (string) (array_values($exception->errors)[0] ?? 'Enter valid nameserver hostnames, one per line.') : 'Enter valid nameserver hostnames, one per line.';
                 }
             }
             if ($errors) {
@@ -571,8 +572,10 @@ class DomainController extends Controller
 
             return $this->toTab($domain, $tab)->withErrors($errors);
         }
-        // Provider and billing exceptions can hold private data. Only local DomainManager validation text is shown.
-        if ($exception instanceof InvalidArgumentException && $exception->getFile() === (new \ReflectionClass(DomainManager::class))->getFileName()) {
+        // Provider and billing exceptions can hold private data. Only our own refusal text (DomainManager and
+        // DomainOperations InvalidArgumentException messages, such as the transfer-code cooldown) is shown.
+        if ($exception instanceof InvalidArgumentException && in_array($exception->getFile(), [
+            (new \ReflectionClass(DomainManager::class))->getFileName(), (new \ReflectionClass(DomainOperations::class))->getFileName()], true)) {
             $message = $exception->getMessage();
         } else {
             report($exception);

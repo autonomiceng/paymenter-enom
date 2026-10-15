@@ -126,50 +126,46 @@ try {
     checkBilling($costReview['costs'][0]['poll_attempts'] === 5 && $costReview['costs'][0]['poll_reason'] === 'cost_poll_limit_reached', 'Cost-authorized staff cannot see the bounded polling review reason.');
     checkBilling($costOperation->fresh()->state === 'succeeded' && !array_intersect(['Extend', 'Purchase', 'UpdateExpiredDomains', 'SetRegLock'], $commands), 'Staff review/report/cost path performed a registrar mutation.');
 
-    // Real request/session/controller/Blade coverage for the two-step staff action.
-    $cache = $testRoot.'/ui-review'; mkdir($cache, 0700); mkdir($cache.'/layouts', 0700); mkdir($cache.'/components', 0700);
-    file_put_contents($cache.'/layouts/app.blade.php', '<html><body>{{ $slot }}</body></html>');
-    file_put_contents($cache.'/components/ri-loader-5-fill.blade.php', '<span aria-hidden="true"></span>');
-    config(['view.paths' => [$cache, $release.'/themes/default/views']]);
-    $app['view']->getFinder()->setPaths([$cache, $release.'/themes/default/views']);
-    $app['view']->addNamespace('enom', $repo.'/Enom/resources/views');
-    foreach (['enom.help' => '/domains/help/{topic?}', 'enom.admin.help' => '/admin/enom/help/{topic?}', 'enom.admin.index' => '/admin/enom', 'enom.admin.domain' => '/admin/enom/domains/{domain}', 'enom.admin.fund' => '/admin/enom/{operation}/fund', 'enom.admin.reconcile' => '/admin/enom/{operation}/reconcile', 'enom.admin.readmit' => '/admin/enom/{operation}/readmit', 'enom.admin.provider-fact' => '/admin/enom/{operation}/provider-fact', 'enom.admin.disposition' => '/admin/enom/{operation}/disposition', 'invoices.show' => '/invoices/{invoice}', 'filament.admin.pages.dashboard' => '/admin'] as $name => $path) { $app['router']->get($path, fn () => null)->name($name); }
-    $app['router']->getRoutes()->refreshNameLookups();
-    $app['view']->share('errors', new Illuminate\Support\ViewErrorBag);
-    $controller = new Paymenter\Extensions\Servers\Enom\Http\Controllers\AdminController($reviewer, $admin);
-    $requestFor = function ($actor, $operation, $action, $input = []) use ($app) {
-        $request = Illuminate\Http\Request::create('http://enom-tests.invalid/admin/enom/'.$operation->id.'/'.$action, 'POST', $input);
-        $session = new Illuminate\Session\Store('provider-fact-ui', new Illuminate\Session\ArraySessionHandler(60)); $session->start(); $request->setLaravelSession($session);
-        $request->request->set('_request_key', Paymenter\Extensions\Servers\Enom\Http\FormKeys::issue($request, 'staff:'.$operation->id.':'.$action));
-        $app->instance('request', $request); $app->instance('session', $session); $app['url']->setRequest($request); $app['redirect']->setSession($session); $request->setUserResolver(fn () => $actor);
+    // The 0.2 staff URLs only redirect into the Filament admin now. Old forms posted there, even fully confirmed
+    // with a current fact digest, change nothing and send nothing; customers are refused. Uses real routes.
+    require_once dirname(__DIR__).'/enom-admin-panel.php';
+    enomAdminPanel();
+    $controller = $app->make(Paymenter\Extensions\Servers\Enom\Http\Controllers\AdminController::class);
+    $requestFor = function ($actor, string $uri, array $input = []) use ($app) {
+        $request = Illuminate\Http\Request::create('http://enom-tests.invalid'.$uri, 'POST', $input);
+        $session = new Illuminate\Session\Store('provider-fact-redirect', new Illuminate\Session\ArraySessionHandler(60)); $session->start(); $request->setLaravelSession($session);
+        $app->instance('request', $request); $app->instance('session.store', $session); $app['url']->setRequest($request); $app['redirect']->setSession($session); $request->setUserResolver(fn () => $actor);
         return $request;
     };
     [$currentDomain, $uiOperation] = $makeUncertain('fact-ui', false);
-    $request = $requestFor($staff, $uiOperation, 'provider-fact'); $before = dispositionRows();
-    $controller->providerFact($request, $uiOperation->id);
-    checkBilling(dispositionRows() === $before && $request->session()->get('errors')->has('confirmed'), 'Unconfirmed provider observation changes data.');
-    $request = $requestFor($user, $uiOperation, 'provider-fact', ['confirmed' => '1']);
-    refuseDisposition(fn () => $controller->providerFact($request, $uiOperation->id), 'Customer provider-fact controller');
-    $request = $requestFor($staff, $uiOperation, 'provider-fact', ['confirmed' => '1']);
-    $responseObject = $controller->providerFact($request, $uiOperation->id);
-    checkBilling($responseObject->getStatusCode() === 302 && isset($uiOperation->fresh()->policy['provider_fact']), 'Confirmed staff observation did not record a provider fact.');
-    try { Paymenter\Extensions\Servers\Enom\Http\FormKeys::verify($request, 'staff:'.$uiOperation->id.':provider-fact'); throw new LogicException('Observation nonce reused.'); }
-    catch (Symfony\Component\HttpKernel\Exception\HttpException $error) { checkBilling($error->getStatusCode() === 419, 'Observation did not consume its nonce.'); }
-    $fact = $uiOperation->fresh()->policy['provider_fact'];
-    $request = $requestFor($staff, $uiOperation, 'disposition', ['confirmed' => '1', 'fact_digest' => str_repeat('f', 64), 'outcome' => 'unattributed_provider_fact', 'financial' => 'manual_review_required', 'reason' => 'Retain native financial review for the unattributed provider outcome', 'epp' => 'never-flash', 'cost' => 'internal-secret']);
-    $before = dispositionRows(); $key = $request->input('_request_key'); $controller->disposition($request, $uiOperation->id);
-    checkBilling(dispositionRows() === $before && $request->session()->get('errors')->has('enom') && !$request->session()->has('_old_input.epp') && !$request->session()->has('_old_input.cost') && !$request->session()->has('_old_input.fact_digest') && Paymenter\Extensions\Servers\Enom\Http\FormKeys::verify($request, 'staff:'.$uiOperation->id.':disposition') === $key, 'Failed disposition changes data, leaks input or consumes its nonce.');
-    $html = $controller->index($request)->with('errors', $request->session()->get('errors'))->render();
-    checkBilling(str_contains($html, 'Record current provider facts') && str_contains($html, 'Record disposition and pause domain') && str_contains($html, 'Manual financial review required') && str_contains($html, '/invoices/'.$retiredInvoice->id), 'Staff page omits provider disposition or native late-payment review links.');
-    $document = new DOMDocument; @$document->loadHTML($html); $xpath = new DOMXPath($document);
-    checkBilling(!str_contains($html, hash('sha256', 'sandbox:test-account')) && !str_contains($html, 'internal-cost-marker') && $xpath->query('//*[@aria-invalid="true"]')->length === 0, 'Overview leaks private provider/cost identity or unrelated field errors.');
-    $request = $requestFor($staff, $uiOperation, 'disposition', ['confirmed' => '1', 'fact_digest' => $fact['digest'], 'outcome' => 'unattributed_provider_fact', 'financial' => 'manual_review_required', 'reason' => 'Retain native financial review for the unattributed provider outcome']);
-    $commandsBefore = $commands; $responseObject = $controller->disposition($request, $uiOperation->id);
-    checkBilling($responseObject->getStatusCode() === 302 && $uiOperation->fresh()->state === 'disposed' && $commandsBefore === $commands, 'Confirmed disposition does not close review safely.');
-    try { Paymenter\Extensions\Servers\Enom\Http\FormKeys::verify($request, 'staff:'.$uiOperation->id.':disposition'); throw new LogicException('Disposition nonce reused.'); }
-    catch (Symfony\Component\HttpKernel\Exception\HttpException $error) { checkBilling($error->getStatusCode() === 419, 'Disposition did not consume its nonce.'); }
-    $html = $controller->index($request)->with('errors', new Illuminate\Support\ViewErrorBag)->render();
-    checkBilling(str_contains($html, 'Closed by support') && str_contains($html, 'Staff provider disposition: unattributed provider fact'), 'Disposed outcome implies registrar financial fulfillment or is hidden.');
+    $observedUi = $reviewer->observeProviderFact($uiOperation->id, $staff);
+    $uiFact = $observedUi->policy['provider_fact'];
+    $requestsIndex = Paymenter\Extensions\Servers\Enom\Admin\Resources\OperationResource::getUrl('index');
+    $legacyPosts = [
+        'providerFact' => ['provider-fact', ['confirmed' => '1']],
+        'disposition' => ['disposition', ['confirmed' => '1', 'fact_digest' => $uiFact['digest'], 'outcome' => 'unattributed_provider_fact', 'financial' => 'manual_review_required', 'reason' => 'Retain native financial review for the unattributed provider outcome']],
+        'reconcile' => ['reconcile', ['confirmed' => '1']],
+        'readmit' => ['readmit', ['confirmed' => '1', 'reason' => 'Reviewed and resumed']],
+        'fund' => ['fund', ['confirmed' => '1', 'reason' => 'Reviewed specific funding expense', 'amount' => '15.00', 'currency' => 'USD']],
+    ];
+    foreach ($legacyPosts as $method => [$path, $input]) {
+        $commandsBefore = $commands; $before = dispositionRows();
+        $response = $controller->{$method}($requestFor($staff, '/admin/enom/'.$uiOperation->id.'/'.$path, $input), $uiOperation->id);
+        checkBilling($response->getStatusCode() === 302 && $response->getTargetUrl() === $requestsIndex, 'Legacy staff '.$path.' POST did not redirect to Registrar requests.');
+        checkBilling(dispositionRows() === $before && $commands === $commandsBefore, 'Legacy staff '.$path.' POST changed business data or reached Enom.');
+        refuseDisposition(fn () => $controller->{$method}($requestFor($user, '/admin/enom/'.$uiOperation->id.'/'.$path, $input), $uiOperation->id), 'Customer legacy '.$path.' POST');
+    }
+    checkBilling($uiOperation->fresh()->state === 'uncertain' && $uiOperation->fresh()->policy['provider_fact']['digest'] === $uiFact['digest'], 'Legacy staff POSTs disposed the request or replaced its fact.');
+    $domainUrl = Paymenter\Extensions\Servers\Enom\Admin\Resources\DomainResource::getUrl('view', ['record' => $currentDomain->id]);
+    foreach (['policy', 'sponsorship', 'refresh', 'sponsoredRenewal'] as $method) {
+        $commandsBefore = $commands; $before = dispositionRows();
+        $response = $controller->{$method}($requestFor($staff, '/admin/enom/domains/'.$currentDomain->id.'/'.$method, ['confirmed' => '1', 'enabled' => '1', 'reason' => 'Reviewed']), $currentDomain->id);
+        checkBilling($response->getTargetUrl() === $domainUrl && dispositionRows() === $before && $commands === $commandsBefore, 'Legacy staff domain '.$method.' POST changed data or did not redirect to the domain page.');
+    }
+    // The renewal-review controls now live on Registrar requests: a fresh fact offers "Record outcome", which still needs staff.
+    $commandsBefore = $commands;
+    $closed = $reviewer->disposeProviderFact($uiOperation->id, $staff, $uiFact['digest'], 'unattributed_provider_fact', 'manual_review_required', 'Retain native financial review for the unattributed provider outcome');
+    checkBilling($closed->state === 'disposed' && $commands === $commandsBefore && Paymenter\Extensions\Servers\Enom\Services\DomainOperations::writesPaused($currentDomain->fresh()), 'Confirmed disposition does not close review safely.');
     $routesSource = file_get_contents($repo.'/Enom/routes/web.php');
     foreach (['provider-fact', 'disposition'] as $action) { checkBilling((bool) preg_match("~Route::post\('/admin/enom/\\{operation\\}/".$action."'.*block\\(10, 10\\)~", $routesSource), 'Staff '.$action.' route is not session-serialized POST.'); }
     $scheduleSource = file_get_contents($repo.'/Enom/Enom.php');

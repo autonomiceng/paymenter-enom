@@ -194,13 +194,14 @@ $next = fixture(); $next->service->update(['product_id' => $aliasProduct->id]); 
 verify($limited->observe($next->id) === 'rate_limited' && count($commands) === 0, 'Duplicate configuration escaped the account request budget.');
 $configuration['observer_requests_per_minute'] = 300;
 verify($limited->observe($next->id) === 'rate_limited' && count($commands) === 0, 'Higher alias limit bypassed the remembered account minimum.');
-// Explicit false read permission wins over the old operations flag.
-Cache::flush(); $domain = fixture(); $configuration = ['uid' => 'offline-account', 'token' => 'offline-token', 'reads_enabled' => false, 'operations_enabled' => true];
+// 0.3: daily status reads need credentials only. A legacy reads_enabled=false and paused processing do not stop them.
+Cache::flush(); $domain = fixture(); $configuration = ['uid' => 'offline-account', 'token' => 'offline-token', 'reads_enabled' => false, 'operations_enabled' => false];
 [$observer, $commands] = reader($domain, [], null, $configuration);
-verify($observer->observe($domain->id) === 'guard_refused' && count($commands) === 0, 'Explicit disabled reads inherited write permission.');
+verify($observer->observe($domain->id) === 'observed' && count($commands) > 0, 'Legacy reads_enabled=false or paused processing stopped status reads.');
+verify(!array_intersect($commands->getArrayCopy(), ['Purchase', 'Extend', 'SetRenew', 'SetRegLock', 'ModifyNS', 'Contacts']), 'Status reads sent a registrar write.');
 $configuration = ['uid' => 'offline-account', 'token' => 'offline-token', 'operations_enabled' => true];
 [$observer] = reader($domain, [], null, $configuration);
-verify($observer->observe($domain->id) === 'observed', 'Legacy read permission was not preserved.');
+verify($observer->observe($domain->id) === 'observed', 'Status reads failed with processing on.');
 // Command rejection happens before even the injected transport and guard.
 $transportCalls = $guardCalls = 0;
 $client = new RegistrarClient('synthetic', 'secret', function () use (&$transportCalls) { $transportCalls++; return ''; }, function () use (&$guardCalls) { $guardCalls++; }, true);

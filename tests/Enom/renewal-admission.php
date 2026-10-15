@@ -99,7 +99,7 @@ $make = function (string $kind = 'paid', string $expiry = '2026-12-01', string $
     $domain = Domain::create(['service_id' => $service->id, 'user_id' => $user->id, 'server_id' => $server->id,
         'domain' => 'admission-'.$counter.'.com', 'sld' => 'admission-'.$counter, 'tld' => 'com',
         'provider_domain_id' => '456', 'status' => 'active', 'provider_expires_at' => $expiry,
-        'billing_managed' => true, 'authority_generation' => 1, 'confirmed_revision' => 1,
+        'billing_managed' => true, 'authority_generation' => 1, 'confirmed_revision' => 1, 'price_mode' => 'custom', // 0.3 backfill: keep the native price
         'renewal_policy' => ['enabled' => true]]);
     if ($kind === 'sponsored') {
         $domain->update(['sponsorship' => ['enabled' => true, 'standing' => true, 'approved_by' => $staff->id,

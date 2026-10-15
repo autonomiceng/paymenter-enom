@@ -94,7 +94,7 @@ $make = function (string $name, int $price = 15, string $status = 'active', arra
         'price' => $price, 'quantity' => 1, 'currency_code' => 'USD', 'status' => $status, 'expires_at' => null]);
     return Domain::create(['service_id' => $service->id, 'user_id' => $user->id, 'server_id' => $server->id,
         'domain' => $name.'.com', 'sld' => $name, 'tld' => 'com', 'status' => 'active', 'provider_expires_at' => '2026-12-01',
-        'billing_managed' => true, 'authority_generation' => 1, 'confirmed_revision' => 1,
+        'billing_managed' => true, 'authority_generation' => 1, 'confirmed_revision' => 1, 'price_mode' => 'custom', // 0.3 backfill: keep the native price
         'renewal_policy' => array_replace(['enabled' => true], $policy)]);
 };
 atBilling('2026-11-09');

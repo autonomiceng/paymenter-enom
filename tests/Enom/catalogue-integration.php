@@ -18,13 +18,17 @@ $fixtures = dirname(__DIR__).'/fixtures/enom-test-api/';
 $pricingBody = file_get_contents($fixtures.'enom-pe-getdomainpricing.xml');
 $failCommand = null;
 $commands = [];
-$transport = function (string $command, array $params) use (&$pricingBody, &$failCommand, &$commands, $fixtures): string {
+$wrongDetails = false;
+$transport = function (string $command, array $params) use (&$pricingBody, &$failCommand, &$commands, &$wrongDetails, $fixtures): string {
     $commands[] = $command.(isset($params['TLD']) ? ':'.$params['TLD'] : '');
     if ($failCommand === $command) { return enomXml($command, '').'<broken'; }
     return match ($command) {
         'GetTLDList' => file_get_contents($fixtures.'enom-gettldlist.xml'),
         'PE_GetDomainPricing' => $pricingBody,
-        'GetTLDDetails' => file_get_contents($fixtures.($params['TLD'] === 'ai' ? 'enom-gettlddetails-ai.xml' : 'enom-gettlddetails-com.xml')),
+        // Captures exist for .com and .ai; other endings reuse the .com one-year shape under their own name (synthetic).
+        // $wrongDetails serves the .com capture unchanged, to test that an answer about another ending is refused.
+        'GetTLDDetails' => $params['TLD'] === 'ai' ? file_get_contents($fixtures.'enom-gettlddetails-ai.xml')
+            : str_replace('<TLD>com</TLD>', '<TLD>'.($wrongDetails ? 'com' : $params['TLD']).'</TLD>', file_get_contents($fixtures.'enom-gettlddetails-com.xml')),
         'GetExtAttributes' => file_get_contents($fixtures.($params['TLD'] === 'us' ? 'enom-getextattributes-us.xml' : 'enom-getextattributes-com.xml')),
         default => throw new RuntimeException('Unexpected catalogue command '.$command),
     };
@@ -95,7 +99,12 @@ $ai = $ai->fresh(); $ai->fill(['pricing_mode' => 'fixed', 'register_price' => '9
 refuses(fn () => $catalogue->enable($ai->fresh()), 'at least 2 years', '.ai with a two-year minimum was enabled.', [InvalidArgumentException::class]);
 $failCommand = 'GetExtAttributes';
 refuses(fn () => $catalogue->enable($org->fresh()), 'Could not check .org registry requirements', 'Unknown attribute read enabled an ending.', [RuntimeException::class]);
+$failCommand = 'GetTLDDetails';
+refuses(fn () => $catalogue->enable($org->fresh()), 'Could not confirm that .org can be registered for one year', 'Failed term read enabled an ending.', [RuntimeException::class]);
 $failCommand = null;
+$wrongDetails = true;
+refuses(fn () => $catalogue->enable($org->fresh()), 'Could not confirm that .org can be registered for one year', 'Term details for another ending enabled .org.', [RuntimeException::class]);
+$wrongDetails = false;
 verify(Tld::where('enabled', true)->count() === 0 && Product::count() === 0, 'A refused enable changed state or created a product.');
 $catalogue->enable($com);
 verify($com->fresh()->enabled && Product::where('server_id', $server->id)->count() === 1, 'Valid .com was not enabled with its product.');

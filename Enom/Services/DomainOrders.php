@@ -69,7 +69,8 @@ class DomainOrders
         if (Domain::where('domain', $parsed['domain'])->exists()) { throw new RuntimeException('This domain already has a portal record.'); }
         $result = $this->operations->apiForServer((int) $tld->server_id, true)->search($parsed['domain']);
         $check = EnomApi::normalize('search', $result);
-        if ($result->status !== 'success' || ($check['is_premium'] ?? null) !== false || ($check['is_platinum'] ?? null) !== false || ($check['is_eap'] ?? null) !== false
+        if ($result->status !== 'success') { throw new RuntimeException('Availability could not be checked right now.'); }
+        if (($check['is_premium'] ?? null) !== false || ($check['is_platinum'] ?? null) !== false || ($check['is_eap'] ?? null) !== false
             || ($check['min_reg_year'] ?? 1) > 1
             || ($action === 'register' && empty($check['available']))
             || ($action === 'transfer' && (!empty($check['available']) || empty($check['transferable'])))) {

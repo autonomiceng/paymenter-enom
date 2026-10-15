@@ -576,42 +576,31 @@ check([
     Illuminate\Support\Facades\DB::table('invoice_transactions')->orderBy('id')->get()->toArray(),
 ] == $financialBefore && $fundDomain->fresh()->service->expires_at->format('Y-m-d') === $diagnosticDueBefore, 'Rejected diagnostics changed financial data or billing due dates.');
 // Runtime factory must reject the synthetic app even when caller changes configuration.
-// Disabled automation cannot mutate stale claims/drift, enqueue work or call the provider.
+// Paused processing pauses writes only. Reads (reconciliation, cost checks, drift) continue without
+// operations_enabled; a legacy reads_enabled setting no longer switches them off.
 $server->settings()->where('key', 'operations_enabled')->firstOrFail()->update(['value' => false]);
 $resetSweep = function (): void {
     foreach (['operations', 'costs', 'domains'] as $part) { Illuminate\Support\Facades\Cache::forget('enom:sweep:'.$part); }
 };
-$reconciliationJobs = fn () => Illuminate\Support\Facades\DB::table('jobs')->get()->filter(fn ($job) =>
-    (json_decode($job->payload, true)['displayName'] ?? null) === Paymenter\Extensions\Servers\Enom\Jobs\ReconcileOperation::class)->count();
-$resetSweep();
-$beforeDisabled = [
-    Illuminate\Support\Facades\DB::table('enom_operations')->orderBy('id')->get()->toArray(),
-    Illuminate\Support\Facades\DB::table('enom_domains')->orderBy('id')->get()->toArray(),
-    Illuminate\Support\Facades\DB::table('jobs')->orderBy('id')->get()->toArray(),
-];
-$beforeProviderCalls = $providerCalls;
-check($operations->sweep() === ['queued' => 0, 'uncertain' => 0, 'drift' => 0], 'Disabled provider automation reported work.');
-$afterDisabled = [
-    Illuminate\Support\Facades\DB::table('enom_operations')->orderBy('id')->get()->toArray(),
-    Illuminate\Support\Facades\DB::table('enom_domains')->orderBy('id')->get()->toArray(),
-    Illuminate\Support\Facades\DB::table('jobs')->orderBy('id')->get()->toArray(),
-];
-check($beforeDisabled == $afterDisabled && $beforeProviderCalls === $providerCalls,
-    'Disabled sweep mutated history/drift/jobs or called the provider.');
-$readsSetting = $server->settings()->create(['key' => 'reads_enabled', 'value' => true, 'type' => 'boolean']);
-$resetSweep();
-$beforeReconcileJobs = $reconciliationJobs();
-$summary = $operations->sweep();
-check($summary['queued'] === 0 && $summary['uncertain'] === 0 && $reconciliationJobs() > $beforeReconcileJobs
-    && $beforeProviderCalls === $providerCalls, 'Explicit reads-only permission failed to enqueue reconciliation without spending.');
-$readsSetting->update(['value' => false]);
+$jobsOf = fn (string $class) => Illuminate\Support\Facades\DB::table('jobs')->get()->filter(fn ($job) =>
+    (json_decode($job->payload, true)['displayName'] ?? null) === $class)->count();
+$reconciliationJobs = fn () => $jobsOf(Paymenter\Extensions\Servers\Enom\Jobs\ReconcileOperation::class);
+$executionJobs = fn () => $jobsOf(Paymenter\Extensions\Servers\Enom\Jobs\ExecuteOperation::class);
+$queuedStates = fn () => Illuminate\Support\Facades\DB::table('enom_operations')->whereIn('state', ['queued', 'awaiting_payment'])->orderBy('id')->pluck('state', 'id')->all();
+$uncertainCount = Paymenter\Extensions\Servers\Enom\Models\Operation::whereIn('state', ['pending', 'uncertain'])->count();
+foreach (['paused processing' => null, 'paused processing with reads_enabled=false' => false] as $case => $reads) {
+    $readsSetting = $reads === null ? null : $server->settings()->create(['key' => 'reads_enabled', 'value' => $reads, 'type' => 'boolean']);
+    $resetSweep();
+    $before = [$queuedStates(), Illuminate\Support\Facades\DB::table('invoices')->orderBy('id')->get()->toArray(), $writes, $executionJobs()];
+    $reconcileBefore = $reconciliationJobs();
+    $summary = $operations->sweep();
+    check($summary['queued'] === 0 && [$queuedStates(), Illuminate\Support\Facades\DB::table('invoices')->orderBy('id')->get()->toArray(), $writes, $executionJobs()] == $before,
+        'Sweep with '.$case.' dispatched or sent registrar writes.');
+    check($uncertainCount > 0 && $reconciliationJobs() > $reconcileBefore, 'Sweep with '.$case.' stopped read-only reconciliation.');
+    $readsSetting?->delete();
+}
 $server->settings()->where('key', 'operations_enabled')->firstOrFail()->update(['value' => true]);
-$resetSweep();
-$beforeReconcileJobs = $reconciliationJobs();
-$operations->sweep();
-check($reconciliationJobs() === $beforeReconcileJobs && $beforeProviderCalls === $providerCalls,
-    'Explicit disabled reads were overridden by operations-enabled during sweep.');
-$readsSetting->delete();
+$beforeProviderCalls = $providerCalls;
 try { Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard::assertProvider($server->id); check(false, 'Unconfigured runtime accepted.'); } catch (RuntimeException) { check(true, 'Runtime guard rejected isolated test app.'); }
 $operationCountBeforeLifecycle = Paymenter\Extensions\Servers\Enom\Models\Operation::count();
 $extension->installed(); $extension->uninstalled();
