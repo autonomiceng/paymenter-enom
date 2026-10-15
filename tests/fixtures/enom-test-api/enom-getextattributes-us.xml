@@ -1,68 +1,151 @@
 <?xml version="1.0" encoding="utf-8"?>
 <interface-response>
-  <Attributes>
-    <Attribute>
-      <ID>1</ID>
-      <Name>us_nexus</Name>
-      <Application>2</Application>
-      <UserDefined>False</UserDefined>
-      <Required>1</Required>
-      <Description>Nexus Category</Description>
-      <IsChild>0</IsChild>
-      <Options>
-        <Option>
-          <ID>12</ID>
-          <Value>C11</Value>
-          <Title>US Citizen</Title>
-          <Description>A natural person who is a US Citizen.</Description>
-        </Option>
-        <Option>
-          <ID>13</ID>
-          <Value>C12</Value>
-          <Title>Permanent Resident</Title>
-          <Description>A natural person who is a Permanent Resident.</Description>
-        </Option>
-      </Options>
-    </Attribute>
-    <Attribute>
-      <ID>2</ID>
-      <Name>us_purpose</Name>
-      <Application>2</Application>
-      <UserDefined>False</UserDefined>
-      <Required>1</Required>
-      <Description>Application Purpose</Description>
-      <IsChild>0</IsChild>
-      <Options>
-        <Option>
-          <ID>17</ID>
-          <Value>P1</Value>
-          <Title>For Profit</Title>
-          <Description>Business use for profit</Description>
-        </Option>
-        <Option>
-          <ID>18</ID>
-          <Value>P2</Value>
-          <Title>Non-profit</Title>
-          <Description>Non-profit business, club, association, religious organization, etc.</Description>
-        </Option>
-      </Options>
-    </Attribute>
-  </Attributes>
-  <Command>GETEXTATTRIBUTES</Command>
-  <APIType>API.NET</APIType>
-  <Language>eng</Language>
-  <ErrCount>0</ErrCount>
-  <ResponseCount>0</ResponseCount>
-  <MinPeriod>1</MinPeriod>
-  <MaxPeriod>10</MaxPeriod>
-  <Server />
-  <Site>eNom</Site>
-  <IsLockable />
-  <IsRealTimeTLD />
-  <TimeDifference>+0.00</TimeDifference>
-  <ExecTime />
-  <Done>true</Done>
-  <TrackingKey />
-  <RequestDateTime />
-  <debug />
+<Attributes>
+  <Attribute>
+    <ID>1</ID>
+    <Name>us_nexus</Name>
+    <Application>2</Application>
+    <UserDefined>False</UserDefined>
+    <Required>1</Required>
+    <Description>Nexus Category</Description>
+    <IsChild>0</IsChild>
+    <Options>
+      <Option>
+        <ID>12</ID>
+        <Value>C11</Value>
+        <Title>US Citizen</Title>
+        <Description>A natural person who is a US Citizen.</Description>
+      </Option>
+      <Option>
+        <ID>13</ID>
+        <Value>C12</Value>
+        <Title>Permanent Resident</Title>
+        <Description>A natural person who is a Permanent Resident.</Description>
+      </Option>
+      <Option>
+        <ID>14</ID>
+        <Value>C21</Value>
+        <Title>Business Entity</Title>
+        <Description>An entity or organization that is (i) incorporated within one of the fifty US states, the District of Columbia, or any of the US possessions or territories, or (ii) organized or otherwise constituted under the laws of a state of the US, the District of Columbia or any of its possessions and territories (including federal, state, or local government of the US, or a political subdivision thereof, and non-commercial organizations based in the US.).</Description>
+      </Option>
+      <Option>
+        <ID>15</ID>
+        <Value>C31</Value>
+        <Title>Foreign Entity</Title>
+        <Description></Description>
+        <Requires>
+          <Attribute>
+            <ID>4</ID>
+            <Name>global_cc_us</Name>
+          </Attribute>
+        </Requires>
+      </Option>
+      <Option>
+        <ID>16</ID>
+        <Value>C32</Value>
+        <Title>US Based Office</Title>
+        <Description></Description>
+        <Requires>
+          <Attribute>
+            <ID>4</ID>
+            <Name>global_cc_us</Name>
+          </Attribute>
+        </Requires>
+      </Option>
+    </Options>
+  </Attribute>
+  <Attribute>
+    <ID>4</ID>
+    <Name>global_cc_us</Name>
+    <Application>2</Application>
+    <UserDefined>False</UserDefined>
+    <Required>2</Required>
+    <Description>Country</Description>
+    <IsChild>1</IsChild>
+    <Options>
+      <Option>
+        <ID>264</ID>
+        <Value>AD</Value>
+        <Title>Andorra</Title>
+        <Description></Description>
+      </Option>
+      <Option>
+        <ID>299</ID>
+        <Value>CA</Value>
+        <Title>Canada</Title>
+        <Description></Description>
+      </Option>
+      <Option>
+        <ID>338</ID>
+        <Value>GB</Value>
+        <Title>United Kingdom</Title>
+        <Description></Description>
+      </Option>
+      <Option>
+        <ID>504</ID>
+        <Value>ZW</Value>
+        <Title>Zimbabwe</Title>
+        <Description></Description>
+      </Option>
+    </Options>
+  </Attribute>
+  <Attribute>
+    <ID>2</ID>
+    <Name>us_purpose</Name>
+    <Application>2</Application>
+    <UserDefined>False</UserDefined>
+    <Required>1</Required>
+    <Description>Application Purpose</Description>
+    <IsChild>0</IsChild>
+    <Options>
+      <Option>
+        <ID>17</ID>
+        <Value>P1</Value>
+        <Title>For Profit</Title>
+        <Description>Business use for profit</Description>
+      </Option>
+      <Option>
+        <ID>18</ID>
+        <Value>P2</Value>
+        <Title>Non-profit</Title>
+        <Description>Non-profit business, club, association, religious organization, etc.</Description>
+      </Option>
+      <Option>
+        <ID>19</ID>
+        <Value>P3</Value>
+        <Title>Personal</Title>
+        <Description>Personal use</Description>
+      </Option>
+      <Option>
+        <ID>21</ID>
+        <Value>P4</Value>
+        <Title>Educational</Title>
+        <Description>Educational purposes</Description>
+      </Option>
+      <Option>
+        <ID>20</ID>
+        <Value>P5</Value>
+        <Title>Government</Title>
+        <Description>Government purposes</Description>
+      </Option>
+    </Options>
+  </Attribute>
+</Attributes>
+<Command>GETEXTATTRIBUTES</Command>
+<APIType>API.NET</APIType>
+<Language>eng</Language>
+<ErrCount>0</ErrCount>
+<ResponseCount>0</ResponseCount>
+<MinPeriod>1</MinPeriod>
+<MaxPeriod>10</MaxPeriod>
+<Server/>
+<Site>eNom</Site>
+<IsLockable/>
+<IsRealTimeTLD/>
+<TimeDifference>+0.00</TimeDifference>
+<ExecTime />
+<Done>true</Done>
+<TrackingKey />
+<RequestDateTime />
+<debug/>
 </interface-response>

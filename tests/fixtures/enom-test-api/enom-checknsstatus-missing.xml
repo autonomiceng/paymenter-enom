@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<interface-response>
+<RRPCode>545</RRPCode>
+<RRPText>Object does not exist; Host not found</RRPText>
+<Command>CHECKNSSTATUS</Command>
+<APIType>API</APIType>
+<Language>eng</Language>
+<ErrCount>1</ErrCount>
+<errors>
+<Err1>Error 545 - Name server does not exist</Err1>
+</errors>
+<ResponseCount>1</ResponseCount>
+<responses>
+<response>
+<ResponseNumber />
+<ResponseString>Validation error; invalid ; nameserver name</ResponseString>
+</response>
+</responses>
+<MinPeriod>1</MinPeriod>
+<MaxPeriod>10</MaxPeriod>
+<Server></Server>
+<Site></Site>
+<IsLockable>True</IsLockable>
+<IsRealTimeTLD>True</IsRealTimeTLD>
+<TimeDifference />
+<ExecTime />
+<Done>true</Done>
+<TrackingKey />
+<RequestDateTime />
+<debug><![CDATA[]]></debug>
+</interface-response>

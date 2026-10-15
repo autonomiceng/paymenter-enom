@@ -119,7 +119,8 @@ $xpath = enomDocument($search->getContent());
 $options = array_map(fn ($node) => $node->getAttribute('value'), iterator_to_array($xpath->query('//select[@name="tld"]/option')));
 verify($options === ['com', 'net'], 'Search offers endings that are not enabled: '.json_encode($options));
 $endingsText = preg_replace('/\s+/', ' ', trim($xpath->query('//p[contains(@class, "enom-endings")]')->item(0)?->textContent ?? ''));
-verify($endingsText === '.com $12.00/yr .net $15.00/yr', 'Search does not list exactly the enabled endings with retail prices: '.$endingsText);
+verify($endingsText === '.com $12.00/yr .net $15.00/yr All prices', 'Search does not list exactly the enabled endings with retail prices: '.$endingsText);
+verify($xpath->query('//p[contains(@class, "enom-endings")]/a[@href="'.route('enom.domains.pricing').'"]')->length === 1, 'Search does not link the public price list.');
 noCosts($search->getContent(), 'Search page shows Enom costs');
 $results = fn (string $html) => array_map(fn ($node) => $node->getAttribute('data-domain'), iterator_to_array(enomDocument($html)->query('//*[@data-enom-result]')));
 $org = enomHttp($owner, 'GET', '/domains/register?name=hello.org')->getContent();
@@ -142,8 +143,11 @@ verify($check($owner, 'hello.com', ['csrf' => true, 'token' => false])->getStatu
 $ok = $check($owner, 'hello.com', ['csrf' => true]);
 verify($ok->getStatusCode() === 200, 'Check refused a request with the session CSRF token.');
 $data = json_decode($ok->getContent(), true);
-verify(array_keys($data) === ['domain', 'status', 'complimentary', 'price', 'transfer_price', 'renew_price'] && $data['status'] === 'available'
+verify(array_keys($data) === ['domain', 'status', 'complimentary', 'price', 'transfer_price', 'renew_price', 'min_years', 'max_years', 'terms'] && $data['status'] === 'available'
     && $data['price'] === '$12.00' && $data['transfer_price'] === '$13.00' && $data['renew_price'] === '$14.00', 'Available answer has unexpected fields or prices: '.$ok->getContent());
+// 0.4 terms: 1-10 years, first year at the registration price and later years at the renewal price.
+verify($data['min_years'] === 1 && $data['max_years'] === 10 && array_keys($data['terms']) === range(1, 10) && $data['terms']['1'] === '$12.00'
+    && $data['terms']['2'] === '$26.00' && $data['terms']['10'] === '$138.00', 'Check answer terms differ: '.json_encode($data['terms']));
 foreach ([null, ['hello.com'], '', 'bad_name.com', 'hello', str_repeat('a', 64).'.com', str_repeat('a', 60).'.'.str_repeat('b', 60).'.'.str_repeat('c', 60).'.'.str_repeat('d', 60).'.com', 'hello.com/x', '<script>.com'] as $bad) {
     $response = $check($probe, $bad);
     verify($response->getStatusCode() === 422 && json_decode($response->getContent(), true) === ['status' => 'invalid', 'message' => 'Enter a valid domain name.'], 'Malformed check input was accepted: '.json_encode($bad));
@@ -153,16 +157,21 @@ $unsupported = json_decode($check($probe, 'hello.org')->getContent(), true);
 verify($unsupported['status'] === 'invalid' && count($providerCommands) === $commandsBefore, 'Unsupported ending was checked with Enom: '.json_encode($unsupported));
 verify(json_decode($check($probe, '  HELLO.COM ')->getContent(), true)['domain'] === 'hello.com', 'Check does not normalize case and spaces.');
 $availability += ['taken-name.com' => 'taken', 'moveme.com' => 'transferable', 'fancy.com' => 'premium', 'flaky.com' => 'error', 'longterm.com' => 'twoyear'];
-// Only one-year terms are sold, so a name that needs a longer first term is offered like a premium name: not at all.
-$expected = ['taken-name.com' => 'taken', 'moveme.com' => 'transferable', 'fancy.com' => 'premium', 'flaky.com' => 'error', 'longterm.com' => 'premium', 'bravo.net' => 'yours', 'other-secret.com' => 'managed'];
+// 0.4: a name with a two-year registry minimum is available from two years. Another client's portal name is just taken.
+$expected = ['taken-name.com' => 'taken', 'moveme.com' => 'transferable', 'fancy.com' => 'premium', 'flaky.com' => 'error', 'longterm.com' => 'available', 'bravo.net' => 'yours', 'other-secret.com' => 'taken'];
 foreach ($expected as $name => $status) {
     $response = $check($owner, $name);
     $body = $response->getContent();
     verify($response->getStatusCode() === 200 && json_decode($body, true)['status'] === $status, $name.' was not reported as '.$status.': '.$body);
     noCosts($body, 'Check answer for '.$name.' shows Enom costs');
-    verify(!str_contains($body, '7f3a') && !str_contains($body, (string) $theirs->id.'"') && !str_contains($body, '/domains/'.$theirs->id), 'Check answer for '.$name.' leaks provider text or another client\'s domain id.');
+    // Term keys ("2": "$26.00") are numbers too, so look for the id as a value rather than any digit-quote pair.
+    $decoded = json_decode($body, true);
+    verify(!str_contains($body, '7f3a') && !array_key_exists('id', $decoded) && !in_array($theirs->id, array_values(array_diff_key($decoded, ['terms' => 1, 'min_years' => 1, 'max_years' => 1])), true)
+        && !str_contains($body, '/domains/'.$theirs->id), 'Check answer for '.$name.' leaks provider text or another client\'s domain id.');
 }
 verify(json_decode($check($owner, 'bravo.net')->getContent(), true)['url'] === 'http://enom-tests.invalid/domains/'.$mine->id, 'Own domain answer lacks its page link.');
+$longTerm = json_decode($check($owner, 'longterm.com')->getContent(), true);
+verify($longTerm['min_years'] === 2 && $longTerm['max_years'] === 10 && array_keys($longTerm['terms']) === range(2, 10) && $longTerm['terms']['2'] === '$26.00', 'Two-year-minimum name terms differ: '.json_encode($longTerm));
 $flaky = $check($owner, 'flaky.com')->getContent(); verify((json_decode($flaky, true)['message'] ?? null) === 'Couldn’t check this name.', 'Provider failure message is not generic: '.$flaky);
 $throttled = client('throttled@example.com');
 $codes = [];
@@ -415,6 +424,10 @@ $renewInvoice = Invoice::where('user_id', $owner->id)->latest('id')->first();
 verify(enomRedirectPath($response) === '/invoices/'.$renewInvoice->id && (string) $renewInvoice->items()->sole()->price === '14.00' && $latest('renew')?->state === 'awaiting_payment', 'Renew now did not create the renewal invoice.');
 $rows = clientRows();
 verify(enomHttp($owner, 'POST', '/domains/'.$managed->id.'/renew', $renewFields)->getStatusCode() === 419 && clientRows() == $rows, 'A used renewal key created another invoice.');
+// 0.4: with a renewal invoice open for this expiry, the page offers that invoice instead of a term picker.
+$openPage = $show();
+verify(str_contains(pageText($openPage), 'Your renewal invoice for 1 year is ready') && str_contains($openPage, 'href="'.route('invoices.show', $renewInvoice).'"')
+    && !str_contains($openPage, 'action="'.route('enom.domains.renew', $managed->id).'"'), 'Open renewal invoice not offered in place of the term picker.');
 $privacyFields = enomFormFields($show(), '/domains/'.$managed->id.'/privacy/purchase');
 $response = enomHttp($owner, 'POST', '/domains/'.$managed->id.'/privacy/purchase', $privacyFields);
 $privacyInvoice = Invoice::where('user_id', $owner->id)->latest('id')->first();

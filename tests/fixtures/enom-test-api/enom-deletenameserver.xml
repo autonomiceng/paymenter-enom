@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<interface-response>
+<RegisterNameserver>
+<RegistrarLock>ACTIVE</RegistrarLock>
+<NsSuccess>1</NsSuccess>
+<RegistrarLock>clientTransferProhibited</RegistrarLock>
+</RegisterNameserver>
+<Command>DELETENAMESERVER</Command>
+<APIType>API</APIType>
+<Language>eng</Language>
+<ErrCount>0</ErrCount>
+<ResponseCount>0</ResponseCount>
+<MinPeriod>1</MinPeriod>
+<MaxPeriod>10</MaxPeriod>
+<Server></Server>
+<Site>eNom</Site>
+<IsLockable>True</IsLockable>
+<IsRealTimeTLD>True</IsRealTimeTLD>
+<TimeDifference />
+<ExecTime />
+<Done>true</Done>
+<TrackingKey />
+<RequestDateTime />
+<debug><![CDATA[]]></debug>
+</interface-response>

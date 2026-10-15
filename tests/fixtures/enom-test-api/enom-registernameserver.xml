@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<interface-response>
+<RegisterNameserver>
+<NS>ns3.glue-fixture.com</NS>
+<IP>192.0.2.10</IP>
+<RegistrarLock>ACTIVE</RegistrarLock>
+<NsSuccess>1</NsSuccess>
+<RegistrarLock>clientTransferProhibited</RegistrarLock>
+</RegisterNameserver>
+<RRPCode>200</RRPCode>
+<RRPText>Command completed successfully</RRPText>
+<Command>REGISTERNAMESERVER</Command>
+<APIType>API</APIType>
+<Language>eng</Language>
+<ErrCount>0</ErrCount>
+<ResponseCount>0</ResponseCount>
+<MinPeriod>1</MinPeriod>
+<MaxPeriod>10</MaxPeriod>
+<Server></Server>
+<Site>eNom</Site>
+<IsLockable>True</IsLockable>
+<IsRealTimeTLD>True</IsRealTimeTLD>
+<TimeDifference />
+<ExecTime />
+<Done>true</Done>
+<TrackingKey />
+<RequestDateTime />
+<debug><![CDATA[]]></debug>
+</interface-response>

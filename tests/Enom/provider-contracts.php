@@ -1,4 +1,5 @@
 <?php
+require_once dirname(__DIR__).'/public-addresses.php';
 require_once dirname(__DIR__).'/paymenter-test-app.php';
 
 // Offline only. No framework, credentials, provider requests or database required.
@@ -178,9 +179,50 @@ check(end($requests)[1]['Target1'] === 'sip.example.com.' && end($requests)[1]['
 $ds = ['algorithm' => 13, 'digest_type' => 2, 'key_tag' => 1234, 'digest' => str_repeat('AB', 32)];
 $api->addDnssec('demo.com', $ds); $added = end($requests)[1];
 $api->deleteDnssec('demo.com', $ds); check(end($requests)[1] === $added, 'delete DS exact matching tuple');
-foreach ([fn () => $api->register('demo.com', $contact, [], 2), fn () => $api->register('xn--bcher-kva.com', $contact), fn () => $api->updateContact('demo.com', 'billing', $contact), fn () => $api->updateContact('demo.com', 'registrant', ['first_name' => 'Only']), fn () => $api->setNameservers('demo.com', ['ns1.example.com']), fn () => $api->setHosts('demo.com', []), fn () => $api->setHosts('demo.com', [['name' => '@', 'type' => 'A', 'address' => 'bad']]), fn () => $api->setHosts('demo.com', [['name' => '@', 'type' => 'MX', 'address' => 'mail.example.com']]), fn () => $api->addDnssec('demo.com', ['algorithm' => 13, 'digest_type' => 2, 'key_tag' => 1234, 'digest' => 'BAD']), fn () => $api->orders('10/12/2026', '10/12/2027')] as $invalid) {
+foreach ([fn () => $api->register('demo.com', $contact, [], 0), fn () => $api->register('demo.com', $contact, [], 11), fn () => $api->renew('demo.com', 11), fn () => $api->existingRenew('demo.com', 0), fn () => $api->register('xn--bcher-kva.com', $contact), fn () => $api->updateContact('demo.com', 'billing', $contact), fn () => $api->updateContact('demo.com', 'registrant', ['first_name' => 'Only']), fn () => $api->setNameservers('demo.com', ['ns1.example.com']), fn () => $api->setHosts('demo.com', []), fn () => $api->setHosts('demo.com', [['name' => '@', 'type' => 'A', 'address' => 'bad']]), fn () => $api->setHosts('demo.com', [['name' => '@', 'type' => 'MX', 'address' => 'mail.example.com']]), fn () => $api->addDnssec('demo.com', ['algorithm' => 13, 'digest_type' => 2, 'key_tag' => 1234, 'digest' => 'BAD']), fn () => $api->orders('10/12/2026', '10/12/2027')] as $invalid) {
     $before = count($requests); rejects($invalid, 'invalid facade request'); check(count($requests) === $before, 'invalid request makes no transport call');
 }
+
+// 0.4 terms: registration and renewal accept 1-10 years and send exactly that NumYears.
+foreach ([1, 3, 10] as $years) {
+    $api->register('demo.com', ['registrant' => $contact], [], $years); check(end($requests)[0] === 'Purchase' && end($requests)[1]['NumYears'] === $years, 'Purchase NumYears '.$years);
+    $api->renew('demo.com', $years); check(end($requests)[0] === 'Extend' && end($requests)[1]['NumYears'] === $years, 'Extend NumYears '.$years);
+    $api->existingRenew('demo.com', $years); check(end($requests)[1]['NumYears'] === $years, 'existing Extend NumYears '.$years);
+}
+// Registry details travel as name=value parameters on Purchase and TP_CreateOrder, after the ordinary parameters.
+$api->register('demo.com', ['registrant' => $contact], [], 2, ['us_nexus' => 'C31', 'global_cc_us' => 'GB', 'us_purpose' => 'P1']);
+$purchase = end($requests)[1];
+check($purchase['us_nexus'] === 'C31' && $purchase['global_cc_us'] === 'GB' && $purchase['us_purpose'] === 'P1' && $purchase['NumYears'] === 2
+    && array_slice(array_keys($purchase), -3) === ['us_nexus', 'global_cc_us', 'us_purpose'], 'Purchase registry fields not sent as name=value');
+$api->transfer('demo.com', ['registrant' => $contact], 'PRIVATE-EPP', ['us_nexus' => 'C11', 'us_purpose' => 'P3']);
+check(end($requests)[0] === 'TP_CreateOrder' && end($requests)[1]['us_nexus'] === 'C11' && end($requests)[1]['us_purpose'] === 'P3' && end($requests)[1]['AuthInfo1'] === 'PRIVATE-EPP', 'TP_CreateOrder registry fields not sent');
+$api->register('demo.com', ['registrant' => $contact]);
+check(!array_filter(array_keys(end($requests)[1]), fn ($key) => str_starts_with($key, 'us_')), 'Registry fields leaked into a request without them');
+foreach ([['Bad Name' => 'x'], ['us_nexus' => ''], ['us_nexus' => str_repeat('a', 256)], ['us_nexus' => "C11\n"], ['us_nexus' => ['C11']], [0 => 'C11'], ['us_nexus' => 11]] as $registry) {
+    $before = count($requests);
+    rejects(fn () => $api->register('demo.com', ['registrant' => $contact], [], 1, $registry), 'invalid registry field rejected');
+    rejects(fn () => $api->transfer('demo.com', ['registrant' => $contact], 'PRIVATE-EPP', $registry), 'invalid transfer registry field rejected');
+    check(count($requests) === $before, 'invalid registry field makes no transport call');
+}
+// Glue commands: canonical host, validated IP, documented parameter names.
+$api->registerHost('NS1.Demo.com.', enomPublicIpv4(1));
+check(end($requests) === ['RegisterNameServer', ['Add' => 'true', 'NSName' => 'ns1.demo.com', 'IP' => enomPublicIpv4(1)]], 'RegisterNameServer parameters');
+$api->updateHost('ns1.demo.com', enomPublicIpv4(1), enomPublicIpv6(1));
+check(end($requests) === ['UpdateNameServer', ['NS' => 'ns1.demo.com', 'OldIP' => enomPublicIpv4(1), 'NewIP' => enomPublicIpv6(1)]], 'UpdateNameServer parameters');
+$api->deleteHost('ns1.demo.com');
+check(end($requests) === ['DeleteNameServer', ['NS' => 'ns1.demo.com']], 'DeleteNameServer parameters');
+$api->hostStatus('ns1.demo.com');
+check(end($requests) === ['CheckNSStatus', ['CheckNSName' => 'ns1.demo.com']], 'CheckNSStatus parameters');
+foreach ([fn () => $api->registerHost('demo.com', enomPublicIpv4(1)), fn () => $api->registerHost('ns1.demo.com', 'not-an-ip'), fn () => $api->registerHost('ns1..demo.com', enomPublicIpv4(1)),
+    fn () => $api->registerHost('-ns.demo.com', enomPublicIpv4(1)), fn () => $api->updateHost('ns1.demo.com', '', enomPublicIpv4(1)), fn () => $api->deleteHost(str_repeat('a', 63).'.'.str_repeat('b', 63).'.'.str_repeat('c', 63).'.'.str_repeat('d', 63).'.com')] as $invalid) {
+    $before = count($requests); rejects($invalid, 'invalid glue request'); check(count($requests) === $before, 'invalid glue request makes no transport call');
+}
+// Read-only clients never send glue writes.
+$readOnlyGlue = []; $readOnlyApi = new EnomApi(new RegistrarClient('uid', 'token', function ($command) use (&$readOnlyGlue) { $readOnlyGlue[] = $command; return xml($command); }, null, true));
+check($readOnlyApi->registerHost('ns1.demo.com', enomPublicIpv4(1))->code === 'read_only' && $readOnlyApi->deleteHost('ns1.demo.com')->code === 'read_only' && $readOnlyGlue === [], 'read-only client sent a glue write');
+check($readOnlyApi->hostStatus('ns1.demo.com')->status === 'success' && $readOnlyGlue === ['CheckNSStatus'], 'CheckNSStatus is not a read');
+// Order normalizer reports multi-year terms from Quantity.
+check(EnomApi::normalize('order', response('GetOrderDetail', xml('GetOrderDetail', str_replace('<Quantity>1</Quantity>', '<Quantity>3</Quantity>', $orderXml))))['term'] === 3, 'order term from quantity');
 
 $dns = response('GetDNS', xml('GetDNS', '<dns>ns1.example.com</dns><dns>ns2.example.com</dns><UseDNS>default</UseDNS>'));
 check(EnomApi::normalize('nameservers', $dns)['nameservers'] === ['ns1.example.com', 'ns2.example.com'], 'repeated DNS tags retained');

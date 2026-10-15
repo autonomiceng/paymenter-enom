@@ -12,7 +12,9 @@ final class FormKeys
         $keys = $request->session()->get('enom.form_keys', []);
         $keys = array_filter($keys, fn ($entry) => is_array($entry) && ($entry['expires'] ?? 0) > time());
         if (!isset($keys[$context])) {
-            if (count($keys) >= 100) {
+            // A domain page issues about 20 keys; keep room for many open pages before evicting the oldest.
+            if (count($keys) >= 400) {
+                uasort($keys, fn ($a, $b) => $a['expires'] <=> $b['expires']);
                 array_shift($keys);
             }
             $keys[$context] = ['key' => bin2hex(random_bytes(32)), 'expires' => time() + 3600];

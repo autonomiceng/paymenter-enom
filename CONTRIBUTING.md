@@ -12,6 +12,15 @@ npm ci --ignore-scripts
 
 Prepare a separate Paymenter 1.5.9 release with its locked Composer dependencies. Run `composer install --no-scripts --no-plugins` there. The guard requires the literal version `1.5.9` in `config/app.php`. The upstream Git tag uses `development`; when using that source, change only the version marker in a disposable test copy. Keep the copy free of `.env` and cached configuration. Set `PAYMENTER_TEST_APP` to its canonical absolute path and `PAYMENTER_TEST_PHP` to the PHP executable.
 
+When using the upstream source checkout, build its theme assets in that disposable copy:
+
+```bash
+npm ci --ignore-scripts
+npm run build
+```
+
+Use a Node version supported by the upstream lock file; Node 22.22.3 was used for this setup. Confirm `public/default/manifest.json` exists before running the full suite. A packaged release may already include these assets.
+
 ## Test
 
 ```bash

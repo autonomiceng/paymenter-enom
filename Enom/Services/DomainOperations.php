@@ -396,7 +396,8 @@ class DomainOperations
             }
             if ($result->status !== 'success') {
                 // Staff-only: Enom's own wording, bounded and stripped of control characters, for support.
-                $text = $result->value('rrptext') ?: $result->value('errors.err1') ?: $result->value('responses.response.responsestring');
+                // Enom's own error text first; RRPText can say "Command completed successfully" beside a refusal.
+                $text = $result->value('errors.err1') ?: $result->value('responses.response.responsestring') ?: $result->value('rrptext');
                 if (is_string($text) && trim($text) !== '') {
                     $claimed->update(['cost' => array_replace($claimed->fresh()->cost ?? [], ['provider_message' => mb_substr(preg_replace('/[\x00-\x1f\x7f]+/', ' ', trim($text)), 0, 300)])]);
                 }
@@ -423,8 +424,11 @@ class DomainOperations
                         && ($normalized['term'] ?? null) === (int) $claimed->term && $orderExpiry
                         && $orderExpiry->format('Y-m-d') === $readExpiry->format('Y-m-d');
                 }
+                // A new registration must run for the term that was paid for (registry dates can differ by a day).
+                $termMatches = $claimed->action !== 'register' || ($readExpiry
+                    && abs(\Carbon\CarbonImmutable::instance($readExpiry)->startOfDay()->diffInDays(now()->startOfDay()->addYearsNoOverflow(max(1, (int) $claimed->term)), false)) <= 2);
                 if (!$claimed->provider_order_id || !$responseExpiry || $read->status !== 'success' || !$readExpiry
-                    || !$expiryMatches
+                    || !$expiryMatches || !$termMatches
                     || ($claimed->expected_expires_at && $readExpiry->format('Y-m-d') !== $claimed->expected_expires_at->format('Y-m-d'))) {
                     return $this->finish($claimed, 'uncertain', 'expiry_unconfirmed');
                 }

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<interface-response>
+<RegisterNameserver>
+<NS>ns2.glue-fixture.com</NS>
+<IP>2001:db8::10</IP>
+</RegisterNameserver>
+<RRPCode>200</RRPCode>
+<RRPText>Command completed successfully</RRPText>
+<Command>REGISTERNAMESERVER</Command>
+<APIType>API</APIType>
+<Language>eng</Language>
+<ErrCount>1</ErrCount>
+<errors>
+<Err1>Nameserver registration failed due to error: Parameter value policy error; Parameter value policy error</Err1>
+</errors>
+<ResponseCount>1</ResponseCount>
+<responses>
+<response>
+<ResponseNumber />
+<ResponseString>Registry error; failed to update; nameserver(s)</ResponseString>
+</response>
+</responses>
+<MinPeriod>1</MinPeriod>
+<MaxPeriod>10</MaxPeriod>
+<Server></Server>
+<Site></Site>
+<IsLockable>True</IsLockable>
+<IsRealTimeTLD>True</IsRealTimeTLD>
+<TimeDifference />
+<ExecTime />
+<Done>true</Done>
+<TrackingKey />
+<RequestDateTime />
+<debug><![CDATA[]]></debug>
+</interface-response>

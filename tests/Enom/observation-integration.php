@@ -361,7 +361,7 @@ $clockInventory = new RegistrarResult('success', null, ['domaincount' => '1', 'd
 $clockQuote = RegistrarMoney::renewalQuote($ordinaryExtend, $clockBinding, $ordinaryCheck, $clockInventory);
 verify($clockQuote['complete'] && $clockQuote['command'] === 'UpdateExpiredDomains' && str_starts_with($clockQuote['observed_at'], '2028-01-01'), 'Quote used real wall clock instead of captured business time.');
 verify(RegistrarMoney::renewalQuote($ordinaryExtend, $binding + ['observed_at' => 'invalid'], $ordinaryCheck)['complete'] === false, 'Malformed quote business time was accepted.');
-foreach (['missing_inventory', 'rgp', 'extended_rgp', 'wrong_id', 'wrong_domain', 'wrong_expiry', 'duplicate', 'truncated', 'foreign_currency', 'malformed_currency', 'premium', 'price_mismatch', 'wrong_term'] as $fault) {
+foreach (['missing_inventory', 'rgp', 'extended_rgp', 'wrong_id', 'wrong_domain', 'wrong_expiry', 'duplicate', 'truncated', 'foreign_currency', 'malformed_currency', 'premium', 'price_mismatch', 'wrong_term', 'string_term', 'zero_term', 'above_max_extension'] as $fault) {
     $candidateCheck = $ordinaryCheck->data; $candidateInventory = $expiredInventory->data; $candidateBinding = $expiredBinding;
     if ($fault === 'rgp') { $candidateInventory['domaindetail']['status'] = 'RGP'; }
     if ($fault === 'extended_rgp') { $candidateInventory['domaindetail']['status'] = 'Extended RGP'; }
@@ -374,7 +374,11 @@ foreach (['missing_inventory', 'rgp', 'extended_rgp', 'wrong_id', 'wrong_domain'
     if ($fault === 'malformed_currency') { $candidateCheck['domains']['domain']['prices']['currency'] = ' '; }
     if ($fault === 'premium') { $candidateCheck['domains']['domain']['ispremium'] = 'true'; }
     if ($fault === 'price_mismatch') { $candidateCheck['domains']['domain']['prices']['renewal'] = '11.00'; }
-    if ($fault === 'wrong_term') { $candidateBinding['term'] = 2; }
+    // 0.4: terms 1-10 are quotable (the admission refuses multi-year grace); outside that, or above Enom's MaxExtension, is not.
+    if ($fault === 'wrong_term') { $candidateBinding['term'] = 11; }
+    if ($fault === 'string_term') { $candidateBinding['term'] = '2'; }
+    if ($fault === 'zero_term') { $candidateBinding['term'] = 0; }
+    if ($fault === 'above_max_extension') { $candidateBinding['term'] = 10; }
     $candidate = RegistrarMoney::renewalQuote($expiredExtend, $candidateBinding, new RegistrarResult('success', null, $candidateCheck), $fault === 'missing_inventory' ? null : new RegistrarResult('success', null, $candidateInventory));
     verify($candidate['complete'] === false && $candidate['grace_eligible'] === null, 'Unsupported expired/cost evidence admitted automatic grace: '.$fault);
 }

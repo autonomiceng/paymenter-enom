@@ -19,9 +19,13 @@ $pricingBody = file_get_contents($fixtures.'enom-pe-getdomainpricing.xml');
 $failCommand = null;
 $commands = [];
 $wrongDetails = false;
-$transport = function (string $command, array $params) use (&$pricingBody, &$failCommand, &$commands, &$wrongDetails, $fixtures): string {
+$attributesOverride = null;
+$detailsOverride = null;
+$transport = function (string $command, array $params) use (&$pricingBody, &$failCommand, &$commands, &$wrongDetails, &$attributesOverride, &$detailsOverride, $fixtures): string {
     $commands[] = $command.(isset($params['TLD']) ? ':'.$params['TLD'] : '');
     if ($failCommand === $command) { return enomXml($command, '').'<broken'; }
+    if ($command === 'GetExtAttributes' && $attributesOverride !== null) { return $attributesOverride; }
+    if ($command === 'GetTLDDetails' && $detailsOverride !== null) { return $detailsOverride; }
     return match ($command) {
         'GetTLDList' => file_get_contents($fixtures.'enom-gettldlist.xml'),
         'PE_GetDomainPricing' => $pricingBody,
@@ -92,22 +96,56 @@ verify(tableRows(['enom_tlds']) == $before, 'Refused sync changed the catalogue.
 $io = $io->fresh();
 refuses(fn () => $catalogue->enable($io), 'Set registration, renewal and transfer prices', '.io without a transfer price was enabled.', [InvalidArgumentException::class]);
 $us = Tld::where('server_id', $server->id)->where('tld', 'us')->sole();
+// 0.4: an ending whose registry fields the order form can collect (.us nexus, purpose, country) is refused only for an unreadable schema.
+$attributesBody = null;
 $commands = [];
-refuses(fn () => $catalogue->enable($us), 'extra registrant details', '.us with a required nexus attribute was enabled.', [InvalidArgumentException::class]);
-verify($commands === ['GetTLDDetails:us', 'GetExtAttributes:us'], 'Enable did not check term then registry attributes.');
+$us->fill(['pricing_mode' => 'fixed', 'register_price' => '9.00', 'renew_price' => '10.00', 'transfer_price' => '9.50'])->save();
+$failCommand = 'GetExtAttributes';
+refuses(fn () => $catalogue->enable($us->fresh()), 'Could not check .us registry requirements', 'Unknown attribute read enabled .us.', [RuntimeException::class]);
+$failCommand = null;
+verify($commands === ['GetTLDDetails:us', 'GetExtAttributes:us'], 'Enable did not check terms then registry attributes.');
 $ai = $ai->fresh(); $ai->fill(['pricing_mode' => 'fixed', 'register_price' => '90.00', 'renew_price' => '90.00', 'transfer_price' => '90.00'])->save();
-refuses(fn () => $catalogue->enable($ai->fresh()), 'at least 2 years', '.ai with a two-year minimum was enabled.', [InvalidArgumentException::class]);
 $failCommand = 'GetExtAttributes';
 refuses(fn () => $catalogue->enable($org->fresh()), 'Could not check .org registry requirements', 'Unknown attribute read enabled an ending.', [RuntimeException::class]);
 $failCommand = 'GetTLDDetails';
-refuses(fn () => $catalogue->enable($org->fresh()), 'Could not confirm that .org can be registered for one year', 'Failed term read enabled an ending.', [RuntimeException::class]);
+refuses(fn () => $catalogue->enable($org->fresh()), 'Could not read .org registration terms', 'Failed term read enabled an ending.', [RuntimeException::class]);
 $failCommand = null;
 $wrongDetails = true;
-refuses(fn () => $catalogue->enable($org->fresh()), 'Could not confirm that .org can be registered for one year', 'Term details for another ending enabled .org.', [RuntimeException::class]);
+refuses(fn () => $catalogue->enable($org->fresh()), 'Could not read .org registration terms', 'Term details for another ending enabled .org.', [RuntimeException::class]);
 $wrongDetails = false;
 verify(Tld::where('enabled', true)->count() === 0 && Product::count() === 0, 'A refused enable changed state or created a product.');
 $catalogue->enable($com);
 verify($com->fresh()->enabled && Product::where('server_id', $server->id)->count() === 1, 'Valid .com was not enabled with its product.');
+verify($com->fresh()->min_years === 1 && $com->fresh()->max_years === 10 && $com->fresh()->registry_fields === [] && $catalogue->attributesFor($com->fresh()) === [], '.com terms or empty registry schema not stored.');
+// .ai needs at least two years: it is enabled with a 2-10 term range (previously refused).
+$catalogue->enable($ai->fresh());
+verify($ai->fresh()->enabled && $ai->fresh()->min_years === 2 && $ai->fresh()->max_years === 10 && $ai->fresh()->terms() === range(2, 10), '.ai was not enabled with its 2-10 year range.');
+verify($ai->fresh()->registrationTotal(1) === null && $ai->fresh()->registrationTotal(2) === '180.00' && $ai->fresh()->registrationTotal(10) === '900.00', '.ai totals ignore its minimum.');
+// .us is enabled with its normalized schema stored for the order form.
+$catalogue->enable($us->fresh());
+$usSchema = $catalogue->attributesFor($us->fresh());
+verify($us->fresh()->enabled && array_column($usSchema, 'name') === ['us_nexus', 'global_cc_us', 'us_purpose'] && $usSchema[1]['child'] === true, '.us was not enabled with its registry schema.');
+// Public prices: pre-tax catalogue prices and term ranges of orderable endings only.
+$public = collect($catalogue->publicPrices())->keyBy('tld');
+verify($public['ai'] === ['tld' => 'ai', 'register' => '90.00', 'renew' => '90.00', 'transfer' => '90.00', 'min_years' => 2, 'max_years' => 10]
+    && $public['us']['register'] === '9.00' && !$public->has('io') && !$public->has('net'), 'Public price list differs: '.json_encode($public));
+// A malformed schema or a field the form can't collect refuses the ending.
+foreach (['<Attributes><Attribute><Name>Bad Name</Name><Required>1</Required></Attribute></Attributes>', '<Attributes><Attribute><Name>opaque_id</Name><Required>1</Required><UserDefined>False</UserDefined></Attribute></Attributes>'] as $body) {
+    $odd = Tld::create(['server_id' => $server->id, 'tld' => 'xyz'.strlen($body), 'enabled' => false, 'pricing_mode' => 'fixed', 'register_price' => '5.00', 'renew_price' => '5.00', 'transfer_price' => '5.00']);
+    $attributesOverride = enomXml('GetExtAttributes', $body);
+    refuses(fn () => $catalogue->enable($odd), 'can\'t collect yet', 'Unsupported registry schema was enabled.', [InvalidArgumentException::class]);
+    verify(!$odd->fresh()->enabled && $odd->fresh()->registry_fields === null, 'Refused schema was stored.');
+    $attributesOverride = null;
+    $odd->delete();
+}
+// Over-long minimum terms are refused.
+$detailsOverride = str_replace(['<Minimum>1</Minimum>', '<TLD>com</TLD>'], ['<Minimum>11</Minimum>', '<TLD>longterm</TLD>'], file_get_contents($fixtures.'enom-gettlddetails-com.xml'));
+$longTerm = Tld::create(['server_id' => $server->id, 'tld' => 'longterm', 'enabled' => false, 'pricing_mode' => 'fixed', 'register_price' => '5.00', 'renew_price' => '5.00', 'transfer_price' => '5.00']);
+refuses(fn () => $catalogue->enable($longTerm), 'longer than 10 years', 'A ten-plus year minimum was enabled.', [InvalidArgumentException::class]);
+verify(!$longTerm->fresh()->enabled, 'Refused long-term ending was enabled.');
+$longTerm->delete();
+$detailsOverride = null;
+Tld::whereKey($ai->id)->update(['enabled' => false]); Tld::whereKey($us->id)->update(['enabled' => false]);
 // The same ending cannot be sold through a second server.
 $duplicate = Tld::create(['server_id' => $second->id, 'tld' => 'com', 'enabled' => false, 'pricing_mode' => 'fixed', 'register_price' => '10.00', 'renew_price' => '10.00', 'transfer_price' => '10.00']);
 $commands = [];

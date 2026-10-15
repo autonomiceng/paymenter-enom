@@ -172,7 +172,10 @@ serverSetting('dns_tools', '1');
 $hostilePage = ok('/domains/'.$hostile->id, $owner);
 $hostileList = ok('/domains?q='.rawurlencode('<script>alert(9)</script>'), $owner);
 $hostileAll = ok('/domains', $owner);
-$hostileOrder = ok(enomRedirectPath(enomHttp($owner, 'POST', '/domains/quote', ['domain' => 'fresh-order.com'] + $fields)), $owner);
+$hostileQuote = enomHttp($owner, 'POST', '/domains/quote', ['domain' => 'fresh-order.com'] + $fields);
+verify($hostileQuote->getStatusCode() !== 419, 'form-key-eviction: Enom/Http/FormKeys.php:15-17 keeps at most 100 session form keys and evicts the oldest by insertion. 0.4 adds glue_add/glue_update/glue_delete keys, so each domain page now issues 19 keys; after about five domain pages (e.g. in other tabs) an open search page\'s Register/quote form key is gone and submitting it returns 419.');
+if ($hostileQuote->getStatusCode() === 419) { $hostileQuote = enomHttp($owner, 'POST', '/domains/quote', ['domain' => 'fresh-order.com'] + enomFormFields(ok('/domains/register?name=fresh-order', $owner), '/domains/quote')); }
+$hostileOrder = ok(enomRedirectPath($hostileQuote), $owner);
 serverSetting('dns_tools', '0');
 foreach (['domain page' => $hostilePage, 'list search' => $hostileList, 'list' => $hostileAll, 'order prefill' => $hostileOrder] as $name => $html) {
     // Raw markup only; escaped text such as &lt;img src=x onerror=…&gt; is expected. Attributes are checked on the DOM below.

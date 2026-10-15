@@ -19,8 +19,8 @@ SUITES = {
                'renewal-admission.php', 'renewal-lifecycle-proof.php', 'observation-integration.php', 'reconciliation-rejection.php',
                'reconciliation-registration.php', 'capability-readbacks.php', 'provider-disposition.php', 'native-date-missing-schema.php',
                'request-gates.php', 'staff-funding-gates.php', 'catalogue-integration.php', 'runtime-guard.php', 'management-actions.php',
-               'pricing-complimentary.php'],
-    'ui': ['client-controller.php', 'client-views.php', 'admin-staff.php', 'client-script.cjs'],
+               'pricing-complimentary.php', 'registrar-terms.php', 'registry-details.php', 'glue-records.php', 'refunds.php', 'reminders.php'],
+    'ui': ['client-controller.php', 'client-views.php', 'admin-staff.php', 'public-search.php', 'client-script.cjs'],
 }
 
 def hashes(root):

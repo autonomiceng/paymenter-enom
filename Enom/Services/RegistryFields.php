@@ -33,7 +33,10 @@ final class RegistryFields
             $choices = [];
             foreach (is_array($options) ? $options : [] as $option) {
                 if (!is_array($option) || !is_string($option['value'] ?? null) || $option['value'] === '') { continue; }
-                $requires = $option['requires']['attribute'] ?? [];
+                if (isset($option['requires']) && !is_array($option['requires']) && trim((string) $option['requires']) !== '') {
+                    throw new \InvalidArgumentException('Unreadable registry field dependency.');
+                }
+                $requires = is_array($option['requires'] ?? null) ? ($option['requires']['attribute'] ?? []) : [];
                 if (is_array($requires) && !array_is_list($requires)) { $requires = [$requires]; }
                 if (!is_array($requires) || array_filter($requires, fn ($item) => !is_array($item) || !is_string($item['name'] ?? null))) {
                     throw new \InvalidArgumentException('Unreadable registry field dependency.');
