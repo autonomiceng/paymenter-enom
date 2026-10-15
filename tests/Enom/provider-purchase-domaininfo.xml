@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Sanitized observed sandbox Purchase shape; synthetic order ID and dates, no domain/account data. -->
+<interface-response>
+    <Command>Purchase</Command>
+    <ErrCount>0</ErrCount>
+    <Done>true</Done>
+    <RRPCode>200</RRPCode>
+    <OrderID>12345</OrderID>
+    <DomainInfo>
+        <RegistryCreateDate>2026-10-12 11:41:10.733</RegistryCreateDate>
+        <RegistryExpDate>2027-10-12 11:41:09.000</RegistryExpDate>
+    </DomainInfo>
+</interface-response>
