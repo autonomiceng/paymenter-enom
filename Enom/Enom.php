@@ -71,7 +71,7 @@ class Enom extends Server
             ['name' => 'observations_enabled', 'label' => 'Check domain status daily', 'type' => 'checkbox', 'default' => true, 'database_type' => 'boolean',
                 'description' => 'Reads each domain\'s status and expiry date from Enom once a day.'],
             ['name' => 'billing_enabled', 'label' => 'Send renewal invoices', 'type' => 'checkbox', 'default' => true, 'database_type' => 'boolean',
-                'description' => 'Sends scheduled invoices before domains expire. Customers can still renew from the portal. Complimentary domains renew without an invoice.'],
+                'description' => 'Sends renewal invoices before domains expire and lets customers renew from the portal. Turn off to stop both. Complimentary domains renew without an invoice.'],
             ['name' => 'issue_days', 'label' => 'Invoice days before expiry', 'type' => 'number', 'default' => 21, 'database_type' => 'integer', 'validation' => 'integer|min:2|max:365'],
             ['name' => 'due_days', 'label' => 'Due days before expiry', 'type' => 'number', 'default' => 7, 'database_type' => 'integer', 'validation' => 'integer|min:1|max:364',
                 'description' => 'Must be fewer than the invoice days.'],

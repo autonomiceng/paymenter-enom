@@ -11,7 +11,7 @@ use Paymenter\Extensions\Servers\Enom\Api\EnomApi;
 use Paymenter\Extensions\Servers\Enom\Services\DomainOperations;
 
 $checks = 0;
-$staffRole = App\Models\Role::create(['name' => 'Offline registrar staff', 'permissions' => ['admin.enom.manage']]);
+$staffRole = App\Models\Role::create(['name' => 'Offline registrar staff', 'permissions' => ['admin.enom.manage', 'admin.enom.fund']]);
 $staff = App\Models\User::create(['email' => 'recovery-staff@example.invalid', 'password' => 'synthetic', 'role_id' => $staffRole->id]);
 // 0.3: a confirmed registration/transfer queues exactly one post-registration detail refresh (read only) and nothing else.
 function onlyRefreshJobAdded(array $before, array $after, int $domainId): bool {

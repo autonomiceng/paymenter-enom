@@ -194,7 +194,8 @@ class DomainOperations
         }
         if ($operation->funding_basis === 'operator_funded') {
             $staff = User::find($operation->authorized_by);
-            return $staff && $staff->hasPermission('admin.enom.manage') && filled($operation->funding_reason) && $this->cents($operation->amount) > 0;
+            return $staff && $staff->hasPermission('admin.enom.manage') && $staff->hasPermission('admin.enom.fund')
+                && filled($operation->funding_reason) && $this->cents($operation->amount) > 0;
         }
         if ($operation->funding_basis === 'sponsored') {
             $sponsorship = $domain->sponsorship ?? [];

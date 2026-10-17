@@ -99,6 +99,10 @@ const submit = (w, form, submitter) => form.requestSubmit(submitter || form.quer
         await sleep(60);
         check(calls.length === before + 1 && row(rows[3]).dataset.state === 'available', 'Retry checks that ending once more');
         check(d.getElementById('enom-live').textContent === '4 of 12 names are available. Couldn’t check 2 names. Retry to check them.', 'Retry updates the available and error counts');
+        answers[rows[6]] = [{status: 'taken', complimentary: false}];
+        row(rows[6]).querySelector('[data-enom-retry]').click();
+        await sleep(60);
+        check(d.getElementById('enom-live').textContent === '4 of 12 names are available. Couldn’t check 1 name. Retry to check it.', 'One failed lookup uses singular text');
         check(errors.length === 0, 'Search page has no console errors: ' + errors.join(' | '));
         w.close();
     }

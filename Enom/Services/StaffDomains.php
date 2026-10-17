@@ -108,8 +108,7 @@ class StaffDomains
             $api = $this->operations->apiForServer($serverId, true);
             $result = $api->balance();
             if ($result->status !== 'success') {
-                $message = $result->value('errors.err1');
-                report(new \RuntimeException(is_string($message) ? $message : 'Enom did not accept the connection test.'));
+                report(new \RuntimeException('Enom rejected the connection test.'));
                 return $status + ['ok' => false, 'message' => \Paymenter\Extensions\Servers\Enom\Admin\Support\Staff::clean('Enom did not accept the request. Check the account ID, API token and IP allowlist.')];
             }
             $balance = $result->value('availablebalance') ?? $result->value('balance');

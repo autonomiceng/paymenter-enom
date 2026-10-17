@@ -41,6 +41,35 @@ $helpdesk = $staffUser('Helpdesk', ['admin.tickets.view']);
 $client = client('client@example.com');
 $staffDomains = app(StaffDomains::class);
 
+// Connection refusals keep provider error text out of responses and logs.
+$providerError = 'Synthetic account detail connection-error-7f3a';
+$connectionCommands = [];
+$connectionOperations = new \Paymenter\Extensions\Servers\Enom\Services\DomainOperations(
+    new \Paymenter\Extensions\Servers\Enom\Api\EnomApi(new \Paymenter\Extensions\Servers\Enom\Api\RegistrarClient('offline-account', 'offline-token',
+        function (string $command) use ($providerError, &$connectionCommands): string {
+            $connectionCommands[] = $command;
+            return '<interface-response><Command>GetBalance</Command><ErrCount>1</ErrCount><errors><Err1>'.$providerError.'</Err1></errors><Done>true</Done></interface-response>';
+        })), fn () => ['uid' => 'offline-account', 'token' => 'offline-token', 'environment' => 'test']);
+$logHandler = new \Monolog\Handler\TestHandler(bubble: false);
+$logger = \Illuminate\Support\Facades\Log::channel()->getLogger();
+$logger->pushHandler($logHandler);
+try {
+    $connection = (new StaffDomains($connectionOperations))->testConnection($server->id);
+} finally {
+    $logger->popHandler();
+}
+verify($connectionCommands === ['GetBalance'] && $connection['ok'] === false
+    && $connection['message'] === 'Enom did not accept the request. Check the account ID, API token and IP allowlist.',
+    'Connection test did not return the safe provider refusal.');
+verify(!str_contains(json_encode($connection), $providerError), 'Connection response exposed provider error text.');
+$logRecords = $logHandler->getRecords();
+verify(count($logRecords) === 1, 'Connection refusal did not produce one diagnostic log entry.');
+foreach ($logRecords as $record) {
+    verify(!str_contains($record->message.' '.(string) ($record->context['exception'] ?? '').' '.json_encode($record->context), $providerError),
+        'Connection test logged provider error text.');
+    verify($record->message === 'Enom rejected the connection test.', 'Connection refusal did not log the fixed diagnostic.');
+}
+
 // ---------------------------------------------------------------- policies
 $domain = clientDomain($client, ['domain' => 'policy-check.com']);
 $operation = Operation::create(['domain_id' => $domain->id, 'service_id' => $domain->service_id, 'operation_key' => 'policy-op', 'action' => 'lock', 'state' => 'succeeded',

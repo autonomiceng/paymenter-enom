@@ -312,7 +312,7 @@
                 const available = states.filter(state => state === 'available').length;
                 const errors = states.filter(state => state === 'error').length;
                 say((available ? available + ' of ' + rows.length + ' names are available.' : errors ? '' : 'None of these names are available. Try a different name.')
-                    + (errors ? (available ? ' ' : '') + 'Couldn’t check ' + errors + ' names. Retry to check them.' : ''));
+                    + (errors ? (available ? ' ' : '') + 'Couldn’t check ' + errors + (errors === 1 ? ' name. Retry to check it.' : ' names. Retry to check them.') : ''));
             }
         };
         list.querySelectorAll('[data-enom-retry]').forEach(button => button.addEventListener('click', () => check(button.closest('[data-enom-result]'))));

@@ -136,6 +136,26 @@ foreach (['awaiting_payment', 'held'] as $eligibleState) {
     catch (RuntimeException) {}
     verify(allRows() == $beforeDuplicate, 'Repeated funding authorization changed history or dispatched another job.');
 }
+// Dispatch rechecks both permissions after staff approve and queue an expense.
+foreach (['admin.enom.fund', 'admin.enom.manage'] as $revokedPermission) {
+    [$domain, $target] = fixture('register');
+    $target->update(['invoice_id' => null, 'invoice_item_id' => null, 'provider_order_id' => null,
+        'started_at' => null, 'state' => 'awaiting_payment', 'funding_basis' => 'unfunded']);
+    $approved = $operations->approveFunding($target->id, $staff->fresh(), 'Agreed to cover this registration');
+    verify($approved->state === 'queued' && $operations->funded($approved), 'Approved operator funding was not queued and funded.');
+    $role->update(['permissions' => array_values(array_diff(['admin.enom.manage', 'admin.enom.fund'], [$revokedPermission]))]);
+    $fundedAfterRevocation = $operations->funded($approved->fresh());
+    $before = allRows();
+    $result = $operations->execute($approved->id);
+    verify(!$fundedAfterRevocation && $result->state === 'held' && $result->safe_code === 'funding_or_preference_invalid'
+        && $result->started_at === null && $providerCalls === 0,
+        'Queued operator funding dispatched after revoking '.$revokedPermission.'.');
+    $after = allRows();
+    foreach (['enom_domains', 'invoices', 'invoice_items', 'invoice_transactions', 'services', 'jobs'] as $table) {
+        verify($after[$table] == $before[$table], 'Revoked funding dispatch changed '.$table.'.');
+    }
+    $role->update(['permissions' => ['admin.enom.manage', 'admin.enom.fund']]);
+}
 [$domain, $peer] = activeFixture();
 $peer->update(['state' => 'succeeded']);
 $target = Operation::create(['domain_id' => $domain->id, 'service_id' => $domain->service_id,

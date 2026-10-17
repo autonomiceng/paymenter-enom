@@ -183,8 +183,8 @@ class DomainResource extends Resource
     /** @return list<int> clients who hold a complimentary grant */
     public static function complimentaryClientIds(): array
     {
-        $ids = User::query()->whereHas('properties', fn (Builder $query) => $query->where('key', Pricing::CLIENT_PROPERTY))->pluck('id');
-        return User::whereIn('id', $ids)->get()->filter(fn (User $user) => Labels::clientComplimentary($user))
+        return User::query()->whereHas('properties', fn (Builder $query) => $query->where('key', Pricing::CLIENT_PROPERTY))
+            ->get()->filter(fn (User $user) => Labels::clientComplimentary($user))
             ->map(fn (User $user) => (int) $user->id)->values()->all();
     }
 
