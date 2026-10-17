@@ -993,26 +993,49 @@ class DomainOperations
         return filter_var($server->settings->pluck('value', 'key')->get('operations_enabled', false), FILTER_VALIDATE_BOOLEAN);
     }
 
+    public function canFund(Operation $operation, ?User $actor): bool
+    {
+        if (!in_array($operation->state, ['awaiting_payment', 'held'], true)) { return false; }
+        try {
+            $this->requireFundingAuthority($actor);
+            $operation = $operation->fresh();
+            if (!$operation || !$operation->domain) { return false; }
+            $this->assertFundable($operation, $operation->domain);
+            return true;
+        } catch (Throwable) { return false; }
+    }
+
+    private function requireFundingAuthority(?User $actor): void
+    {
+        abort_unless($actor && $actor->hasPermission('admin.enom.manage') && $actor->hasPermission('admin.enom.fund'), 404);
+    }
+
+    private function assertFundable(Operation $operation, Domain $domain): void
+    {
+        if (!in_array($operation->state, ['awaiting_payment', 'held'], true) || $operation->started_at || $this->cents($operation->amount) <= 0) {
+            throw new RuntimeException('This request can\'t be funded. Only unpaid or held requests that have not started can be funded.');
+        }
+        if (self::hasUnresolvedPeer($domain, $operation->id)) {
+            throw new InputValidationException(['enom' => 'Another Enom request for this domain is still unresolved. Record its outcome first, then try again.']);
+        }
+        if ($operation->invoice_id || $operation->safe_code === 'binding_invalid'
+            || $operation->base_expires_at && (!$domain->provider_expires_at || !$operation->base_expires_at->equalTo($domain->provider_expires_at))) {
+            throw new InputValidationException(['enom' => 'This request can\'t be funded. It already has a client invoice, or the domain changed at Enom after it was made.']);
+        }
+    }
+
     public function approveFunding(int $operationId, User $staff, string $reason): Operation
     {
-        abort_unless($staff->hasPermission('admin.enom.manage'), 404);
-        if (strlen(trim($reason)) < 5 || strlen($reason) > 500) { throw new RuntimeException('A funding reason is required.'); }
+        $this->requireFundingAuthority($staff);
+        $reason = trim($reason);
+        if (mb_strlen($reason) < 5 || mb_strlen($reason) > 500) { throw new RuntimeException('Enter a reason between 5 and 500 characters.'); }
         $domainId = Operation::whereKey($operationId)->firstOrFail(['domain_id'])->domain_id;
         return DB::transaction(function () use ($operationId, $domainId, $staff, $reason) {
             // Serialize every funding/write admission with execute and enqueueManagement.
             $domain = Domain::whereKey($domainId)->lockForUpdate()->firstOrFail();
             $operation = Operation::whereKey($operationId)->where('domain_id', $domain->id)->lockForUpdate()->firstOrFail();
-            if (!in_array($operation->state, ['awaiting_payment', 'held'], true) || $operation->started_at || $this->cents($operation->amount) <= 0) {
-                throw new RuntimeException('This operation cannot receive a new funding authorization.');
-            }
-            if (self::hasUnresolvedPeer($domain, $operation->id)) {
-                throw new InputValidationException(['enom' => 'Funding is unavailable while another registrar request is unresolved. Review its outcome first.']);
-            }
-            if ($operation->invoice_id || $operation->safe_code === 'binding_invalid'
-                || $operation->base_expires_at && !$operation->base_expires_at->equalTo($domain->provider_expires_at)) {
-                throw new InputValidationException(['enom' => 'A customer invoice or changed registration cannot be overridden with funding. Review sponsorship and the invoice disposition separately.']);
-            }
-            $operation->update(['funding_basis' => 'operator_funded', 'authorized_by' => $staff->id, 'funding_reason' => trim($reason), 'state' => 'queued']);
+            $this->assertFundable($operation, $domain);
+            $operation->update(['funding_basis' => 'operator_funded', 'authorized_by' => $staff->id, 'funding_reason' => $reason, 'state' => 'queued']);
             ExecuteOperation::dispatch($operation->id)->afterCommit();
             return $operation;
         });
