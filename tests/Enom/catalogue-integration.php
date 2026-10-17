@@ -114,7 +114,12 @@ $wrongDetails = true;
 refuses(fn () => $catalogue->enable($org->fresh()), 'Could not read .org registration terms', 'Term details for another ending enabled .org.', [RuntimeException::class]);
 $wrongDetails = false;
 verify(Tld::where('enabled', true)->count() === 0 && Product::count() === 0, 'A refused enable changed state or created a product.');
+$enableTransaction = null;
+Tld::saving(function (Tld $ending) use ($com, &$enableTransaction): void {
+    if ($ending->id === $com->id && $ending->enabled) { $enableTransaction = Illuminate\Support\Facades\DB::transactionLevel(); }
+});
 $catalogue->enable($com);
+verify($enableTransaction > 0, 'Ending enable write ran outside its transaction.');
 verify($com->fresh()->enabled && Product::where('server_id', $server->id)->count() === 1, 'Valid .com was not enabled with its product.');
 verify($com->fresh()->min_years === 1 && $com->fresh()->max_years === 10 && $com->fresh()->registry_fields === [] && $catalogue->attributesFor($com->fresh()) === [], '.com terms or empty registry schema not stored.');
 // .ai needs at least two years: it is enabled with a 2-10 term range (previously refused).

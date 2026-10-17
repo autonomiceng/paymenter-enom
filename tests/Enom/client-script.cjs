@@ -71,9 +71,12 @@ const submit = (w, form, submitter) => form.requestSubmit(submitter || form.quer
             return {status: 200, json: async () => ({domain: body.domain, ...next})};
         };
         const {w, d, errors} = mount(pages.search, {fetch});
-        await sleep(1700); // Covers the one 1.2 s retry pause.
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline && (calls.length < 14 || inFlight !== 0 || d.querySelector('[data-enom-result][data-state="checking"]'))) await sleep(20);
+        check(calls.length >= 14 && inFlight === 0 && !d.querySelector('[data-enom-result][data-state="checking"]'), 'Search queue completed before the deadline');
+        await sleep(40); // Let the live region announce the completed results.
         const token = d.querySelector('meta[name="csrf-token"]').content;
-        check(peak <= 2 && peak === 2, 'Check queue runs exactly two lookups at a time: peak ' + peak);
+        check(peak === 2, 'Check queue runs exactly two lookups at a time: peak ' + peak);
         check(calls.every(c => c.url === 'http://enom-tests.invalid/domains/check' && c.options.method === 'POST' && c.options.headers['X-CSRF-TOKEN'] === token
             && c.options.headers['Content-Type'] === 'application/json' && c.options.credentials === 'same-origin'), 'Lookups post JSON with the page CSRF token');
         const perDomain = name => calls.filter(c => c.domain === name).length;
@@ -89,12 +92,13 @@ const submit = (w, form, submitter) => form.requestSubmit(submitter || form.quer
         check(!d.querySelector('[data-enom-results] img') && w.pwned === undefined && row(rows[5]).querySelector('[data-slot="price"] strong').textContent.startsWith('<img'), 'Answer text is inserted as text, never markup');
         check(row(rows[6]).dataset.state === 'error' && row(rows[6]).querySelector('[data-slot="retry-note"]').textContent === 'Too many searches. Wait a minute, then retry.', 'Rate limit tells the client to wait');
         check(row(rows[7]).dataset.state === 'error', 'Unknown answer is shown as an error, not trusted');
-        check(d.getElementById('enom-live').textContent === '3 of 12 names are available.', 'Result count is announced: ' + d.getElementById('enom-live').textContent);
+        check(d.getElementById('enom-live').textContent === '3 of 12 names are available. Couldn’t check 3 names. Retry to check them.', 'Result count is announced: ' + d.getElementById('enom-live').textContent);
         const before = calls.length;
         answers[rows[3]] = [{status: 'available', complimentary: false, price: '$20.00', renew_price: '$21.00'}];
         row(rows[3]).querySelector('[data-enom-retry]').click();
         await sleep(60);
         check(calls.length === before + 1 && row(rows[3]).dataset.state === 'available', 'Retry checks that ending once more');
+        check(d.getElementById('enom-live').textContent === '4 of 12 names are available. Couldn’t check 2 names. Retry to check them.', 'Retry updates the available and error counts');
         check(errors.length === 0, 'Search page has no console errors: ' + errors.join(' | '));
         w.close();
     }

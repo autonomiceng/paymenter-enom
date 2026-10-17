@@ -2,10 +2,11 @@
 require_once dirname(__DIR__).'/paymenter-test-app.php';
 
 // Real stock Laravel/models, synthetic environment, in-memory SQLite, injected fake provider.
-// Never load an installed app or any .env. Run: php tests/Enom/billing-integration.php
+// Never load an installed app or any .env. Run: php tests/Enom/renewal-lifecycle-proof.php
 $repo = dirname(__DIR__, 2);
 $successful = false;
-register_shutdown_function(function () use (&$successful) { if (!$successful) { exit(1); } });
+$testRoot = null;
+paymenterTestShutdown($testRoot, $successful);
 $release = paymenterTestApp();
 if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
 $testRoot = $repo.'/.scratch/enom-renewal-lifecycle-proof-'.bin2hex(random_bytes(5));
@@ -163,7 +164,8 @@ proof($early->fresh()->expires_at === null, 'Service Updated failed to restore n
 proof((float) $user->credits()->first()->amount === 15.0, 'Credit debit differs from invoice remaining.');
 $earlyPaidEvents = array_values(array_filter($observations, fn ($event) => $event['event'] === 'invoice_paid' && $event['invoice_id'] === $earlyInvoice->id));
 proof(count($earlyPaidEvents) === 1 && $earlyPaidEvents[0]['native_date'] === null, 'Paid event observed a native advanced date.');
-proof($observations[0]['native_date'] === '2027-11-10', 'Native null-date calculation did not start at payment day.');
+$dateWrites = array_values(array_filter($observations, fn ($event) => $event['event'] === 'native_date_written' && $event['service_id'] === $early->id));
+proof(count($dateWrites) === 1 && $dateWrites[0]['native_date'] === '2027-11-10', 'Native null-date calculation did not start at payment day.');
 
 foreach (['2026-11-24', '2026-11-27', '2026-12-01', '2026-12-09', '2026-12-20'] as $day) {
     clockAt($day);
@@ -289,5 +291,4 @@ echo json_encode(['checks' => $checks, 'native_release' => 'v1.5.9', 'database' 
     'core_hashes' => $sourceHashes, 'observations' => $observations,
     'proved_limitations' => ['linked_payment_reactivates_cancelled_service', 'linked_suspended_payment_queues_unsuspend',
         'nullable_end_of_period_cancellation_needs_extension_execution', 'unreferenced_items_absent_from_native_service_invoice_relation',
-        'native_cancellation_does_not_cancel_unreferenced_invoice'],
-    'test_root' => $testRoot], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)."\n";
+        'native_cancellation_does_not_cancel_unreferenced_invoice']], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)."\n";

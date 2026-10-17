@@ -1,7 +1,7 @@
 @component('layouts.app', ['title' => 'Domains', 'sidebar' => true])
 @php
     $controller = \Paymenter\Extensions\Servers\Enom\Http\Controllers\DomainController::class;
-    $params = array_filter(['q' => $search, 'status' => $filter, 'sort' => $sort === 'expiry' ? null : $sort]);
+    $params = array_filter(['q' => $search, 'status' => $filter, 'sort' => $sort === 'expiry' ? null : $sort], fn ($v) => $v !== null && $v !== '');
     $url = fn (array $changes) => route('enom.domains.index', array_filter([...$params, ...$changes], fn ($v) => $v !== null && $v !== ''));
     $sortLink = fn (string $column) => $url(['sort' => $sort === $column ? '-'.$column : ($column === 'expiry' ? null : $column), 'page' => null]);
     $sortIcon = fn (string $column) => $sort === $column ? 'ri-arrow-up-s-line' : ($sort === '-'.$column ? 'ri-arrow-down-s-line' : null);

@@ -23,6 +23,7 @@ use Paymenter\Extensions\Servers\Enom\Services\DomainOperations;
 use Paymenter\Extensions\Servers\Enom\Services\DomainOrders;
 use Paymenter\Extensions\Servers\Enom\Services\InputValidationException;
 use Paymenter\Extensions\Servers\Enom\Services\Pricing;
+use Paymenter\Extensions\Servers\Enom\Services\PriceChangedException;
 use Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard;
 use RuntimeException;
 use Throwable;
@@ -280,6 +281,10 @@ class DomainController extends Controller
         $domain = is_string($domain) ? strtolower(trim(substr($domain, 0, 253))) : '';
         // The transfer page sends a name and an ending separately.
         $ending = $request->input('tld');
+        if ($ending !== null && (!is_string($ending) || strlen($ending) > 63 || ($ending !== '' && !preg_match('/\A[a-z0-9.-]+\z/', $ending)))) {
+            return redirect()->route($action === 'transfer' ? 'enom.domains.transfer' : 'enom.domains.search')
+                ->withErrors(['domain' => 'Choose a valid domain ending.']);
+        }
         if ($domain !== '' && is_string($ending) && $ending !== '' && !str_contains($domain, '.')) {
             $domain .= '.'.strtolower($ending);
         }
@@ -330,7 +335,11 @@ class DomainController extends Controller
         $user = $request->user();
         $record = OrderIntent::query()->where('user_id', $user->id)->whereKey($intent)->firstOrFail();
         if ($record->claimed_at) {
-            return $this->afterPlace($this->orders->place($user, $intent));
+            try {
+                return $this->afterPlace($this->orders->place($user, $intent));
+            } catch (ModelNotFoundException) {
+                return redirect()->route('enom.domains.search')->with('enom_notice', 'This order is no longer available. Search for the name again.');
+            }
         }
         try {
             $quote = $this->orders->pendingQuote($user, $intent);
@@ -359,7 +368,11 @@ class DomainController extends Controller
         $user = $request->user();
         $record = OrderIntent::query()->where('user_id', $user->id)->whereKey($intent)->firstOrFail();
         if ($record->claimed_at) {
-            return $this->afterPlace($this->orders->place($user, $intent));
+            try {
+                return $this->afterPlace($this->orders->place($user, $intent));
+            } catch (ModelNotFoundException) {
+                return redirect()->route('enom.domains.search')->with('enom_notice', 'This order is no longer available. Search for the name again.');
+            }
         }
         FormKeys::verify($request, 'order:'.$intent);
         $retained = $this->orderInput($request);
@@ -446,17 +459,19 @@ class DomainController extends Controller
         } catch (ModelNotFoundException $exception) {
             throw $exception;
         } catch (Throwable $exception) {
-            if ($exception->getMessage() === 'Domain pricing changed. Search again.') {
+            if ($exception instanceof PriceChangedException) {
                 // Keep what the client typed and show the new price on a fresh quote.
                 try {
                     $fresh = $this->orders->quote($user, $record->domain, $record->action, $term);
                     return redirect()->route('enom.domains.order', $fresh['intent_id'])
                         ->withInput([...$retained, '_enom_form' => 'order:'.$fresh['intent_id']])
                         ->with('enom_notice', 'The price changed while you were ordering. Check the new total and submit again.');
-                } catch (Throwable) {}
+                } catch (Throwable) {
+                    // A failed refresh returns to search with the pricing message.
+                }
             }
             report($exception);
-            $message = $exception->getMessage() === 'Domain pricing changed. Search again.'
+            $message = $exception instanceof PriceChangedException
                 ? 'The price changed while you were ordering. Check the name again to see the current price.'
                 : 'We couldn’t place this order. Try again, or contact support if it keeps happening.';
 
@@ -923,14 +938,15 @@ class DomainController extends Controller
         return $options;
     }
 
-    private function catalogueInTest(Collection $endings): bool
+    private function catalogueInTest(Collection $endings): bool|string
     {
         $servers = $endings->pluck('server_id')->unique();
         if ($servers->isEmpty()) {
             $servers = \App\Models\Server::query()->where('extension', 'Enom')->pluck('id');
         }
 
-        return $servers->contains(fn ($id) => RuntimeGuard::isTest((int) $id));
+        $testCount = $servers->filter(fn ($id) => RuntimeGuard::isTest((int) $id))->count();
+        return $testCount === 0 ? false : ($testCount === $servers->count() ? true : 'some');
     }
 
     /**

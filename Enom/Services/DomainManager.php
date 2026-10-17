@@ -94,7 +94,7 @@ class DomainManager
             'operations' => $operations, 'cached' => $cached,
             'automation' => $automation,
             // Public retail fact only. A zero price never produces a customer renewal invoice.
-            'zero_retail' => RegistrarMoney::decimal((string) $domain->service->price) === '0.00',
+            'zero_retail' => Pricing::zeroRetail($domain),
             'hosts_digest' => self::digest($cached['hosts']), 'srv_digest' => self::digest($cached['srv']),
             'price' => ['mode' => Pricing::mode($domain), 'source' => Pricing::source($domain), 'amount' => Pricing::renewalPrice($domain),
                 'currency' => $domain->service->currency_code],
@@ -427,11 +427,15 @@ class DomainManager
 
     private static function integer(mixed $value, int $max = 65535): int
     {
-        if ((!is_string($value) && !is_int($value)) || !preg_match('/\A[0-9]+\z/', (string) $value) || (int) $value > $max) {
-            throw new InvalidArgumentException('Enter a whole number within the supported range.');
+        if ((!is_string($value) && !is_int($value)) || !preg_match('/\A[0-9]+\z/', (string) $value)) {
+            throw new \InvalidArgumentException('Enter a whole number within the supported range.');
         }
-
-        return (int) $value;
+        $digits = ltrim((string) $value, '0') ?: '0';
+        $limit = (string) $max;
+        if (strlen($digits) > strlen($limit) || strlen($digits) === strlen($limit) && strcmp($digits, $limit) > 0) {
+            throw new \InvalidArgumentException('Enter a whole number within the supported range.');
+        }
+        return (int) $digits;
     }
 
     private static function hostRecord(array $record): array

@@ -185,7 +185,7 @@ class DomainOrders
             if (!$tld?->orderable() || $complimentary !== self::complimentaryFor($user)
                 || !$complimentary && (Pricing::taxed($user, $intent->action === 'register' ? $tld->registrationTotal(max(1, (int) $intent->term)) : $tld->price('transfer'), $intent->currency) !== $intent->amount
                     || Pricing::taxed($user, $tld->price('renew'), $intent->currency) !== $intent->renewal_amount)) {
-                throw new RuntimeException('Domain pricing changed. Search again.');
+                throw new PriceChangedException('Domain pricing changed. Search again.');
             }
             if ($intent->action === 'transfer' && (!is_string($epp) || strlen($epp) < 1 || strlen($epp) > 255 || preg_match('/[\x00-\x1f]/', $epp))) { throw new RuntimeException('A valid transfer authorization code is required.'); }
             if (!$contacts) { throw new RuntimeException('Registrant contact details are required.'); }
@@ -218,6 +218,9 @@ class DomainOrders
                 'issue_days' => (int) ($product->server->settings->firstWhere('key', 'issue_days')?->value ?? 21),
                 'due_days' => (int) ($product->server->settings->firstWhere('key', 'due_days')?->value ?? 7), 'term' => 1,
                 'account_fingerprint' => RuntimeGuard::accountFingerprint($configuration)];
+            if (Domain::where('domain', $intent->domain)->exists()) {
+                throw new InputValidationException(['domain' => 'This domain already has a portal record.']);
+            }
             $domain = Domain::create(['service_id' => $service->id, 'user_id' => $user->id, 'server_id' => $intent->server_id,
                 'domain' => $intent->domain, 'sld' => $intent->sld, 'tld' => $intent->tld,
                 'billing_managed' => true, 'renewal_policy' => $policy,

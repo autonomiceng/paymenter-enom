@@ -39,6 +39,7 @@ class EnomSetup extends Page
     protected static ?string $slug = 'enom-setup';
 
     /** Connection test results from this visit, keyed by server id. */
+    #[\Livewire\Attributes\Locked]
     public array $tests = [];
 
     public static function canAccess(): bool
@@ -113,7 +114,7 @@ class EnomSetup extends Page
                     TextEntry::make('reminderAfter')->label('After expiry')
                         ->state($schedule('expired_reminder_days', '3'))
                         ->listWithLineBreaks(),
-                    TextEntry::make('reminderSent')->label('Sent in the last 30 days')
+                    TextEntry::make('reminderSent')->label('Reminders due in the last 30 days')
                         ->state($stats)
                         ->numeric()
                         ->visible($stats !== null),
@@ -128,7 +129,7 @@ class EnomSetup extends Page
     /** @return list<int> */
     private static function days(string $value): array
     {
-        $days = array_values(array_unique(array_filter(array_map('intval', preg_split('/[\s,]+/', $value) ?: []), fn (int $day) => $day > 0 && $day <= 365)));
+        $days = \Paymenter\Extensions\Servers\Enom\Services\Reminders::offsets($value);
         rsort($days);
         return $days;
     }
@@ -200,8 +201,10 @@ class EnomSetup extends Page
                     ->modalDescription('Live requests will run from '.RuntimeGuard::siteUrl().'. Real domains are registered and your Enom balance is charged. A copy of this database on another site cannot send live requests.')
                     ->modalSubmitActionLabel('Confirm live mode')
                     ->action(function () use ($id) {
-                        Staff::require('admin.servers.update');
-                        Staff::attempt(fn () => RuntimeGuard::confirmLive($id), 'Live mode confirmed for this site.');
+                        Staff::attempt(function () use ($id) {
+                            Staff::require('admin.servers.update');
+                            RuntimeGuard::confirmLive($id);
+                        }, 'Live mode confirmed for this site.');
                     }),
                 Action::make('edit'.$id)
                     ->label('Server settings')
@@ -269,7 +272,7 @@ class EnomSetup extends Page
             report($exception);
             $result = ['ok' => false, 'message' => 'Could not reach Enom.'];
         }
-        $this->tests[$serverId] = ['ok' => (bool) ($result['ok'] ?? false), 'message' => (string) ($result['message'] ?? ''),
+        $this->tests[$serverId] = ['ok' => (bool) ($result['ok'] ?? false), 'message' => Staff::clean((string) ($result['message'] ?? '')) ?? 'Could not reach Enom.',
             'balance' => $result['balance'] ?? null];
         Notification::make()->title($this->tests[$serverId]['ok'] ? 'Connected to Enom.' : 'Connection failed')
             ->body($this->tests[$serverId]['ok'] ? null : $this->tests[$serverId]['message'])

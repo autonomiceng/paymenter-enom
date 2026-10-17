@@ -64,18 +64,9 @@ class DomainAdministration
                 'current_cycle' => $approvalEnabled && ($approvalStanding || $approvalBase !== null
                     && $approvalBase === $domain->provider_expires_at?->format('Y-m-d'))];
         }
-        // Staff-only booleans that name the server setting blocking automation. Never credentials or values.
-        try {
-            $service = $domain->service;
-            $server = $service?->product?->server;
-            $flag = fn (string $key) => filter_var($server?->settings->firstWhere('key', $key)?->value ?? false, FILTER_VALIDATE_BOOLEAN);
-            $reads = $server?->settings->firstWhere('key', 'reads_enabled') ? $flag('reads_enabled') : $flag('operations_enabled');
-            $data['server_flags'] = ['server_enabled' => (bool) ($server?->enabled), 'sandbox' => $flag('sandbox'), 'reads_enabled' => $reads,
-                'operations_enabled' => $flag('operations_enabled'), 'billing_enabled' => $flag('billing_enabled'),
-                'observations_enabled' => $flag('observations_enabled'), 'grace_renewals_enabled' => $flag('grace_renewals_enabled')];
-            $data['zero_retail'] = $service !== null && RegistrarMoney::decimal((string) $service->price) === '0.00';
-            $data['renewal_cancelled'] = $service !== null && (bool) $service->cancellation;
-        } catch (Throwable) { $data['server_flags'] = null; }
+        $service = $domain->service;
+        $data['zero_retail'] = Pricing::zeroRetail($domain);
+        $data['renewal_cancelled'] = $service !== null && (bool) $service->cancellation;
         $billing = $domain->observation['billing'] ?? [];
         $data['billing_health'] = ['attempted_at' => self::timestamp($billing['attempted_at'] ?? null),
             'result' => self::safeCode($billing['result'] ?? null), 'deadline_missed' => is_bool($billing['deadline_missed'] ?? null) ? $billing['deadline_missed'] : null];
@@ -184,7 +175,8 @@ class DomainAdministration
             $domain = Domain::lockForUpdate()->findOrFail($domainId);
             $service = Service::lockForUpdate()->findOrFail($domain->service_id);
             $domain->setRelation('service', $service);
-            if (!$domain->billing_managed || !$this->operations->validService($service, $domain)
+            if ($enabled === true && DomainOperations::writesPaused($domain)
+                || !$domain->billing_managed || !$this->operations->validService($service, $domain)
                 || $service->status !== Service::STATUS_ACTIVE || self::minor((string) $service->price) !== 0
                 || $service->currency_code !== $currency || $service->expires_at !== null || $service->cancellation()->exists()
                 || $domain->operations()->whereIn('state', self::BLOCKING_STATES)->exists()) {

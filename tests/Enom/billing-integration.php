@@ -5,7 +5,8 @@ require_once dirname(__DIR__).'/paymenter-test-app.php';
 // Never load an installed app or any .env. Run: php tests/Enom/billing-integration.php
 $repo = dirname(__DIR__, 2);
 $successful = false;
-register_shutdown_function(function () use (&$successful) { if (!$successful) { exit(1); } });
+$testRoot = null;
+paymenterTestShutdown($testRoot, $successful);
 $release = paymenterTestApp();
 if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
 $testRoot = $repo.'/.scratch/enom-billing-test-'.bin2hex(random_bytes(5));
@@ -136,8 +137,11 @@ check($domain->service->product_id === $product->id && App\Models\Product::count
 check($domain->billing_managed && $domain->price_mode === null && ($domain->renewal_policy['account_fingerprint'] ?? null) === $expectedAccount, 'New order is not billing-managed with its account fingerprint.');
 check($server->settings()->where('key', 'enom_account_binding')->value('value') === $expectedAccount, 'First order did not bind the server to its Enom account.');
 check($server->settings()->where('key', 'uid')->value('encrypted') && $server->settings()->where('key', 'token')->value('encrypted'), 'Credentials saved without the flag were stored unencrypted.');
-try { $orders->quote($user, 'billing-demo.net'); check(false, 'An ending without an enabled catalogue row was quoted.'); }
-catch (InvalidArgumentException|RuntimeException) { check(true, 'Ending outside the catalogue refused.'); }
+
+$refused = false;
+try { $orders->quote($user, 'billing-demo.net'); }
+catch (InvalidArgumentException|RuntimeException) { $refused = true; }
+check($refused, 'An ending without an enabled catalogue row was quoted.');
 // The rest of this file covers the retained legacy lifecycle: a pre-0.3 domain billed by native service dates.
 // Its order is reshaped to what a 0.2 order with managed billing off recorded: no renewal policy and an unmanaged operation binding.
 check(!empty($operation->policy['billing_managed']) && $operation->policy['account_fingerprint'] === $expectedAccount, 'New order binding lacks its managed account policy.');
@@ -151,7 +155,7 @@ function legacyOrder(App\Models\Invoice $invoice): void {
 legacyOrder($invoice);
 check($orders->place($user, $quote['intent_id'], $contacts)->id === $invoice->id, 'Intent replay created another invoice.');
 check(count($writes) === 0, 'Ordering executed a provider write.');
-check($operations->acceptPaidInvoice($invoice) === [], 'Unpaid invoice queued registrar action.');
+check($operations->acceptPaidInvoice($invoice) === [] && $operation->fresh()->state === 'awaiting_payment', 'Unpaid invoice queued registrar action.');
 check(!str_contains(Illuminate\Support\Facades\DB::table('enom_operations')->value('payload'), 'Example Road'), 'Operation contacts were stored plaintext.');
 try { $operations->ownedDomain($other, $domain->id); check(false, 'Cross-owner access allowed.'); } catch (Illuminate\Database\Eloquent\ModelNotFoundException) { check(true, 'Owner guard passed.'); }
 // Native successful credit transaction invokes native paid processing and the extension event.
@@ -185,7 +189,13 @@ check($domain->fresh()->provider_expires_at->format('Y-m-d') === '2028-10-12', '
 check(count($writes) === 2, 'Renewal transmitted wrong number of purchases.');
 $operations->toggleRenewalPreference($user, $domain->id, false);
 check($domain->fresh()->service->cancellation?->type === 'end_of_period', 'Do-not-renew did not create native cancellation.');
-try { $orders->renew($user, $domain->id, str_repeat('b', 64)); check(false, 'Do-not-renew billed another invoice.'); } catch (RuntimeException) { check(true, 'Do-not-renew refused.'); }
+
+$beforeRefusedInvoices = App\Models\Invoice::count();
+$refused = false;
+try { $orders->renew($user, $domain->id, str_repeat('b', 64)); }
+catch (RuntimeException) { $refused = true; }
+check($refused, 'Do-not-renew billed another invoice.');
+check(App\Models\Invoice::count() === $beforeRefusedInvoices, 'Refused renewal created an invoice.');
 $operations->toggleRenewalPreference($user, $domain->id, true);
 $service = $domain->fresh()->service;
 $service->price = 0; $service->expires_at = '2030-01-01'; $service->save();
@@ -252,7 +262,7 @@ $invoice3 = $orders->place($user, $quote3['intent_id'], $contacts);
 $invoice3->status = 'paid'; $invoice3->save();
 $unfunded = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $invoice3->id)->firstOrFail();
 check($unfunded->state === 'awaiting_payment' && !$operations->funded($unfunded), 'Manually-paid status without money authorized registrar action.');
-check($operations->acceptPaidInvoice($invoice3) === [], 'Manually-paid invoice queued a purchase.');
+check($operations->acceptPaidInvoice($invoice3) === [] && $unfunded->fresh()->state === 'awaiting_payment', 'Manually-paid invoice queued a purchase.');
 // A historical unbound service invoice is not reconstructed by the sweep.
 $historical = new App\Models\Invoice(['user_id' => $user->id, 'currency_code' => 'USD', 'due_at' => now(), 'status' => 'paid']);
 $historical->send_create_email = false; $historical->save();
@@ -601,7 +611,12 @@ foreach (['paused processing' => null, 'paused processing with reads_enabled=fal
 }
 $server->settings()->where('key', 'operations_enabled')->firstOrFail()->update(['value' => true]);
 $beforeProviderCalls = $providerCalls;
-try { Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard::assertProvider($server->id); check(false, 'Unconfigured runtime accepted.'); } catch (RuntimeException) { check(true, 'Runtime guard rejected isolated test app.'); }
+
+$unconfigured = App\Models\Server::create(['name' => 'Unconfigured Enom', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
+$refused = false;
+try { Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard::assertProvider($unconfigured->id); }
+catch (RuntimeException) { $refused = true; }
+check($refused, 'Unconfigured runtime accepted.');
 $operationCountBeforeLifecycle = Paymenter\Extensions\Servers\Enom\Models\Operation::count();
 $extension->installed(); $extension->uninstalled();
 check(Paymenter\Extensions\Servers\Enom\Models\Operation::count() === $operationCountBeforeLifecycle, 'Reinstall/remove discarded operation history.');

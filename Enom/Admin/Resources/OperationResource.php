@@ -361,7 +361,10 @@ class OperationResource extends Resource
             ->icon('heroicon-o-check-badge')
             ->color('warning')
             ->size('sm')
-            ->visible(fn (Operation $record) => self::reviewable($record) && self::freshFact($record) !== null)
+            ->visible(function (Operation $record): bool {
+                if (!self::reviewable($record) || !($fact = self::freshFact($record))) { return false; }
+                return ($fact['known_order'] ?? false) !== true || ($fact['order_completed'] ?? false) === true;
+            })
             ->schema(function (Operation $record) {
                 $fact = self::freshFact($record) ?? [];
                 $known = ($fact['known_order'] ?? false) === true;

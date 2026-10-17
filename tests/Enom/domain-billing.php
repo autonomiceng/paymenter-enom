@@ -2,10 +2,11 @@
 require_once dirname(__DIR__).'/paymenter-test-app.php';
 
 // Real stock Laravel/models, synthetic environment, in-memory SQLite, injected fake provider.
-// Never load an installed app or any .env. Run: php tests/Enom/billing-integration.php
+// Never load an installed app or any .env. Run: php tests/Enom/domain-billing.php
 $repo = dirname(__DIR__, 2);
 $successful = false;
-register_shutdown_function(function () use (&$successful) { if (!$successful) { exit(1); } });
+$testRoot = null;
+paymenterTestShutdown($testRoot, $successful);
 $release = paymenterTestApp();
 if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
 $testRoot = $repo.'/.scratch/enom-domain-billing-test-'.bin2hex(random_bytes(5));
@@ -59,6 +60,7 @@ function checkBilling(bool $condition, string $message): void {
 }
 function refusedBilling(callable $action, string $message): void {
     try { $action(); }
+    catch (Illuminate\Database\QueryException|Illuminate\Database\Eloquent\ModelNotFoundException $error) { throw $error; }
     catch (RuntimeException) { checkBilling(true, $message); return; }
     throw new RuntimeException($message);
 }

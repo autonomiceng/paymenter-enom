@@ -181,9 +181,10 @@ class TldResource extends Resource
                         ])
                         ->modalDescription('Prices are recalculated from the last synced Enom cost.')
                         ->action(function (Collection $records, array $data) {
-                            Staff::require(Staff::COSTS);
-                            $records->each(fn (Tld $tld) => self::applyPricing($tld, $data));
-                            \Filament\Notifications\Notification::make()->title('Markup set for '.$records->count().' TLDs.')->success()->send();
+                            Staff::attempt(function () use ($records, $data) {
+                                Staff::require(Staff::COSTS);
+                                \Illuminate\Support\Facades\DB::transaction(fn () => $records->each(fn (Tld $tld) => self::applyPricing($tld, $data)));
+                            }, 'Markup set for '.$records->count().' TLDs.');
                         })
                         ->deselectRecordsAfterCompletion(),
                     BulkAction::make('fixed')->visible($costs)
@@ -193,9 +194,10 @@ class TldResource extends Resource
                             Grid::make(3)->schema(self::fixedInputs()),
                         ])
                         ->action(function (Collection $records, array $data) {
-                            Staff::require(Staff::COSTS);
-                            $records->each(fn (Tld $tld) => self::applyPricing($tld, ['pricing_mode' => 'fixed'] + $data));
-                            \Filament\Notifications\Notification::make()->title('Prices set for '.$records->count().' TLDs.')->success()->send();
+                            Staff::attempt(function () use ($records, $data) {
+                                Staff::require(Staff::COSTS);
+                                \Illuminate\Support\Facades\DB::transaction(fn () => $records->each(fn (Tld $tld) => self::applyPricing($tld, ['pricing_mode' => 'fixed'] + $data)));
+                            }, 'Prices set for '.$records->count().' TLDs.');
                         })
                         ->deselectRecordsAfterCompletion(),
                 ]),

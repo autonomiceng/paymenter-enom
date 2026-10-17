@@ -147,8 +147,7 @@ $ignoreRole = 'Tech';
 $registrantOnly = $manager->request($owner, $domain->id, 'contacts', ['confirmed' => '1', 'contact_type' => 'all', 'contact' => ['first_name' => 'Gdpr'] + $new, '_request_key' => key64('contacts-registrant-only')]);
 verify($operations->execute($registrantOnly->id)->state === 'succeeded', 'Uncollected role blocked an all-roles change.');
 $cached = $domain->fresh()->snapshot;
-knownBug(($cached['contact_roles'] ?? null) === ['registrant'], 'contact-roles-not-merged', 'DomainOperations::mergedSnapshot() keeps contact_status but drops contact_roles from a contacts readback, so the page keeps showing all four roles (and contacts_match over uncollected roles) until a full refresh.');
-$domain->update(['snapshot' => ['contact_roles' => ['registrant']] + $cached]); // As a full refresh would record it.
+verify(($cached['contact_roles'] ?? null) === ['registrant'], 'Contacts readback did not preserve the collected roles.');
 verify($manager->snapshot($owner, $domain->id)['contact_roles'] === ['registrant'] && $manager->snapshot($owner, $domain->id)['contacts_match'] === true, 'Page model did not limit roles to those collected.');
 $ignoreRole = 'Registrant';
 $unconfirmed = $manager->request($owner, $domain->id, 'contacts', ['confirmed' => '1', 'contact_type' => 'all', 'contact' => ['first_name' => 'Ignored'] + $new, '_request_key' => key64('contacts-registrant-ignored')]);

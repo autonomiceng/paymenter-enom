@@ -21,6 +21,20 @@ function rejects(string $action, array $payload, string $name): void
     catch (InvalidArgumentException) { check(true, $name); return; }
     throw new RuntimeException('FAIL: '.$name);
 }
+require dirname(__DIR__, 2).'/Enom/Api/EnomApi.php';
+$apiClass = Paymenter\Extensions\Servers\Enom\Api\EnomApi::class;
+foreach ([Manager::class, $apiClass] as $class) {
+    $method = new ReflectionMethod($class, 'integer');
+    $target = $class === Manager::class ? null : (new ReflectionClass($class))->newInstanceWithoutConstructor();
+    foreach ([(string) PHP_INT_MAX, '000'.PHP_INT_MAX, '0', '000'] as $value) {
+        check($method->invoke($target, $value, PHP_INT_MAX) === (int) $value, 'Integer boundary rejected: '.$class);
+    }
+    foreach ([(string) PHP_INT_MAX.'0', '9223372036854775808', str_repeat('9', 100), '-1'] as $value) {
+        $refused = false;
+        try { $method->invoke($target, $value, PHP_INT_MAX); } catch (InvalidArgumentException) { $refused = true; }
+        check($refused, 'Overflow integer accepted: '.$class.' '.$value);
+    }
+}
 $confirmed = ['confirmed' => '1'];
 $ns = Manager::validatePayload('nameservers', $confirmed + ['nameservers' => "NS1.EXAMPLE.COM\nns2.example.com"]);
 check($ns === ['nameservers' => ['ns1.example.com', 'ns2.example.com']], 'nameservers canonicalized');

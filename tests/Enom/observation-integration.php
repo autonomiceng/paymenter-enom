@@ -5,7 +5,8 @@ require_once dirname(__DIR__).'/paymenter-test-app.php';
 // Never load an installed app or any .env. Run: php tests/Enom/observation-integration.php
 $repo = dirname(__DIR__, 2);
 $successful = false;
-register_shutdown_function(function () use (&$successful) { if (!$successful) { exit(1); } });
+$testRoot = null;
+paymenterTestShutdown($testRoot, $successful);
 $release = paymenterTestApp();
 if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
 $testRoot = $repo.'/.scratch/enom-observation-test-'.bin2hex(random_bytes(5));

@@ -74,6 +74,8 @@ costFree($answer->getContent(), 'Guest check shows Enom costs');
 $heldAnswer = json_decode($guestCheck('held-name.com')->getContent(), true);
 verify($heldAnswer['status'] === 'taken' && !str_contains(json_encode($heldAnswer), '/domains/'.$held->id), 'Guest learned that a name is held in this portal: '.json_encode($heldAnswer));
 verify(json_decode(enomHttp($owner, 'POST', '/domains/check', ['domain' => 'held-name.com'], ['json' => true])->getContent(), true)['status'] === 'yours', 'Owner did not see their own name.');
+$otherHeld = json_decode(enomHttp($free, 'POST', '/domains/check', ['domain' => 'held-name.com'], ['json' => true])->getContent(), true);
+verify($otherHeld['status'] === 'taken' && !isset($otherHeld['url']), 'Another client learned the owner URL.');
 // Complimentary clients see complimentary prices; guests never do.
 verify(json_decode(enomHttp($free, 'POST', '/domains/check', ['domain' => 'gift-idea.com'], ['json' => true])->getContent(), true)['price'] === 'Complimentary', 'Complimentary client saw prices.');
 verify(json_decode($guestCheck('gift-idea.com')->getContent(), true)['price'] === '$12.00', 'Guest saw complimentary pricing.');

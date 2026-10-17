@@ -62,7 +62,7 @@ verify(str_contains(text($empty), 'Find your domain name') && enomDocument($empt
 accessible($empty, 'Empty list');
 $search = ok('/domains/register?name=hello', $owner);
 accessible($search, 'Search');
-verify(str_contains(text($search), 'Test mode: registrations use Enom\'s test system and never go live.'), 'Test environment banner missing on search.');
+verify(str_contains(text($search), 'Test mode: Orders and changes use Enom\'s test environment.'), 'Test environment banner missing on search.');
 $pages['search'] = $search;
 $transfer = ok('/domains/transfer', $owner);
 verify(str_contains(text($transfer), 'Transfer prices') && str_contains(text($transfer), '.com $13.00') && !str_contains(text($transfer), '.org'), 'Transfer page does not list enabled endings with transfer prices.');
@@ -71,12 +71,15 @@ verify(str_contains(text(ok('/domains/help', $owner)), 'domain'), 'Help page is 
 
 // ---------------------------------------------------------------- pending registration awaiting payment
 $fields = enomFormFields($search, '/domains/quote');
-$intentPath = enomRedirectPath(enomHttp($owner, 'POST', '/domains/quote', $fields));
+$quoteResponse = enomHttp($owner, 'POST', '/domains/quote', $fields);
+$intentPath = enomRedirectPath($quoteResponse);
+verify($quoteResponse->getStatusCode() === 302 && is_string($intentPath) && preg_match('#^/domains/order/[a-f0-9]{48}$#D', $intentPath) === 1, 'Quote did not redirect to its order form.');
 $order = ok($intentPath, $owner);
 accessible($order, 'Order');
 verify(enomDocument($order)->query('//textarea[@data-enom-nameservers][@name="nameservers"]')->length === 1 && enomDocument($order)->query('//*[@data-enom-reveal="#enom-ns-custom"]')->length === 1, 'Order page lacks the custom nameserver field.');
 $pages['order'] = $order;
-enomHttp($owner, 'POST', '/domains/order', enomFormFields($order, '/domains/order'));
+$orderResponse = enomHttp($owner, 'POST', '/domains/order', enomFormFields($order, '/domains/order'));
+verify($orderResponse->getStatusCode() === 302 && preg_match('#^/invoices/[0-9]+$#D', enomRedirectPath($orderResponse) ?? '') === 1, 'Order did not redirect to its invoice.');
 $pending = Paymenter\Extensions\Servers\Enom\Models\Domain::where('domain', 'hello.com')->sole();
 $invoice = Invoice::where('user_id', $owner->id)->sole();
 $pendingPage = ok('/domains/'.$pending->id, $owner);
@@ -173,8 +176,8 @@ $hostilePage = ok('/domains/'.$hostile->id, $owner);
 $hostileList = ok('/domains?q='.rawurlencode('<script>alert(9)</script>'), $owner);
 $hostileAll = ok('/domains', $owner);
 $hostileQuote = enomHttp($owner, 'POST', '/domains/quote', ['domain' => 'fresh-order.com'] + $fields);
-verify($hostileQuote->getStatusCode() !== 419, 'form-key-eviction: Enom/Http/FormKeys.php:15-17 keeps at most 100 session form keys and evicts the oldest by insertion. 0.4 adds glue_add/glue_update/glue_delete keys, so each domain page now issues 19 keys; after about five domain pages (e.g. in other tabs) an open search page\'s Register/quote form key is gone and submitting it returns 419.');
-if ($hostileQuote->getStatusCode() === 419) { $hostileQuote = enomHttp($owner, 'POST', '/domains/quote', ['domain' => 'fresh-order.com'] + enomFormFields(ok('/domains/register?name=fresh-order', $owner), '/domains/quote')); }
+verify($hostileQuote->getStatusCode() !== 419, 'An open search form key expired while other pages were opened.');
+verify($hostileQuote->getStatusCode() === 302 && preg_match('#^/domains/order/[a-f0-9]{48}$#D', enomRedirectPath($hostileQuote) ?? '') === 1, 'Quote did not redirect to its order form.');
 $hostileOrder = ok(enomRedirectPath($hostileQuote), $owner);
 serverSetting('dns_tools', '0');
 foreach (['domain page' => $hostilePage, 'list search' => $hostileList, 'list' => $hostileAll, 'order prefill' => $hostileOrder] as $name => $html) {

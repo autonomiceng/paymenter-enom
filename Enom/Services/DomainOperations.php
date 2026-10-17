@@ -63,33 +63,33 @@ class DomainOperations
 
     public function bindInvoiceItem(InvoiceItem $item): ?Operation
     {
-        // This listener runs inside native cron. Never throw and never lock a domain row.
+        // Native cron does not lock a domain row here.
+        if ($item->reference_type !== Service::class) { return null; }
+        $service = $item->reference;
+        if (!$service || $service->product?->server?->extension !== 'Enom') { return null; }
+        $domain = Domain::where('service_id', $service->id)->first();
+        if (!$domain || (int) $domain->user_id !== (int) $service->user_id) { return null; }
+        $key = 'invoice-item:'.$item->id;
+        if ($existing = Operation::where('operation_key', $key)->first()) { return $existing; }
+        if ($item->invoice->status !== Invoice::STATUS_PENDING) { return null; }
+        $intent = OrderIntent::where('service_id', $service->id)->first();
+        $initial = $service->status === Service::STATUS_PENDING && $intent && !$intent->invoice_item_id;
+        $renewal = $service->status === Service::STATUS_ACTIVE && $domain->status === 'active' && $domain->provider_expires_at;
+        $action = $initial ? $intent->action : 'renew';
+        $valid = ($initial || $renewal) && $this->validService($service, $domain)
+            && (int) $item->quantity === 1 && $item->invoice->user_id == $domain->user_id
+            && $item->invoice->currency_code === $service->currency_code
+            && $this->cents($item->price) === $this->cents($initial ? $intent->amount : $service->price);
+        // Managed renewals have their own unreferenced native obligations.
+        // A stray stock-linked renewal item cannot authorize registrar work.
+        if ($domain->billing_managed && !$initial) { $valid = false; }
+        $policy = $domain->billing_managed ? array_replace($domain->renewal_policy ?? [], [
+            'billing_managed' => true, 'dispatch_marker_version' => 1, 'domain' => $domain->domain, 'user_id' => (int) $domain->user_id,
+            'service_id' => (int) $service->id, 'server_id' => (int) $domain->server_id,
+            'authority_generation' => $domain->authority_generation, 'confirmed_revision' => $domain->confirmed_revision,
+            'currency' => $service->currency_code, 'term' => $initial ? max(1, (int) $intent->term) : 1, 'retail_minor' => $this->cents($item->price),
+        ]) : null;
         try {
-            if ($item->reference_type !== Service::class) { return null; }
-            $service = $item->reference;
-            if (!$service || $service->product?->server?->extension !== 'Enom') { return null; }
-            $domain = Domain::where('service_id', $service->id)->first();
-            if (!$domain || (int) $domain->user_id !== (int) $service->user_id) { return null; }
-            $key = 'invoice-item:'.$item->id;
-            if ($existing = Operation::where('operation_key', $key)->first()) { return $existing; }
-            if ($item->invoice->status !== Invoice::STATUS_PENDING) { return null; }
-            $intent = OrderIntent::where('service_id', $service->id)->first();
-            $initial = $service->status === Service::STATUS_PENDING && $intent && !$intent->invoice_item_id;
-            $renewal = $service->status === Service::STATUS_ACTIVE && $domain->status === 'active' && $domain->provider_expires_at;
-            $action = $initial ? $intent->action : 'renew';
-            $valid = ($initial || $renewal) && $this->validService($service, $domain)
-                && (int) $item->quantity === 1 && $item->invoice->user_id == $domain->user_id
-                && $item->invoice->currency_code === $service->currency_code
-                && $this->cents($item->price) === $this->cents($initial ? $intent->amount : $service->price);
-            // Managed renewals have their own unreferenced native obligations.
-            // A stray stock-linked renewal item cannot authorize registrar work.
-            if ($domain->billing_managed && !$initial) { $valid = false; }
-            $policy = $domain->billing_managed ? array_replace($domain->renewal_policy ?? [], [
-                'billing_managed' => true, 'dispatch_marker_version' => 1, 'domain' => $domain->domain, 'user_id' => (int) $domain->user_id,
-                'service_id' => (int) $service->id, 'server_id' => (int) $domain->server_id,
-                'authority_generation' => $domain->authority_generation, 'confirmed_revision' => $domain->confirmed_revision,
-                'currency' => $service->currency_code, 'term' => $initial ? max(1, (int) $intent->term) : 1, 'retail_minor' => $this->cents($item->price),
-            ]) : null;
             $operation = Operation::firstOrCreate(['operation_key' => $key], [
                 'domain_id' => $domain->id, 'service_id' => $service->id,
                 'invoice_id' => $item->invoice_id, 'invoice_item_id' => $item->id,
@@ -101,14 +101,14 @@ class DomainOperations
                 'payload' => $initial ? ($intent->payload ?? []) : [],
                 'policy' => $policy,
             ]);
-            if ($initial) {
-                $intent->update(['invoice_id' => $item->invoice_id, 'invoice_item_id' => $item->id]);
-            }
-            return $operation;
-        } catch (Throwable) {
-            // Intentionally no exception report: it may contain private request/model data.
-            return null;
+        } catch (\Illuminate\Database\UniqueConstraintViolationException $error) {
+            $operation = Operation::where('operation_key', $key)->first();
+            if (!$operation) { throw $error; }
         }
+        if ($initial) {
+            $intent->update(['invoice_id' => $item->invoice_id, 'invoice_item_id' => $item->id]);
+        }
+        return $operation;
     }
 
     public function acceptPaidInvoice(Invoice $invoice): array
@@ -332,7 +332,10 @@ class DomainOperations
                     $admission['allowed'] ? ['provider_command' => $admission['command']] : []);
                 if (!$updated) { return $claimed->fresh(); }
                 $claimed = $updated;
-                if (!$admission['allowed']) { return $this->finish($claimed, 'held', $admission['code']); }
+                if (!$admission['allowed']) {
+                    $state = $claimed->funding_basis === 'paid_invoice' && $admission['code'] === 'grace_renewal_one_year_only' ? 'rejected' : 'held';
+                    return $this->finish($claimed, $state, $admission['code']);
+                }
             } elseif ($claimed->action === 'renew') {
                 $pre = $api->expiry($domain->domain);
                 $expiry = $pre->confirmedExpiry();
@@ -425,8 +428,7 @@ class DomainOperations
                         && $orderExpiry->format('Y-m-d') === $readExpiry->format('Y-m-d');
                 }
                 // A new registration must run for the term that was paid for (registry dates can differ by a day).
-                $termMatches = $claimed->action !== 'register' || ($readExpiry
-                    && abs(\Carbon\CarbonImmutable::instance($readExpiry)->startOfDay()->diffInDays(now()->startOfDay()->addYearsNoOverflow(max(1, (int) $claimed->term)), false)) <= 2);
+                $termMatches = $this->registrationTermMatches($claimed, $readExpiry);
                 if (!$claimed->provider_order_id || !$responseExpiry || $read->status !== 'success' || !$readExpiry
                     || !$expiryMatches || !$termMatches
                     || ($claimed->expected_expires_at && $readExpiry->format('Y-m-d') !== $claimed->expected_expires_at->format('Y-m-d'))) {
@@ -569,6 +571,12 @@ class DomainOperations
         return $names;
     }
 
+    private function registrationTermMatches(Operation $operation, ?\DateTimeImmutable $expiry): bool
+    {
+        return $operation->action !== 'register' || ($expiry
+            && abs(\Carbon\CarbonImmutable::instance($expiry)->startOfDay()->diffInDays(($operation->started_at ?? $operation->created_at)->toImmutable()->startOfDay()->addYearsNoOverflow(max(1, (int) $operation->term)), false)) <= 2);
+    }
+
     public function reconcile(int $operationId): Operation
     {
         $operation = Operation::findOrFail($operationId);
@@ -618,7 +626,7 @@ class DomainOperations
                 || ($operation->action !== 'transfer' && ($normalized['term'] ?? null) !== (int) $operation->term)) { return $operation; }
             $expiryResult = $api->expiry($domain->domain);
             $expiry = $expiryResult->confirmedExpiry();
-            if ($expiryResult->status !== 'success' || !$expiry || ($operation->expected_expires_at && $expiry->format('Y-m-d') !== $operation->expected_expires_at->format('Y-m-d'))) { return $operation; }
+            if ($expiryResult->status !== 'success' || !$expiry || !$this->registrationTermMatches($operation, $expiry) || ($operation->expected_expires_at && $expiry->format('Y-m-d') !== $operation->expected_expires_at->format('Y-m-d'))) { return $operation; }
             $anchor = $this->initialAnchor($operation, $api, $expiry);
             if ($domain->billing_managed && in_array($operation->action, ['register', 'transfer'], true) && !$anchor) { return $operation; }
             $this->recordActualCost($operation, $api, $operation->action !== 'transfer' ? $order : null);
@@ -725,7 +733,8 @@ class DomainOperations
             $limit = $current->funding_basis === 'sponsored' ? ($current->policy['sponsorship']['limit_minor'] ?? null)
                 : ($current->funding_basis === 'complimentary' ? ($current->policy['complimentary_cap_minor'] ?? null) : (($cost['quote']['currency'] ?? null) === $actual['currency'] && RegistrarMoney::decimal($cost['quote']['amount'] ?? null) !== null
                     ? $this->cents($cost['quote']['amount']) : null));
-            if ($actual['state'] === 'confirmed' && is_int($limit) && $actual['currency'] === $current->currency
+            if ($actual['state'] === 'confirmed' && is_int($limit)
+                && (!in_array($current->funding_basis, ['sponsored', 'complimentary'], true) || $actual['currency'] === $current->currency)
                 && $this->cents($actual['amount']) > $limit) {
                 $policy = $domain->renewal_policy ?? [];
                 $policy['automatic_spend_paused'] = true;

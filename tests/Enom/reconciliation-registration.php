@@ -4,6 +4,7 @@ require_once dirname(__DIR__).'/paymenter-test-app.php';
 // Stock native in-memory fixture plus injected provider reads. No installed app or real provider access.
 require __DIR__.'/reconciliation-rejection.php';
 $successful = false;
+Carbon\Carbon::setTestNow('2026-10-13 12:00:00'); Carbon\CarbonImmutable::setTestNow(Carbon\Carbon::now());
 
 use Paymenter\Extensions\Servers\Enom\Api\RegistrarClient;
 use Paymenter\Extensions\Servers\Enom\Api\EnomApi;
@@ -71,6 +72,16 @@ foreach ([['id' => '999999'], ['description' => 'foreign.com'], ['quantity' => n
     verify($candidateReader->reconcile($candidate->id)->state === 'uncertain' && $candidateDomain->fresh()->status === 'registration_pending', 'Unmatched order, missing term or wrong expiry confirmed a registration.');
     verify(finances() == $beforeRows && !in_array('Purchase', $candidateCommands->getArrayCopy(), true), 'Unresolved recovery changed native state or resent Purchase.');
 }
+[$shortDomain, $shortTerm] = fundedRegistration();
+$shortTerm->update(['term' => 2, 'expected_expires_at' => null]);
+[$shortReader, $shortCalls] = registrationReader($shortTerm->fresh(), ['quantity' => '2']);
+$beforeShortTerm = finances();
+verify($shortReader->reconcile($shortTerm->id)->state === 'uncertain' && $shortDomain->fresh()->status === 'registration_pending', 'A short registrar expiry confirmed a two-year registration.');
+verify(finances() == $beforeShortTerm && $shortCalls->getArrayCopy() === ['GetOrderDetail', 'GetDomainExp'], 'Term refusal changed billing or sent a registrar write.');
+Carbon\Carbon::setTestNow(now()->addDays(30)); Carbon\CarbonImmutable::setTestNow(Carbon\Carbon::now());
+[$fullReader] = registrationReader($shortTerm->fresh(), ['quantity' => '2', 'expiry' => '2028-10-13']);
+verify($fullReader->reconcile($shortTerm->id)->state === 'succeeded', 'A full two-year expiry did not confirm the registration.');
+Carbon\Carbon::setTestNow('2026-10-13 12:00:00'); Carbon\CarbonImmutable::setTestNow(Carbon\Carbon::now());
 echo 'Registration reconciliation: '.$checks.' passed; staff-funded unpaid invoice preserved; injected reads only.'.PHP_EOL;
 
 // Actual observed Purchase/getter clocks differ. A completed bound order corroborates the getter.

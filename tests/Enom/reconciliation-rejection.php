@@ -5,7 +5,8 @@ require_once dirname(__DIR__).'/paymenter-test-app.php';
 // Never load an installed app or any .env. Run: php tests/Enom/reconciliation-rejection.php
 $repo = dirname(__DIR__, 2);
 $successful = false;
-register_shutdown_function(function () use (&$successful) { if (!$successful) { exit(1); } });
+$testRoot = null;
+paymenterTestShutdown($testRoot, $successful);
 $release = paymenterTestApp();
 if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
 $testRoot = $repo.'/.scratch/enom-rejection-test-'.bin2hex(random_bytes(5));
@@ -94,7 +95,9 @@ function refundedOnce(Operation $operation, string $before): bool {
     return ($operation->cost['refund']['amount'] ?? null) === '15.00' && ($operation->cost['refund']['to'] ?? null) === 'account_credit'
         && (int) round(((float) $credit - (float) $before) * 100) === 1500 && App\Models\Service::find($operation->service_id)?->status === 'cancelled';
 }
-function creditNow(): string { return (string) (App\Models\Credit::where('currency_code', 'USD')->value('amount') ?? '0'); }
+function creditNow(): string { global $user; return (string) (App\Models\Credit::where('user_id', $user->id)->where('currency_code', 'USD')->value('amount') ?? '0'); }
+App\Models\Credit::create(['user_id' => $other->id, 'currency_code' => 'USD', 'amount' => '900.00']);
+verify(creditNow() === '0', 'Credit lookup included another client.');
 function reconciler(Operation $operation, array $overrides = [], ?Closure $afterRead = null): array {
     $commands = new ArrayObject;
     $data = $overrides + ['id' => $operation->provider_order_id, 'sld' => $operation->domain->sld, 'tld' => 'com', 'header' => '2', 'detail' => '32', 'errcount' => '0'];

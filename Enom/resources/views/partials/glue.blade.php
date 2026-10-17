@@ -72,7 +72,7 @@
                 <div data-field>
                     <label for="enom-glue-host" class="enom-label">Hostname</label>
                     <div class="enom-affix">
-                        <input id="enom-glue-host" name="host" type="text" class="enom-input" required maxlength="63" placeholder="ns1" spellcheck="false" autocapitalize="none" autocomplete="off"
+                        <input id="enom-glue-host" name="host" type="text" class="enom-input" required placeholder="ns1" spellcheck="false" autocapitalize="none" autocomplete="off"
                             pattern="[A-Za-z0-9]([A-Za-z0-9\-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9\-]*[A-Za-z0-9])?)*" data-pattern-message="Use letters, numbers and hyphens, for example ns1."
                             value="{{ $oldPrefix }}" aria-describedby="enom-glue-suffix{{ $addRetry && $errors->has('host') ? ' enom-glue-host-error' : '' }}" @if ($addRetry && $errors->has('host')) aria-invalid="true" @endif>
                         <span class="enom-affix__text" id="enom-glue-suffix">.{{ $name }}</span>

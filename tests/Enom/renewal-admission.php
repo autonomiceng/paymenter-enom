@@ -5,7 +5,8 @@ require_once dirname(__DIR__).'/paymenter-test-app.php';
 // Never load an installed app or any .env. Run: php tests/Enom/renewal-admission.php
 $repo = dirname(__DIR__, 2);
 $successful = false;
-register_shutdown_function(function () use (&$successful) { if (!$successful) { exit(1); } });
+$testRoot = null;
+paymenterTestShutdown($testRoot, $successful);
 $release = paymenterTestApp();
 if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
 $testRoot = $repo.'/.scratch/enom-renewal-admission-test-'.bin2hex(random_bytes(5));
@@ -80,8 +81,13 @@ use Paymenter\Extensions\Servers\Enom\Services\RenewalAdmission;
 
 $configuration = ['uid' => 'offline-account', 'token' => 'synthetic-only', 'sandbox' => true,
     'operations_enabled' => true, 'grace_renewals_enabled' => true];
-$operations = new DomainOperations(null, function (int $id, bool $readOnly = false) use (&$configuration, $server): array {
-    checkAdmission($id === $server->id && !$readOnly, 'Admission used the wrong provider guard.');
+$guardViolations = [];
+$guardCalls = [];
+$actualProviderWrites = 0;
+$readCommands = ['GetDomainInfo', 'GetExtendInfo', 'Check', 'GetExpiredDomains', 'GetRenew', 'GetBalance'];
+$operations = new DomainOperations(null, function (int $id, bool $readOnly = false) use (&$configuration, $server, &$guardViolations, &$guardCalls): array {
+    $guardCalls[] = [$id, $readOnly];
+    if ($id !== $server->id) { $guardViolations[] = [$id, $readOnly]; }
     return $configuration;
 });
 $admission = new RenewalAdmission($operations);
@@ -125,7 +131,9 @@ function admissionDatabase(): string {
     }
     return hash('sha256', serialize($rows));
 }
-$read = function (Operation $operation, array $options = [], ?callable $during = null, bool $invariant = true) use ($admission): array {
+$read = function (Operation $operation, array $options = [], ?callable $during = null, bool $invariant = true) use ($admission, &$guardViolations, &$actualProviderWrites, $readCommands, &$guardCalls): array {
+    $guardViolations = [];
+    $guardCalls = [];
     $domain = $operation->fresh()->domain;
     $name = htmlspecialchars($domain->domain, ENT_XML1);
     $expiry = $options['expiry'] ?? $domain->provider_expires_at->format('Y-m-d');
@@ -133,9 +141,9 @@ $read = function (Operation $operation, array $options = [], ?callable $during =
     $uid = $options['uid'] ?? 'offline-account';
     $id = $options['id'] ?? '456';
     $calls = [];
-    $api = new EnomApi(new RegistrarClient('offline-account', 'synthetic-only', function (string $command, array $parameters) use (&$calls, $name, $expiry, $price, $uid, $id, $options, $during): string {
+    $api = new EnomApi(new RegistrarClient('offline-account', 'synthetic-only', function (string $command, array $parameters) use (&$calls, $name, $expiry, $price, $uid, $id, $options, $during, &$actualProviderWrites, $readCommands): string {
         $calls[] = $command;
-        checkAdmission(in_array($command, ['GetDomainInfo', 'GetExtendInfo', 'Check', 'GetExpiredDomains', 'GetRenew', 'GetBalance'], true), 'Admission attempted a registrar mutation.');
+        if (!in_array($command, $readCommands, true)) { $actualProviderWrites++; }
         if ($during) { $during($command); }
         if (($options['fail'] ?? null) === $command) { throw new RuntimeException('private transport diagnostic'); }
         $body = match ($command) {
@@ -150,11 +158,23 @@ $read = function (Operation $operation, array $options = [], ?callable $during =
     }));
     $before = admissionDatabase();
     $result = $admission->check($operation, $api);
+    checkAdmission($guardViolations === [], 'Admission used the wrong provider guard.');
+    if ($result['allowed']) { checkAdmission(in_array([(int) $operation->domain->server_id, false], $guardCalls, true), 'Allowed admission did not check write permission.'); }
+    checkAdmission(array_diff($calls, $readCommands) === [], 'Admission attempted a registrar mutation.');
     if ($invariant) { checkAdmission($before === admissionDatabase(), 'Admission changed persistent native or extension state.'); }
     checkAdmission(is_bool($result['allowed']) && is_string($result['code']) && array_key_exists('quote', $result) && array_key_exists('command', $result), 'Admission result lacks its executor contract.');
     if (!$result['allowed']) { checkAdmission($result['command'] === null, 'Refused admission supplied a mutation command.'); }
     return [$result, $calls];
 };
+
+// Exact registrar expiry decides ordinary versus grace renewal on the expiry day.
+$expiryDay = $make();
+foreach (['2026-12-01 15:59:59' => 'Extend', '2026-12-01 16:00:00' => 'UpdateExpiredDomains', '2026-12-01 16:00:01' => 'UpdateExpiredDomains'] as $instant => $command) {
+    Carbon\Carbon::setTestNow($instant);
+    [$dayResult] = $read($expiryDay, ['expiry' => '2026-12-01T16:00:00Z']);
+    checkAdmission($dayResult['allowed'] && $dayResult['command'] === $command, 'Expiry-day admission chose the wrong registrar command at '.$instant.': '.$dayResult['code']);
+}
+atAdmission('2026-11-10');
 
 $paid = $make();
 [$result, $calls] = $read($paid);
@@ -220,7 +240,7 @@ foreach ([['price' => '15.01'], ['unknown_price' => true], ['currency' => 'EUR']
 }
 $configuration['grace_renewals_enabled'] = false;
 [$result, $calls] = $read($paid);
-checkAdmission(!$result['allowed'] && $result['code'] === 'grace_capability_unaccepted' && $calls === [], 'Default capability gate allowed unaccepted expired provider behavior.');
+checkAdmission(!$result['allowed'] && $result['code'] === 'grace_capability_unaccepted' && $calls === ['GetDomainInfo', 'GetExtendInfo', 'Check', 'GetExpiredDomains'], 'Default capability gate allowed unaccepted expired provider behavior.');
 $configuration['grace_renewals_enabled'] = true;
 $paid->domain->update(['renewal_policy' => ['enabled' => true, 'automatic_spend_paused' => true]]);
 [$result] = $read($paid);
@@ -275,7 +295,7 @@ $candidate = $make();
 $candidate->update(['policy' => array_replace($candidate->policy, ['original_net_minor' => '1500'])]);
 atAdmission('2026-12-09');
 [$result] = $read($candidate);
-checkAdmission(!$result['allowed'], 'Grace admission accepted untyped captured minor-unit budget.');
+checkAdmission(!$result['allowed'] && $result['code'] === 'grace_original_price_exceeded', 'Grace admission used the wrong refusal for an untyped budget: '.$result['code']);
 $candidate = $make();
 Operation::create(['domain_id' => $candidate->domain_id, 'service_id' => $candidate->service_id,
     'operation_key' => 'admission-held-peer', 'action' => 'renew', 'term' => 1, 'state' => 'held', 'amount' => 15, 'currency' => 'USD']);
@@ -379,8 +399,12 @@ $freeService = Service::create(['user_id' => $user->id, 'product_id' => $product
 $free = Domain::create(['service_id' => $freeService->id, 'user_id' => $user->id, 'server_id' => $server->id, 'domain' => 'admission-free.com', 'sld' => 'admission-free', 'tld' => 'com',
     'provider_domain_id' => '456', 'status' => 'active', 'provider_expires_at' => '2026-12-01', 'billing_managed' => true, 'authority_generation' => 1, 'confirmed_revision' => 1,
     'price_mode' => 'complimentary', 'renewal_policy' => ['enabled' => true]]);
-try { $billing->complimentary($free->id, null, 2); checkAdmission(false, 'The daily run queued a multi-year complimentary renewal.'); }
-catch (RuntimeException) { checkAdmission($free->operations()->doesntExist(), 'Refused complimentary term wrote an operation.'); }
+
+$refused = false;
+try { $billing->complimentary($free->id, null, 2); }
+catch (RuntimeException) { $refused = true; }
+checkAdmission($refused, 'The daily run queued a multi-year complimentary renewal.');
+checkAdmission($free->operations()->doesntExist(), 'Refused complimentary term wrote an operation.');
 $freeRenewal = $billing->complimentary($free->id, $staff, 3);
 checkAdmission($freeRenewal->funding_basis === 'complimentary' && (int) $freeRenewal->term === 3 && $freeRenewal->expected_expires_at->format('Y-m-d') === '2029-12-01'
     && $freeRenewal->policy['term'] === 3 && $freeRenewal->policy['complimentary_cap_minor'] === 2500, 'Staff three-year complimentary renewal shape differs.');
@@ -392,4 +416,4 @@ checkAdmission(!$result['allowed'] && $result['code'] === 'complimentary_cost_ab
 checkAdmission($nativeSchema == DB::select("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'enom_%' ORDER BY name"), 'Admission changed native schema.');
 $successful = true;
 echo json_encode(['checks' => $checks, 'status' => 'passed', 'database' => 'isolated-sqlite-memory', 'provider' => 'injected-read-only-evidence',
-    'actual_provider_writes' => 0, 'native_schema_unchanged' => true], JSON_PRETTY_PRINT).PHP_EOL;
+    'actual_provider_writes' => $actualProviderWrites, 'native_schema_unchanged' => true], JSON_PRETTY_PRINT).PHP_EOL;

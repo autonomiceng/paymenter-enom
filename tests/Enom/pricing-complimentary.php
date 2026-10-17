@@ -50,7 +50,7 @@ $payer = User::create(['email' => 'payer@example.invalid', 'password' => 'synthe
 $guest = User::create(['email' => 'guest@example.invalid', 'password' => 'synthetic']);
 $server = App\Models\Server::create(['name' => 'Pricing Enom', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
 foreach (['uid' => 'offline-account', 'token' => 'offline-token', 'operations_enabled' => '1', 'billing_enabled' => '1', 'complimentary_cost_cap' => '10.00'] as $key => $value) {
-    $server->settings()->create(['key' => $key, 'value' => $value]);
+    $server->settings()->create(['key' => $key, 'value' => $value, 'encrypted' => in_array($key, ['uid', 'token'], true)]);
 }
 $com = Tld::create(['server_id' => $server->id, 'tld' => 'com', 'enabled' => true, 'pricing_mode' => 'fixed', 'register_price' => '12.00', 'renew_price' => '14.00', 'transfer_price' => '13.00']);
 Tld::create(['server_id' => $server->id, 'tld' => 'net', 'enabled' => false, 'pricing_mode' => 'fixed', 'register_price' => '15.00', 'renew_price' => '16.00', 'transfer_price' => '15.00']);
@@ -126,6 +126,16 @@ foreach (['0', '0.00', '-5', 'abc', null] as $bad) {
 }
 refuses(fn () => Pricing::setDomainMode($custom, 'free'), 'Choose who pays', 'Unknown mode was accepted.', [InvalidArgumentException::class]);
 verify($custom->fresh()->price_mode === null && $custom->fresh()->service->price == '11.00', 'Refused mode change altered the domain or service.');
+$failedPrice = pricedDomain($payer, [], '11.00');
+$priceTransactionLevel = null;
+Service::updated(function (Service $service) use ($failedPrice, &$priceTransactionLevel): void {
+    if ($service->id === $failedPrice->service_id) {
+        $priceTransactionLevel = Illuminate\Support\Facades\DB::transactionLevel();
+        throw new RuntimeException('Synthetic price write failure');
+    }
+});
+refuses(fn () => Pricing::setDomainMode($failedPrice, 'custom', '22.00'), 'Synthetic price write failure', 'Price write did not fail.');
+verify($failedPrice->fresh()->service->price == '11.00' && $failedPrice->fresh()->price_mode === null && $priceTransactionLevel > 0, 'Failed custom price change did not roll back both rows.');
 Pricing::setDomainMode($custom, 'custom', '19.99');
 verify($custom->fresh()->price_mode === 'custom' && $custom->fresh()->service->price == '19.99' && Pricing::renewalPrice($custom->fresh()) === '19.99', 'Custom price not applied to the service.');
 Pricing::setDomainMode($custom->fresh(), 'standard');
@@ -168,7 +178,8 @@ verify($order->funding_basis === 'complimentary' && $order->state === 'queued' &
     && ($order->policy['account_fingerprint'] ?? null) === RuntimeGuard::accountFingerprint(['uid' => 'offline-account']), 'Complimentary request shape differs.');
 $jobs = queuedJobs(ExecuteOperation::class);
 verify(count($jobs) === 1 && str_contains(json_decode($jobs[0]->payload, true)['data']['command'], 'i:'.$order->id.';'), 'Complimentary request was not queued for the worker exactly once.');
-verify($orders->place($guest, $quote['intent_id'], $contacts)->id === $domain->id && Operation::count() === Operation::count() && Invoice::count() === $beforeInvoices + 1, 'Replayed placement created more records.');
+$beforeReplayOperations = Operation::count();
+verify($orders->place($guest, $quote['intent_id'], $contacts)->id === $domain->id && Operation::count() === $beforeReplayOperations && Invoice::count() === $beforeInvoices + 1, 'Replayed placement created more records.');
 // Funding: complimentary while the client is; revoked before dispatch is unfunded; after dispatch the outcome stays recordable.
 verify($operations->funded($order), 'Complimentary registration was not funded.');
 $staffDomains->setClientComplimentary($funder, $guest, false);

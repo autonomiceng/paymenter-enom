@@ -5,7 +5,8 @@ require_once dirname(__DIR__).'/paymenter-test-app.php';
 // Never load an installed app or any .env. Run: php tests/Enom/managed-renewal-execution.php
 $repo = dirname(__DIR__, 2);
 $successful = false;
-register_shutdown_function(function () use (&$successful) { if (!$successful) { exit(1); } });
+$testRoot = null;
+paymenterTestShutdown($testRoot, $successful);
 $release = paymenterTestApp();
 if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
 $testRoot = $repo.'/.scratch/enom-managed-execution-test-'.bin2hex(random_bytes(5));
@@ -189,12 +190,12 @@ $make = function (string $kind = 'paid', string $tld = 'com', array $options = [
                 'grace_eligible' => false, 'observed_at' => now()->toIso8601String()]]]);
         return $billing->sponsor($domain->id);
     }
-    $invoice = $billing->invoice($domain->id, $user);
+    $invoice = $billing->invoice($domain->id, $user, null, $options['years'] ?? 1);
     checkExecution($invoice->items->first()->reference_type === null && $invoice->items->first()->reference_id === null,
         'Managed obligation used a native service renewal item.');
     if ($settlement !== '0.00') { ExtensionHelper::addPayment($invoice, 'Stripe', $settlement, transactionId: 'execution-payment-'.$counter); }
     $operation = Operation::where('invoice_id', $invoice->id)->firstOrFail();
-    checkExecution($operation->policy['original_net_minor'] === 1500, 'Native original net price was not captured.');
+    checkExecution($operation->policy['original_net_minor'] === 1500 * ($options['years'] ?? 1), 'Native original net price was not captured.');
     executionNativeDates($domain);
     return $operation;
 };
@@ -265,6 +266,20 @@ checkExecution($result->cost['actual']['state'] === 'unconfirmed', 'Grace quote 
 executionNativeDates($result->domain);
 executionSafeCost($result);
 checkExecution(count($writes) === 1 && $before === executionNativeMoney(), 'Grace reconciliation resent purchase or changed finance.');
+
+$expiredMultiYear = $make(options: ['years' => 2], settlement: '30.00');
+$creditBeforeGrace = (float) (App\Models\Credit::where('user_id', $user->id)->where('currency_code', 'USD')->value('amount') ?? 0);
+$graceLedger = fn () => serialize(array_map(fn ($table) => DB::table($table)->orderBy('id')->get()->toArray(), ['invoices', 'invoice_items', 'invoice_transactions']));
+$moneyBeforeGrace = $graceLedger();
+executionClock('2026-12-09');
+$expiredMultiYearResult = $operations->execute($expiredMultiYear->id);
+checkExecution($expiredMultiYearResult->state === 'rejected' && $expiredMultiYearResult->safe_code === 'grace_renewal_one_year_only'
+    && $writes === [] && !isset($expiredMultiYearResult->policy['dispatch_attempted_at']), 'Expired multi-year paid renewal was not rejected before dispatch.');
+checkExecution(($expiredMultiYearResult->fresh()->cost['refund']['amount'] ?? null) === '30.00'
+    && (float) App\Models\Credit::where('user_id', $user->id)->where('currency_code', 'USD')->value('amount') === $creditBeforeGrace + 30
+    && $moneyBeforeGrace === $graceLedger(), 'Refused multi-year grace renewal did not credit the exact payment while preserving the invoice.');
+$operations->execute($expiredMultiYear->id);
+checkExecution((float) App\Models\Credit::where('user_id', $user->id)->where('currency_code', 'USD')->value('amount') === $creditBeforeGrace + 30, 'Multi-year grace refund repeated.');
 
 $unknown = $make(options: ['unknown_quote' => true, 'unknown_actual' => true]);
 $result = $operations->execute($unknown->id);
@@ -441,7 +456,7 @@ executionNativeDates($next->domain);
 
 // Provider membership cannot be inferred from the successful Purchase acknowledgement.
 foreach (['missing', 'foreign'] as $identity) {
-    executionClock();
+    executionClock('2026-12-01');
     $name = 'initial-'.$identity.'-execution.com';
     $fixtures[$name] = ['expiry' => '2026-12-01', 'price' => '10.00', 'available' => true, 'product_type' => 'Register',
         'domain_id' => $identity === 'missing' ? '' : '988', 'uid' => $identity === 'foreign' ? 'foreign-account' : 'offline-account'];
@@ -466,7 +481,7 @@ foreach (['missing', 'foreign'] as $identity) {
     executionSafeCost($result);
 }
 
-// Initial lifecycle withdrawal stops Purchase/transfer at claim and final dispatch.
+// Confirmed registration cost overrun pauses later automatic spending.
 executionClock('2026-12-01'); // One year before the registered expiry, so the term verifies.
 $name = 'initial-cost-overrun.com';
 $fixtures[$name] = ['expiry' => '2026-12-01', 'price' => '10.00', 'actual' => '13.00', 'available' => true,
@@ -489,6 +504,14 @@ checkExecution(!str_contains($customer, 'actual_cost_exceeded') && !str_contains
     && !str_contains($customer, '13.00'), 'Internal reseller actual-cost incident leaked into customer domain presentation.');
 executionNativeDates($result->domain);
 executionSafeCost($result);
+// Quote limits use the registrar currency even for a different invoice currency.
+$cost = $result->cost;
+unset($cost['actual']);
+$result->update(['currency' => 'EUR', 'cost' => $cost]);
+$result->domain->update(['renewal_policy' => array_replace($result->domain->renewal_policy, ['automatic_spend_paused' => false])]);
+$operations->reconcile($result->id);
+checkExecution($result->domain->fresh()->renewal_policy['automatic_spend_paused'] === true, 'Quote-currency overrun did not pause spending for a different invoice currency.');
+$result->update(['currency' => 'USD']);
 
 // Initial lifecycle withdrawal stops Purchase/transfer at claim and final dispatch.
 foreach (['register', 'transfer'] as $action) {

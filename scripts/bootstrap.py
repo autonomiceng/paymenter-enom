@@ -90,7 +90,9 @@ def main():
     assets_ready = False
     if theme_stamp.is_file() and theme_stamp.read_text() == theme_hash and manifest.is_file():
         assets = json.loads(manifest.read_text())
-        assets_ready = bool(assets) and all((manifest.parent / entry['file']).is_file() for entry in assets.values())
+        assets_ready = bool(assets) and all((manifest.parent / path).is_file()
+                                           for entry in assets.values()
+                                           for path in [entry['file'], *entry.get('css', []), *entry.get('assets', [])])
     if not assets_ready:
         run('npm', 'run', 'build', cwd=APP)
         if not manifest.is_file():

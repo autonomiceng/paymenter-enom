@@ -1,5 +1,9 @@
 <?php
-/** Generate offline public-address inputs without storing real server addresses. */
+/**
+ * Generate synthetic public-address inputs for offline glue validation.
+ * Documentation ranges are rejected by the product, so successful cases need other addresses.
+ * Injected transports record these values without contacting them.
+ */
 function enomPublicIpv4(int $index): string
 {
     return inet_ntop(pack('C4', 11, 0, 0, $index));

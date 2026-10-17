@@ -60,6 +60,7 @@ foreach ([['UID' => 'override'], ['pW' => 'override'], ['ResponseType' => 'text'
 rejects(fn () => $blocked->execute('DeleteRegistration'), 'deletion unavailable');
 // Blank credentials still refuse before cURL; anything else reaching the real transport
 // fails closed here only because the offline harness disables curl_exec.
+check(!function_exists('curl_exec'), 'Run this test with scripts/php-test to disable network access.');
 check((new RegistrarClient('', ''))->execute('GetBalance')->summary() === ['status' => 'unknown', 'code' => 'transport'], 'blank credentials refused before network');
 check((new RegistrarClient('fake', 'fake'))->execute('GetBalance')->status === 'unknown', 'offline harness blocks the real transport');
 $gate = true; $guardedCalls = 0;
@@ -71,6 +72,7 @@ check($guardedCalls === 1 && $guardedResult->summary() === ['status' => 'rejecte
 $complete = '<RRPCode>200</RRPCode><OrderID>12345</OrderID><RegistryExpDate>2027-10-12T21:00:00Z</RegistryExpDate>';
 check(response('Purchase', xml('Purchase', $complete))->status === 'success', 'completed purchase');
 $observedPurchase = file_get_contents(__DIR__.'/provider-purchase-domaininfo.xml');
+if ($observedPurchase === false) { throw new RuntimeException('Purchase fixture could not be read.'); }
 $nestedPurchase = response('Purchase', $observedPurchase);
 check($nestedPurchase->status === 'success', 'observed nested DomainInfo Purchase expiry confirms clean registration acknowledgement');
 check($nestedPurchase->confirmedExpiry()?->format(DATE_ATOM) === '2027-10-12T18:41:09+00:00', 'nested fractional plain date follows documented Pacific fallback');

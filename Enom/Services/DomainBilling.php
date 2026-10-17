@@ -72,7 +72,7 @@ final class DomainBilling
         return $years;
     }
 
-    public function invoice(int $domainId, ?User $actor = null, ?string $nonce = null, int $years = 1): Invoice
+    public function invoice(int $domainId, ?User $actor = null, ?string $nonce = null, ?int $years = null): Invoice
     {
         // Read the owner before the transaction: a plain read inside it would fix an older snapshot.
         $ownerId = Domain::whereKey($domainId)->value('user_id');
@@ -83,7 +83,7 @@ final class DomainBilling
             $service = Service::lockForUpdate()->findOrFail($domain->service_id);
             $domain->setRelation('service', $service);
             if ($actor && (int) $actor->id !== (int) $domain->user_id) { throw new RuntimeException('Domain renewal is unavailable.'); }
-            if ($years < 1 || $years > self::maxRenewalYears($domain)) { throw new RuntimeException('That renewal term would go past the 10-year registry limit.'); }
+            if ($years !== null && ($years < 1 || $years > self::maxRenewalYears($domain))) { throw new RuntimeException('That renewal term would go past the 10-year registry limit.'); }
             $this->assertBinding($domain, $service);
             if (DomainOperations::writesPaused($domain)) { throw new RuntimeException('Domain renewal requires staff review.'); }
             if (!$this->registrarEnabled($domain)) { throw new RuntimeException('Registrar fulfillment is disabled.'); }
@@ -100,7 +100,7 @@ final class DomainBilling
                 if ($existing->safe_code !== 'renewal_cancelled_unpaid') {
                     if ($existingInvoice->status === Invoice::STATUS_CANCELLED) { throw new RuntimeException('Cancelled renewal billing requires review.'); }
                     // An open invoice for this expiry is the renewal; never let a different term look accepted.
-                    if ((int) $existing->term !== $years) { throw new RuntimeException('A renewal invoice for this expiry already exists.'); }
+                    if ($years !== null && (int) $existing->term !== $years) { throw new RuntimeException('A renewal invoice for this expiry already exists.'); }
                     return $existingInvoice;
                 }
                 // Resume creates a new obligation; the retired invoice and
@@ -114,6 +114,7 @@ final class DomainBilling
                 }
                 $key .= ':replacement:'.((clone $cycle)->count());
             }
+            $years ??= 1;
             // Grace can settle an issued obligation; it never creates a new
             // overdue customer debt after the confirmed registration has expired.
             if (now()->toDateString() >= $calendar['expiry']) {

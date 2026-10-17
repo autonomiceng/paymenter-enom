@@ -139,11 +139,17 @@ function enomFormFields(string $html, string $actionPath, int $index = 0): array
     return $fields;
 }
 
-/**
- * Start a new rate-limit minute for a user. Plain `throttle:N,M` routes share one per-user bucket
- * (Laravel keys it by user id only), so long scripted flows reset it between sections.
- */
+/** Start a new rate-limit minute for every route bucket used by this user. */
 function enomResetThrottle(User $user): void
 {
-    app(Illuminate\Cache\RateLimiter::class)->clear(sha1((string) $user->getAuthIdentifier()));
+    $signature = sha1((string) $user->getAuthIdentifier());
+    $limiter = app(Illuminate\Cache\RateLimiter::class);
+    $limiter->clear($signature);
+    foreach (app('router')->getRoutes() as $route) {
+        foreach ($route->gatherMiddleware() as $middleware) {
+            if (!is_string($middleware) || !str_starts_with($middleware, 'throttle:')) { continue; }
+            $parts = explode(',', substr($middleware, strlen('throttle:')));
+            if (isset($parts[2])) { $limiter->clear($parts[2].$signature); }
+        }
+    }
 }

@@ -138,7 +138,7 @@ verify($providerCommands === [], 'Rendering search results called Enom before th
 enomResetThrottle($owner);
 // ---------------------------------------------------------------- JSON check: auth, CSRF, validation, public fields, throttle
 $check = fn ($user, $domain, array $options = []) => enomHttp($user, 'POST', '/domains/check', ['domain' => $domain], ['json' => true] + $options);
-$probe = client('probe@example.com'); // Spreads checks over two clients so the 30-a-minute limit is only reached on purpose.
+$probe = client('probe@example.com'); // Spreads checks over two clients so the 60-a-minute limit is only reached on purpose.
 verify($check($owner, 'hello.com', ['csrf' => true, 'token' => false])->getStatusCode() === 419, 'Check accepted a request without a CSRF token.');
 $ok = $check($owner, 'hello.com', ['csrf' => true]);
 verify($ok->getStatusCode() === 200, 'Check refused a request with the session CSRF token.');
@@ -178,13 +178,12 @@ $codes = [];
 for ($i = 0; $i < 61; $i++) { $codes[] = $check($throttled, 'x')->getStatusCode(); }
 verify(count(array_filter($codes, fn ($code) => $code === 422)) === 60 && end($codes) === 429, 'Check is not limited to 60 requests a minute: '.json_encode(array_count_values($codes)));
 verify($check($owner, 'x')->getStatusCode() === 422, 'One client\'s throttle blocked another client.');
-// Every Enom route uses a plain throttle, so the check, quote and order limits draw from one per-user bucket:
-// two 12-ending searches leave no room to click Register.
+// Availability checks use a separate route bucket from quotes and orders.
 $searcher = client('two-searches@example.com');
 $searchKey = enomFormFields(enomHttp($searcher, 'GET', '/domains/register?name=fresh-name')->getContent(), '/domains/quote');
 for ($i = 0; $i < 24; $i++) { $check($searcher, 'x'); }
 $afterSearches = enomHttp($searcher, 'POST', '/domains/quote', $searchKey);
-verify($afterSearches->getStatusCode() !== 429, 'shared-throttle-bucket: Enom/routes/web.php:16-25 (client) and 31-39 (staff) use throttle:N,1 without a prefix or named limiter, so check (30), quote (20), order (10) and manage limits share one per-user counter; after two 12-ending searches the Register button returns 429.');
+verify($afterSearches->getStatusCode() !== 429, 'Availability checks blocked a later quote.');
 OrderIntent::where('user_id', $searcher->id)->delete();
 
 enomResetThrottle($owner);
@@ -210,7 +209,7 @@ foreach ($refusals as $name => [$path, $message]) {
 enomHttp($owner, 'POST', '/domains/quote', ['domain' => 'flaky.com'] + $quoteFields);
 $flakyText = pageText(enomHttp($owner, 'GET', '/domains/register?name=flaky.com')->getContent());
 verify(!str_contains($flakyText, '7f3a'), 'Quote shows provider error text.');
-verify(str_contains($flakyText, 'We couldn’t check flaky.com right now'), 'quote-provider-error-says-unavailable: DomainOrders::quote() lines 72-76 treat a failed Enom Check like an unavailable name, so DomainController::quote() tells the client "flaky.com isn’t available to register" instead of "We couldn’t check … right now".');
+verify(str_contains($flakyText, 'We couldn’t check flaky.com right now'), 'Provider failure did not show a temporary lookup error.');
 verify(clientRows() == $before, 'Refused quotes created intents or orders.');
 $response = enomHttp($owner, 'POST', '/domains/quote', ['action' => 'renew'] + $quoteFields);
 $intentId = substr((string) enomRedirectPath($response), strlen('/domains/order/'));
@@ -250,7 +249,7 @@ foreach ($nsCases as $typed => $message) {
     $retained = $back ? enomFormFields($retry, '/domains/order') : [];
     $nsHandled = $nsHandled && $back && str_contains(pageText($retry), $message) && ($retained['ns_mode'] ?? null) === 'custom' && ($retained['nameservers'] ?? null) === $typed;
 }
-verify($nsHandled, 'order-nameserver-error-readonly: DomainController::place() line 300 calls reset() on the readonly InputValidationException::$errors, which throws an Error; any invalid custom nameserver list on the order page lands on the search page with "We couldn’t place this order" and the typed details are lost.');
+verify($nsHandled, 'Invalid nameservers lost their field error or typed values.');
 // Missing owner fields are reported together and the typed values come back.
 $response = enomHttp($owner, 'POST', '/domains/order', ['contact' => ['first_name' => 'Updated', 'last_name' => '', 'phone' => '12'] + $fields['contact']] + $fields);
 $retry = enomHttp($owner, 'GET', '/domains/order/'.$intentId)->getContent();

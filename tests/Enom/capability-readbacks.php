@@ -21,14 +21,16 @@ $privacyExists = false;
 $privacyEnabled = false;
 $privacyExpiry = now()->addYear()->format('Y-m-d');
 $privacyReadFails = false;
+$failPrivacyAfterWrite = false;
 $dnssecReadFails = false;
 $commands = [];
 $ds = ['algorithm' => 13, 'digest_type' => 2, 'digest' => str_repeat('A', 64), 'key_tag' => 12345];
-$client = new Paymenter\Extensions\Servers\Enom\Api\RegistrarClient('offline', 'offline', function ($command) use (&$providerDs, &$privacyExists, &$privacyEnabled, &$privacyExpiry, &$privacyReadFails, &$dnssecReadFails, &$commands, $ds, $domain): string {
+$client = new Paymenter\Extensions\Servers\Enom\Api\RegistrarClient('offline', 'offline', function ($command) use (&$providerDs, &$privacyExists, &$privacyEnabled, &$privacyExpiry, &$privacyReadFails, &$failPrivacyAfterWrite, &$dnssecReadFails, &$commands, $ds, $domain): string {
     $commands[] = $command;
     if (($command === 'GetDnsSec' && $dnssecReadFails) || ($command === 'GetWPPSInfo' && $privacyReadFails)) { return '<invalid'; }
     if ($command === 'AddDnsSec') { $providerDs = [$ds]; }
     if ($command === 'DeleteDnsSec') { $providerDs = []; }
+    if ($failPrivacyAfterWrite && in_array($command, ['PurchaseServices', 'RenewServices'], true)) { $privacyReadFails = true; }
     if ($command === 'PurchaseServices') { $privacyExists = true; }
     if ($command === 'RenewServices') { $privacyExpiry = (new DateTimeImmutable($privacyExpiry))->modify('+1 year')->format('Y-m-d'); }
     if ($command === 'EnableServices') { $privacyEnabled = true; }
@@ -92,8 +94,12 @@ $commands = [];
 verify($operations->reconcile($purchase->id)->state === 'succeeded' && !$domain->fresh()->capabilities['privacy_purchase'] && $domain->fresh()->capabilities['privacy_renew'], 'Read-only privacy recovery retained stale purchase capabilities.');
 verify($commands === ['GetOrderDetail', 'GetWPPSInfo'], 'Privacy recovery added a purchase or a full refresh.');
 $invoiceCount = App\Models\Invoice::count();
-try { $orders->privacy($user, $domain->id, 'purchase', hash('sha256', 'duplicate-privacy-purchase')); verify(false, 'Purchased privacy still allowed another purchase invoice.'); }
-catch (RuntimeException) { verify(App\Models\Invoice::count() === $invoiceCount, 'Declined duplicate privacy purchase created an invoice.'); }
+
+$refused = false;
+try { $orders->privacy($user, $domain->id, 'purchase', hash('sha256', 'duplicate-privacy-purchase')); }
+catch (RuntimeException) { $refused = true; }
+verify($refused, 'Purchased privacy still allowed another purchase invoice.');
+verify(App\Models\Invoice::count() === $invoiceCount, 'Declined duplicate privacy purchase created an invoice.');
 $toggle = $operations->enqueueManagement($user, $domain->id, 'privacy_enable', ['confirmed' => true], hash('sha256', 'enable-purchased-privacy'));
 $commands = [];
 verify($operations->execute($toggle->id)->state === 'succeeded' && $domain->fresh()->snapshot['privacy']['enabled'], 'Privacy toggle failed verified snapshot/capability update.');
@@ -104,6 +110,26 @@ $renewal = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id
 $commands = [];
 verify($operations->execute($renewal->id)->state === 'succeeded' && !$domain->fresh()->capabilities['privacy_purchase'] && $domain->fresh()->capabilities['privacy_renew'], 'Privacy renewal left incorrect capabilities.');
 verify($commands === ['GetWPPSInfo', 'RenewServices', 'GetWPPSInfo'], 'Privacy renewal added capability reads.');
+// Paid privacy writes remain uncertain when their expiry cannot be read back.
+foreach (['purchase', 'renew'] as $privacyAction) {
+    $privacyReadFails = false;
+    $privacyExists = $privacyAction === 'renew';
+    $privacyEnabled = false;
+    $privacyExpiry = now()->addYear()->format('Y-m-d');
+    $operations->refreshSnapshot($user, $domain->id);
+    $beforeCapabilities = $domain->fresh()->capabilities;
+    $failedInvoice = $orders->privacy($user, $domain->id, $privacyAction, hash('sha256', 'failed-readback-'.$privacyAction));
+    App\Helpers\ExtensionHelper::addPayment($failedInvoice->id, null, amount: 5, isCreditTransaction: true);
+    $failedPrivacy = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $failedInvoice->id)->sole();
+    $commands = [];
+    $failPrivacyAfterWrite = true;
+    $failedResult = $operations->execute($failedPrivacy->id);
+    $failPrivacyAfterWrite = false;
+    verify($failedResult->state === 'uncertain' && $failedResult->safe_code === 'privacy_expiry_unconfirmed'
+        && $domain->fresh()->capabilities === $beforeCapabilities, 'Failed privacy '.$privacyAction.' readback changed capabilities or confirmed expiry.');
+    verify($commands === ['GetWPPSInfo', $privacyAction === 'purchase' ? 'PurchaseServices' : 'RenewServices', 'GetWPPSInfo'], 'Failed privacy readback sent unexpected commands.');
+    $failedPrivacy->update(['state' => 'rejected']);
+}
 // Missing getter support after a full refresh disables purchase/renew/toggle capabilities.
 $privacyReadFails = true;
 $operations->refreshSnapshot($user, $domain->id);
@@ -112,9 +138,11 @@ verify(!$unavailable['privacy_purchase'] && !$unavailable['privacy_renew'] && !$
 // any active domain with a verified DNSSEC read may add DS records.
 $privacyReadFails = false;
 $providerDs = [];
+$originalEmail = $user->email;
 $user->update(['email' => 'other-owner@example.invalid']);
 $operations->refreshSnapshot($user, $domain->id);
 verify($domain->fresh()->capabilities['dnssec_add'] === true && !$domain->fresh()->capabilities['dnssec_delete'], 'Verified DNSSEC read on an ordinary active domain did not allow DS add.');
+$user->update(['email' => $originalEmail]);
 $dnssecReadFails = true;
 $operations->refreshSnapshot($user, $domain->id);
 verify(!$domain->fresh()->capabilities['dnssec_add'] && !$domain->fresh()->capabilities['dnssec_delete'], 'Unverified DNSSEC read still allowed DS changes.');

@@ -140,7 +140,7 @@ class Catalogue
         if (!$tld->price('register') || !$tld->price('renew') || !$tld->price('transfer')) {
             throw new InvalidArgumentException('Set registration, renewal and transfer prices before enabling .'.$tld->tld.'.');
         }
-        $lock = Cache::lock('enom:enable-tld:'.$tld->tld, 60);
+        $lock = Cache::lock('enom:enable-tld:'.$tld->tld, 120);
         if (!$lock->get()) { throw new RuntimeException('.'.$tld->tld.' is being changed by someone else. Try again in a minute.'); }
         try {
             $this->enableLocked($tld);
@@ -171,15 +171,21 @@ class Catalogue
         if ($fields === null || !RegistryFields::supported($fields)) {
             throw new InvalidArgumentException('.'.$tld->tld.' needs registrant details in a form the order page can\'t collect yet.');
         }
-        $tld->min_years = $min;
-        $tld->max_years = $max;
-        $tld->registry_fields = $fields;
-        if (Tld::query()->where('tld', $tld->tld)->where('enabled', true)->where('id', '!=', $tld->id)->exists()) {
-            throw new InvalidArgumentException('.'.$tld->tld.' is already sold through another Enom server.');
-        }
-        $tld->enabled = true;
-        $tld->save();
-        $this->ensureProduct((int) $tld->server_id);
+        DB::transaction(function () use ($tld, $min, $max, $fields) {
+            $rows = Tld::query()->where('tld', $tld->tld)->orderBy('id')->lockForUpdate()->get();
+            $current = $rows->firstWhere('id', $tld->id);
+            if (!$current || (int) $current->server_id !== (int) $tld->server_id) {
+                throw new RuntimeException('This ending changed. Reload the page and try again.');
+            }
+            if ($rows->contains(fn (Tld $row) => $row->id !== $current->id && $row->enabled)) {
+                throw new InvalidArgumentException('.'.$tld->tld.' is already sold through another Enom server.');
+            }
+            if (!$current->price('register') || !$current->price('renew') || !$current->price('transfer')) {
+                throw new InvalidArgumentException('Set registration, renewal and transfer prices before enabling .'.$tld->tld.'.');
+            }
+            $current->fill(['min_years' => $min, 'max_years' => $max, 'registry_fields' => $fields, 'enabled' => true])->save();
+            $this->ensureProduct((int) $current->server_id);
+        });
     }
 
     /** Registry details the order form collects for this ending. */

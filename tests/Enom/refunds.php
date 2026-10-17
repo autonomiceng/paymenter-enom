@@ -216,6 +216,14 @@ $withExecution = $held(); $withExecution->update(['cost' => ['execution' => ['co
 verify(!$refunds->canRefundHeld($withOrder->fresh()) && !$refunds->canRefundHeld($withExecution->fresh()), 'Held request with provider evidence was refundable.');
 // Claimed by the managed worker (dispatch marker) but never sent: refundable even though it started.
 verify($refunds->canRefundHeld($held(['policy' => ['dispatch_marker_version' => 1], 'started_at' => now()])), 'Claimed-but-unsent managed request was not refundable.');
+// Invalid paid evidence must leave the held request open and leave the ledger unchanged.
+foreach ([['payments' => []], ['invoice_currency' => 'EUR'], ['price' => '25.00', 'payments' => ['25.00']]] as $invalidPayment) {
+    $ineligible = $held($invalidPayment);
+    $beforeRefund = tableRows(['enom_domains', 'enom_operations', 'services', 'credits', 'invoices', 'invoice_items', 'invoice_transactions']);
+    refuses(fn () => $refunds->refundHeld($refunder, $ineligible->id, 'Customer asked to cancel'), '', 'Ineligible held request was refunded.');
+    verify(tableRows(['enom_domains', 'enom_operations', 'services', 'credits', 'invoices', 'invoice_items', 'invoice_transactions']) == $beforeRefund,
+        'Ineligible refund closed the held request or changed its ledger.');
+}
 // Permissions: admin.enom.manage and admin.invoices.update together.
 $before = tableRows(['enom_operations', 'credits']);
 refuses(fn () => $refunds->refundHeld($manager, $candidate->id, 'Customer asked to cancel'), 'permission', 'Manage-only staff refunded.', [AuthorizationException::class]);

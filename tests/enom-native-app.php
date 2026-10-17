@@ -8,7 +8,8 @@ require_once __DIR__.'/paymenter-test-app.php';
 
 $repo = dirname(__DIR__);
 $successful = false;
-register_shutdown_function(function () use (&$successful) { if (!$successful) { exit(1); } });
+$testRoot = null;
+paymenterTestShutdown($testRoot, $successful);
 $release = paymenterTestApp();
 $testRoot = $repo.'/.scratch/enom-native-'.($enomTestLabel ?? 'test').'-'.bin2hex(random_bytes(5));
 mkdir($testRoot, 0700, true);

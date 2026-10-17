@@ -30,15 +30,18 @@ class TestRunnerTests(unittest.TestCase):
                         runtime.write_bytes(b'<?php // changed by synthetic command')
                     raise subprocess.TimeoutExpired(argv, 180, output=stdout, stderr=stderr)
 
+                (root/'output').mkdir()
                 with mock.patch.object(runner, 'ROOT', root), \
                      mock.patch.object(runner.sys, 'argv', ['test.py', '--suite', 'provider']), \
                      mock.patch.object(runner.shutil, 'which', return_value='/synthetic/php'), \
                      mock.patch.object(runner.subprocess, 'run', side_effect=timeout) as run, \
                      mock.patch.object(runner.os, 'umask'), \
-                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                     mock.patch.object(runner.tempfile, 'mkdtemp', return_value=str(root/'output')),  \
+                     contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(runner.main(), 1)
                 run.assert_called_once()
-                receipts = list((root/'.scratch').glob('tests-*/receipt.json'))
+                receipts = [Path(json.loads(output.getvalue().splitlines()[-1])['receipt'])]
+                self.assertFalse((root/'.scratch').exists())
                 self.assertEqual(len(receipts), 1)
                 receipt = json.loads(receipts[0].read_text())
                 self.assertFalse(receipt['complete'])

@@ -64,41 +64,6 @@ final class DomainPresentation
         };
     }
 
-    public static function stateMeaning(?string $state, ?string $outcome = null, ?string $action = null): string
-    {
-        if ($state === 'rejected' && $outcome === 'cancelled_unpaid') { return 'Renewal was turned off before this invoice was paid, so the invoice was cancelled.'; }
-        if ($state === 'succeeded' && $outcome === 'acknowledged') { return 'The registrar accepted the sync. The code is not shown or emailed here.'; }
-        if ($state === 'rejected' && in_array($action, ['register', 'transfer'], true)) { return 'The registrar declined this request. Contact support about your payment.'; }
-        return match ($state) {
-            'awaiting_payment' => 'Pay the linked invoice in full to start this request.',
-            'queued' => 'Not sent to the registrar yet.',
-            'running' => 'Being sent to the registrar now.',
-            'pending' => 'The registrar has the request but has not finished it. Transfers can take several days.',
-            'uncertain' => 'We could not confirm the result. Do not submit it again. Support will check it.',
-            'held' => 'Not sent to the registrar. Support will review it.',
-            'succeeded' => 'The registrar confirmed this request.',
-            'rejected' => 'This request was declined and was not completed.',
-            'disposed' => 'Support closed this request after review. Changes to this domain are paused.',
-            default => 'Support can explain this status.',
-        };
-    }
-
-    public static function staffStateMeaning(?string $state): string
-    {
-        return match ($state) {
-            'awaiting_payment' => 'Waiting for its invoice to be paid in full. Nothing has gone to the registrar.',
-            'queued' => 'Waiting to be sent. Nothing has gone to the registrar yet.',
-            'running' => 'Claimed by the worker. Reconcile only after its lease expires.',
-            'pending' => 'Sent. The registrar has not finished it. Reconcile reads the order without resending.',
-            'uncertain' => 'The outcome is unknown after a send or an interruption. Reconcile or record provider facts. Never resend.',
-            'held' => 'Never sent to the registrar. It can resume only if it passes the checks below.',
-            'succeeded' => 'Confirmed by registrar evidence.',
-            'rejected' => 'Declined or retired. It will not be sent.',
-            'disposed' => 'Closed after staff review. Domain writes and renewal billing stay paused.',
-            default => 'Unrecognised state. Review the request record.',
-        };
-    }
-
     public static function action(?string $action): string
     {
         return match ($action) {

@@ -5,7 +5,8 @@ require_once dirname(__DIR__).'/paymenter-test-app.php';
 // Never load an installed app or any .env. Run: php tests/Enom/domain-administration.php
 $repo = dirname(__DIR__, 2);
 $successful = false;
-register_shutdown_function(function () use (&$successful) { if (!$successful) { exit(1); } });
+$testRoot = null;
+paymenterTestShutdown($testRoot, $successful);
 $release = paymenterTestApp();
 if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
 $testRoot = $repo.'/.scratch/enom-domain-administration-test-'.bin2hex(random_bytes(5));
@@ -170,8 +171,18 @@ $admin->saveSponsorship($staff, $zero->id, $sponsorship);
 $approval = $zero->fresh()->sponsorship;
 checkBilling($approval['approved_by'] === $staff->id && $approval['limit_minor'] === 2025 && $approval['standing'] === false, 'Approval actor/decimal budget/single-cycle scope is incorrect.');
 checkBilling(unchangedFinance() === $before, 'Saving sponsorship purchased a renewal or fabricated funding.');
+$zero->update(['renewal_policy' => array_replace($zero->fresh()->renewal_policy, ['staff_disposition_hold' => true])]);
+rejectedAdmin(fn () => $admin->saveSponsorship($staff, $zero->id, $sponsorship), 'Paused domain accepted an enabled sponsorship.');
+$admin->saveSponsorship($staff, $zero->id, array_replace($sponsorship, ['enabled' => '0']));
+checkBilling($zero->fresh()->sponsorship['enabled'] === false, 'Paused domain refused to disable sponsorship.');
+$zero->update(['renewal_policy' => array_replace($zero->fresh()->renewal_policy, ['staff_disposition_hold' => false])]);
+$admin->saveSponsorship($staff, $zero->id, $sponsorship);
 rejectedAdmin(fn () => $admin->saveSponsorship($costStaff, $zero->id, $sponsorship), 'Costs permission authorized funding.');
-rejectedAdmin(fn () => $admin->saveSponsorship($staff, $domain->id, $sponsorship), 'Positive customer price admitted zero-price sponsorship.');
+$priced = $make('priced-sponsorship');
+$admin->savePolicy($staff, $priced->id, $policy);
+checkBilling($priced->operations()->doesntExist(), 'Price guard fixture has an outstanding request.');
+rejectedAdmin(fn () => $admin->saveSponsorship($staff, $priced->id, $sponsorship), 'Positive customer price admitted zero-price sponsorship.');
+checkBilling($priced->fresh()->sponsorship === null, 'Refused sponsorship persisted an approval.');
 rejectedAdmin(fn () => $admin->saveSponsorship($staff, $zero->id, array_replace($sponsorship, ['limit_amount' => '2.005'])), 'Fractional minor-unit sponsorship admitted.');
 rejectedAdmin(fn () => $admin->saveSponsorship($staff, $zero->id, array_replace($sponsorship, ['term' => '2'])), 'Unsupported sponsored term admitted.');
 $costOperation = Operation::create(['domain_id' => $zero->id, 'service_id' => $zero->service_id, 'operation_key' => 'cost-evidence',
@@ -229,4 +240,4 @@ checkBilling(Paymenter\Extensions\Servers\Enom\Services\DomainAdministration::cu
 checkBilling(json_encode(DB::select("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'enom_%' ORDER BY name")) === json_encode($nativeSchema), 'Administration changed native schema.');
 fwrite(STDOUT, "Domain administration native admission: {$checks} passed\n");
 $successful = true;
-(new Illuminate\Filesystem\Filesystem)->deleteDirectory($testRoot);
+paymenterRemoveTestRoot($testRoot);

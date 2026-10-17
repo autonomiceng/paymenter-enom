@@ -53,8 +53,7 @@ def main():
             interpreter = 'node' if name.endswith('.cjs') else str(PHP_TEST)
             commands.append((suite, [interpreter, 'tests/Enom/' + name]))
     os.umask(0o077)
-    (ROOT/'.scratch').mkdir(exist_ok=True)
-    output = Path(tempfile.mkdtemp(prefix='tests-', dir=ROOT/'.scratch'))
+    output = Path(tempfile.mkdtemp(prefix='enom-tests-'))
     runtime_before = hashes(ROOT/'Enom')
     results = []
     for index, (suite, argv) in enumerate(commands):

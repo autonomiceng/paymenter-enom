@@ -39,14 +39,10 @@ final class RenewalAdmission
             }
             $binding = $this->binding($operation, $domain);
             $clock = now()->toImmutable();
-            $expired = $domain->provider_expires_at->lessThanOrEqualTo($clock);
             // Complimentary renewals have the same quote-under-limit rule as legacy sponsorship.
             $sponsored = in_array($operation->funding_basis, ['sponsored', 'complimentary'], true);
             if ($domain->renewal_policy['automatic_spend_paused'] ?? false) {
                 return $this->refuse('automatic_spend_paused');
-            }
-            if ($expired && !filter_var($configuration['grace_renewals_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
-                return $this->refuse('grace_capability_unaccepted');
             }
             $guard = function () use ($domain, $account): void {
                 $current = $this->operations->providerConfiguration((int) $domain->server_id);
@@ -66,6 +62,12 @@ final class RenewalAdmission
                 }
             }, $clock);
             if ($code = $this->membershipRefusal($evidence['info'], $domain, $configuration['uid'])) { return $this->refuse($code); }
+            $expiry = $evidence['info']->confirmedExpiry();
+            if (!$expiry) { return $this->refuse('renewal_state_unconfirmed'); }
+            $expired = $expiry <= $clock;
+            if ($expired && !filter_var($configuration['grace_renewals_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+                return $this->refuse('grace_capability_unaccepted');
+            }
             $info = EnomApi::normalize('renewalInfo', $evidence['extend']);
             if (($info['status'] ?? null) !== 'success' || !is_int($info['max_extension'] ?? null) || $info['max_extension'] < 1
                 || !is_bool($info['registrar_hold'] ?? null)

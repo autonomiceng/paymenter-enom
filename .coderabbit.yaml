@@ -23,7 +23,11 @@ reviews:
         This is a public open-source repository. Flag anything that should not be public:
         credentials, tokens, private keys, real hostnames, IP addresses, server paths,
         database names, personal email addresses, or customer data. Examples and test data
-        must use example.com, documentation IP ranges, and placeholder values.
+        must use reserved names from RFC 2606/6761 (example.com, example.net, example.org,
+        .invalid, .test, .example) for emails and hosts. Clearly synthetic labels are allowed
+        when a test exercises a specific real ending. Use documentation IP ranges, except
+        when validation requires an address the product accepts as public; see
+        tests/public-addresses.php. Use placeholder values for other identifiers.
     - path: "Enom/**"
       instructions: |
         Paymenter domain registrar extension (Laravel/PHP) for the Enom reseller API. Check

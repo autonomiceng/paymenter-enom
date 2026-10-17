@@ -183,8 +183,9 @@ class DomainResource extends Resource
     /** @return list<int> clients who hold a complimentary grant */
     public static function complimentaryClientIds(): array
     {
-        return User::query()->whereHas('properties', fn (Builder $query) => $query->where('key', Pricing::CLIENT_PROPERTY))
-            ->pluck('id')->map(fn ($id) => (int) $id)->filter(fn (int $id) => Labels::clientComplimentary(User::find($id)))->values()->all();
+        $ids = User::query()->whereHas('properties', fn (Builder $query) => $query->where('key', Pricing::CLIENT_PROPERTY))->pluck('id');
+        return User::whereIn('id', $ids)->get()->filter(fn (User $user) => Labels::clientComplimentary($user))
+            ->map(fn (User $user) => (int) $user->id)->values()->all();
     }
 
     public static function getGloballySearchableAttributes(): array

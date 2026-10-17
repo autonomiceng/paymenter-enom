@@ -32,26 +32,9 @@ class Refunds
             $current = Operation::whereKey($operation->id)->lockForUpdate()->firstOrFail();
             if ($current->state !== 'rejected' || $current->funding_basis !== 'paid_invoice'
                 || !in_array($current->action, self::REFUNDABLE, true) || isset($current->cost['refund'])) { return null; }
-            $invoice = Invoice::with('items', 'transactions')->find($current->invoice_id);
-            $item = $invoice?->items->firstWhere('id', $current->invoice_item_id);
-            $amount = RegistrarMoney::decimal((string) $current->amount);
-            // Only money actually received for this exact line comes back: one unit, same currency,
-            // and successful positive payments covering the whole invoice.
-            $received = 0;
-            foreach ($invoice?->transactions ?? [] as $transaction) {
-                if ($transaction->status === \App\Enums\InvoiceTransactionStatus::Succeeded && self::cents($transaction->amount) > 0) { $received += self::cents($transaction->amount); }
-            }
-            if (!$invoice || !$item || (int) $invoice->user_id !== (int) $ownerId || $invoice->status !== Invoice::STATUS_PAID
-                || $invoice->currency_code !== $current->currency || (int) $item->quantity !== 1
-                || self::cents($invoice->remaining) !== 0 || $amount === null || self::cents($amount) <= 0
-                || self::cents($item->price) !== self::cents($amount)
-                || $received < self::cents($invoice->total) || $received < self::cents($amount)) { return null; }
-            // The line must belong to this request: registrations/transfers reference their service, managed
-            // renewals and ID Protect lines reference nothing; the domain must still own that service.
-            $serviceLine = in_array($current->action, ['register', 'transfer'], true);
-            if ($serviceLine ? ($item->reference_type !== Service::class || (int) $item->reference_id !== (int) $current->service_id)
-                    : ($item->reference_type !== null && !($item->reference_type === Service::class && (int) $item->reference_id === (int) $current->service_id))
-                || (int) Domain::whereKey($current->domain_id)->value('service_id') !== (int) $current->service_id) { return null; }
+            $payment = $this->refundablePayment($current, $ownerId);
+            if (!$payment) { return null; }
+            ['invoice' => $invoice, 'amount' => $amount] = $payment;
             $credit = Credit::where('user_id', $ownerId)->where('currency_code', $invoice->currency_code)->lockForUpdate()->first()
                 ?? new Credit(['user_id' => $ownerId, 'currency_code' => $invoice->currency_code, 'amount' => '0.00']);
             $total = self::cents($credit->amount) + self::cents($amount);
@@ -122,6 +105,7 @@ class Refunds
             Domain::whereKey($domainId)->lockForUpdate()->first();
             $current = Operation::whereKey($operationId)->lockForUpdate()->firstOrFail();
             if (!$this->canRefundHeld($current)) { throw new RuntimeException('Only a paid request that was never sent to Enom can be refunded here.'); }
+            if (!$this->refundablePayment($current, $ownerId)) { throw new RuntimeException('No eligible paid amount was found. The request is still held.'); }
             $current->update(['state' => 'rejected', 'safe_code' => 'refunded_by_staff', 'completed_at' => now(),
                 'funding_reason' => mb_substr('Refunded by '.$staff->name.': '.$reason, 0, 500)]);
             if (in_array($current->action, ['register', 'transfer'], true)) {
@@ -131,6 +115,31 @@ class Refunds
             return $current;
         });
         return $this->creditRejected($operation) ?? throw new RuntimeException('The request was closed, but no paid amount was found to refund.');
+    }
+
+    private function refundablePayment(Operation $current, mixed $ownerId): ?array
+    {
+        $invoice = Invoice::with('items', 'transactions')->find($current->invoice_id);
+        $item = $invoice?->items->firstWhere('id', $current->invoice_item_id);
+        $amount = RegistrarMoney::decimal((string) $current->amount);
+        // Only money actually received for this exact line comes back: one unit, same currency,
+        // and successful positive payments covering the whole invoice.
+        $received = 0;
+        foreach ($invoice?->transactions ?? [] as $transaction) {
+            if ($transaction->status === \App\Enums\InvoiceTransactionStatus::Succeeded && self::cents($transaction->amount) > 0) { $received += self::cents($transaction->amount); }
+        }
+        if (!$invoice || !$item || (int) $invoice->user_id !== (int) $ownerId || $invoice->status !== Invoice::STATUS_PAID
+            || $invoice->currency_code !== $current->currency || (int) $item->quantity !== 1
+            || self::cents($invoice->remaining) !== 0 || $amount === null || self::cents($amount) <= 0
+            || self::cents($item->price) !== self::cents($amount)
+            || $received < self::cents($invoice->total) || $received < self::cents($amount)) { return null; }
+        // The line must belong to this request: registrations/transfers reference their service, managed
+        // renewals and ID Protect lines reference nothing; the domain must still own that service.
+        $serviceLine = in_array($current->action, ['register', 'transfer'], true);
+        if ($serviceLine ? ($item->reference_type !== Service::class || (int) $item->reference_id !== (int) $current->service_id)
+                : ($item->reference_type !== null && !($item->reference_type === Service::class && (int) $item->reference_id === (int) $current->service_id))
+            || (int) Domain::whereKey($current->domain_id)->value('service_id') !== (int) $current->service_id) { return null; }
+        return ['invoice' => $invoice, 'amount' => $amount];
     }
 
     private static function cents(mixed $amount): int { return (int) round(((float) $amount) * 100); }

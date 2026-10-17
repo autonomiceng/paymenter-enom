@@ -61,6 +61,7 @@ class ListTlds extends ListRecords
                 ->action(function (array $data) {
                     Staff::require();
                     $server = self::serverId($data);
+                    if ($server === null) { \Filament\Notifications\Notification::make()->title('Choose a server.')->danger()->send(); return; }
                     Staff::attempt(fn () => 'Costs synced for '.app(Catalogue::class)->syncCosts($server).' TLDs.', 'Costs synced.');
                 }),
             Action::make('import')
@@ -75,6 +76,7 @@ class ListTlds extends ListRecords
                 ->action(function (array $data) {
                     Staff::require();
                     $server = self::serverId($data);
+                    if ($server === null) { \Filament\Notifications\Notification::make()->title('Choose a server.')->danger()->send(); return; }
                     Staff::attempt(function () use ($server) {
                         $result = app(Catalogue::class)->import($server);
                         return $result['added'] > 0

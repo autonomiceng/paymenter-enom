@@ -23,8 +23,8 @@ use Paymenter\Extensions\Servers\Enom\Services\StaffDomains;
 
 // The harness boots the extension after the app, so its named routes need the lookup Paymenter's boot order provides.
 app('router')->getRoutes()->refreshNameLookups();
-function today(string $day): void { Carbon\Carbon::setTestNow($day.' 09:00:00'); CarbonImmutable::setTestNow(Carbon\Carbon::now()); }
-today('2026-10-14');
+function setReminderTestDate(string $day): void { Carbon\Carbon::setTestNow($day.' 09:00:00'); CarbonImmutable::setTestNow(Carbon\Carbon::now()); }
+setReminderTestDate('2026-10-14');
 $operations = new DomainOperations(null, fn () => throw new RuntimeException('Reminders must not contact Enom.'));
 $app->instance(DomainOperations::class, $operations);
 $reminders = new Reminders;
@@ -74,10 +74,10 @@ $note = latestNote();
 verify($note->title === $off->domain.' expires in 60 days' && str_contains($note->body, 'Renewal is off') && $note->url === route('enom.domains.show', $off->id), 'Renewal-off wording differs: '.$note->title.' / '.$note->body);
 verify(sent($off) === [$off->provider_expires_at->toDateString() => [60]], 'Sent offset not recorded against the expiry.');
 verify(!$reminders->remind($off->fresh()) && noteCount() === $before + 1, 'Same reminder sent twice on its day.');
-today('2026-10-15');
+setReminderTestDate('2026-10-15');
 verify(!$reminders->remind($off->fresh()), 'Already-sent reminder repeated during catch-up.');
 // A missed reminder is caught up within two days, not three.
-today('2026-10-14');
+setReminderTestDate('2026-10-14');
 $missedOne = expiring(59); $missedTwo = expiring(58); $missedThree = expiring(57);
 verify($reminders->remind($missedOne) && $reminders->remind($missedTwo) && !$reminders->remind($missedThree), 'Catch-up window differs from two days.');
 verify(sent($missedTwo)[$missedTwo->provider_expires_at->toDateString()] === [60], 'Catch-up recorded the wrong offset.');
@@ -93,9 +93,9 @@ verify(!$reminders->remind(expiring(-6, false, ['status' => 'expired'])), 'A rem
 $cycle = expiring(30);
 $reminders->remind($cycle);
 $cycle->update(['provider_expires_at' => now()->addDays(30 + 365)->toDateString()]);
-today(CarbonImmutable::parse($cycle->provider_expires_at)->subDays(30)->toDateString());
+setReminderTestDate(CarbonImmutable::parse($cycle->provider_expires_at)->subDays(30)->toDateString());
 verify($reminders->remind($cycle->fresh()) && count(sent($cycle)) === 2, 'The next expiry cycle did not get its own reminder.');
-today('2026-10-14');
+setReminderTestDate('2026-10-14');
 
 // ---------------------------------------------------------------- state-dependent content
 // Renewal on with nothing to pay: only the 30-day reminder; complimentary wording says so.
@@ -142,9 +142,9 @@ $failing = expiring(30);
 refuses(fn () => $reminders->remind($failing), '', 'A failed send was reported as sent.', [Throwable::class]);
 verify(sent($failing)[$failing->provider_expires_at->toDateString()] === [], 'Failed send kept its claim.');
 NotificationTemplate::where('key', 'enom_domain_expiring')->update(['in_app_title' => '{{ $domain }} expires in {{ $days }} {{ $days === 1 ? \'day\' : \'days\' }}', 'mail_enabled' => 'choice_on']);
-today('2026-10-15');
+setReminderTestDate('2026-10-15');
 verify($reminders->remind($failing->fresh()) && sent($failing)[$failing->provider_expires_at->toDateString()] === [30], 'Released reminder was not sent on the next run.');
-today('2026-10-14');
+setReminderTestDate('2026-10-14');
 // Client preferences are respected (in-app off: no notification, but the reminder counts as sent).
 $prefers = User::create(['email' => 'quiet@example.invalid', 'password' => 'synthetic']);
 NotificationPreference::create(['user_id' => $prefers->id, 'notification_template_id' => NotificationTemplate::where('key', 'enom_domain_expiring')->value('id'), 'mail_enabled' => false, 'in_app_enabled' => false]);
@@ -167,7 +167,7 @@ verify($reminders->sweep() >= 2 && sent($far) === [$far->provider_expires_at->to
 // The setup page count: reminders whose send day falls in the last 30 days.
 $statsBefore = Reminders::stats();
 verify($statsBefore > 0 && app(StaffDomains::class)->reminderStats() === $statsBefore, 'Reminder count unavailable to staff.');
-today('2027-02-01');
+setReminderTestDate('2027-02-01');
 verify(Reminders::stats() < $statsBefore, 'Reminder count did not age out.');
 
 echo 'Reminders: '.$checks.' passed; known runtime bugs: '.($knownBugs ? implode(', ', $knownBugs) : 'none').'; native templates and notifications; SQLite in memory.'.PHP_EOL;

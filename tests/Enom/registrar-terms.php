@@ -205,6 +205,9 @@ $renewalItem = $renewal->items->sole();
 $renewalOperation = Operation::where('invoice_id', $renewal->id)->sole();
 verify((float) $renewal->total === 28.0 && $renewalItem->description === 'Renew paid-years.com (2 years; expires 2029-10-14)', 'Two-year renewal invoice differs: '.$renewalItem->description);
 verify((int) $renewalOperation->term === 2 && $renewalOperation->expected_expires_at->format('Y-m-d') === '2031-10-14' && $renewalOperation->policy['retail_minor'] === 2800, 'Two-year renewal obligation differs.');
+$reuseRows = tableRows(['invoices', 'invoice_items', 'enom_operations']);
+verify($billing->invoice($active->id)->id === $renewal->id, 'Scheduled billing did not reuse the open multi-year invoice.');
+verify(tableRows(['invoices', 'invoice_items', 'enom_operations']) == $reuseRows, 'Scheduled reuse changed the existing obligation.');
 $open = $orders->renewalOptions($client, $active->id)['open_invoice'];
 verify($open === ['id' => (int) $renewal->id, 'years' => 2, 'url' => route('invoices.show', $renewal)], 'Open renewal invoice not offered: '.json_encode($open));
 verify($orders->renew($client, $active->id, null, 2)->id === $renewal->id, 'Same-term renewal did not return the open invoice.');
@@ -221,5 +224,33 @@ refuses(fn () => $orders->renew($client, $legacy->id, null, 2), 'one year at a t
 refuses(fn () => $staffDomains->renewNow($funder, $active->id, 8), '10-year', 'Staff renewed past the ceiling.', [InvalidArgumentException::class]);
 verify($staffDomains->renewalYears($active->id) === range(1, 7), 'Staff renewal terms differ.');
 
+// A domain claimed after quoting produces a field error and rolls back new billing rows.
+$collisionQuote = $orders->quote($client, 'claimed-after-quote.com');
+$collisionService = $legacyService->replicate(); $collisionService->save();
+Domain::create(['service_id' => $collisionService->id, 'user_id' => $client->id, 'server_id' => $server->id,
+    'domain' => 'claimed-after-quote.com', 'sld' => 'claimed-after-quote', 'tld' => 'com', 'status' => 'active']);
+$beforeCollision = tableRows(['services', 'orders', 'invoices', 'invoice_items', 'enom_order_intents', 'enom_domains']);
+refuses(fn () => $orders->place($client, $collisionQuote['intent_id'], $contacts), 'already has a portal record', 'Existing domain did not return a field error.', [Paymenter\Extensions\Servers\Enom\Services\InputValidationException::class]);
+verify(tableRows(['services', 'orders', 'invoices', 'invoice_items', 'enom_order_intents', 'enom_domains']) == $beforeCollision, 'Duplicate domain placement left billing rows.');
+
+// Binding must surface unexpected storage failures and reuse a row won by a concurrent insert.
+$bindingInvoice = Invoice::create(['user_id' => $client->id, 'currency_code' => 'USD', 'status' => Invoice::STATUS_PENDING]);
+$bindingItem = App\Models\InvoiceItem::withoutEvents(fn () => $bindingInvoice->items()->create(['reference_type' => Service::class, 'reference_id' => $legacyService->id, 'quantity' => 1, 'price' => '14.00', 'description' => 'Binding failure fixture']));
+$bindingFailure = true;
+Operation::creating(function (Operation $operation) use ($bindingItem, &$bindingFailure): void {
+    if ($operation->operation_key !== 'invoice-item:'.$bindingItem->id) { return; }
+    if ($bindingFailure) { throw new RuntimeException('Synthetic binding storage failure'); }
+    Operation::withoutEvents(fn () => Operation::create($operation->getAttributes()));
+    throw new Illuminate\Database\UniqueConstraintViolationException('sqlite', 'insert into enom_operations (operation_key)', [], new RuntimeException('Synthetic operation key race'));
+});
+$bindingRaised = false;
+try { $operations->bindInvoiceItem($bindingItem); }
+catch (RuntimeException $error) { $bindingRaised = $error->getMessage() === 'Synthetic binding storage failure'; }
+verify($bindingRaised, 'Unexpected binding storage failure was hidden.');
+$bindingFailure = false;
+$bound = $operations->bindInvoiceItem($bindingItem);
+verify($bound !== null && $bound->operation_key === 'invoice-item:'.$bindingItem->id
+    && Operation::where('operation_key', $bound->operation_key)->count() === 1, 'Operation key race lost or duplicated the binding.');
+verify($operations->bindInvoiceItem($bindingItem)->id === $bound->id, 'Binding replay returned a different operation.');
 echo 'Registrar terms: '.$checks.' passed; known runtime bugs: '.($knownBugs ? implode(', ', $knownBugs) : 'none').'; injected provider only; SQLite in memory.'.PHP_EOL;
 $successful = true;

@@ -40,18 +40,20 @@ class Reminders
     {
         self::ensureTemplates();
         // Look as far ahead and back as any server's settings reach.
-        [$ahead, $behind] = [61, 40];
+        [$ahead, $behind] = [60, 37];
         foreach (\App\Models\Server::where('extension', 'Enom')->pluck('id') as $serverId) {
-            $ahead = max($ahead, ...self::offsets(RuntimeGuard::setting((int) $serverId, 'reminder_days', self::BEFORE_DEFAULT)) ?: [0]) + 1;
-            $behind = max($behind, ...self::offsets(RuntimeGuard::setting((int) $serverId, 'expired_reminder_days', self::AFTER_DEFAULT)) ?: [0]) + 3;
+            $ahead = max($ahead, ...self::offsets(RuntimeGuard::setting((int) $serverId, 'reminder_days', self::BEFORE_DEFAULT)) ?: [0]);
+            $behind = max($behind, ...self::offsets(RuntimeGuard::setting((int) $serverId, 'expired_reminder_days', self::AFTER_DEFAULT)) ?: [0]);
         }
+        $ahead += 1;
+        $behind += 3;
         $sent = 0;
         Domain::query()->whereIn('status', ['active', 'expired', 'grace'])->whereNotNull('provider_expires_at')
             ->where('provider_expires_at', '<=', now()->addDays($ahead)->toDateString())
             ->where('provider_expires_at', '>=', now()->subDays($behind)->toDateString())
             ->orderBy('id')->chunkById(100, function ($domains) use (&$sent) {
                 foreach ($domains as $domain) {
-                    try { $sent += $this->remind($domain) ? 1 : 0; } catch (Throwable) {}
+                    try { $sent += $this->remind($domain) ? 1 : 0; } catch (Throwable $e) { report($e); }
                 }
             });
         return $sent;

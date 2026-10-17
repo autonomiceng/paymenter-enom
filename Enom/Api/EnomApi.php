@@ -314,8 +314,15 @@ final class EnomApi
 
     private function integer(mixed $value, int $max = 65535): int
     {
-        if ((!is_int($value) && !(is_string($value) && ctype_digit($value))) || (int) $value < 0 || (int) $value > $max) { throw new \InvalidArgumentException('Invalid record number.'); }
-        return (int) $value;
+        if ((!is_string($value) && !is_int($value)) || !preg_match('/\A[0-9]+\z/', (string) $value)) {
+            throw new \InvalidArgumentException('Invalid record number.');
+        }
+        $digits = ltrim((string) $value, '0') ?: '0';
+        $limit = (string) $max;
+        if (strlen($digits) > strlen($limit) || strlen($digits) === strlen($limit) && strcmp($digits, $limit) > 0) {
+            throw new \InvalidArgumentException('Invalid record number.');
+        }
+        return (int) $digits;
     }
 
     private function fqdn(string $name): bool

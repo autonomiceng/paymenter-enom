@@ -94,7 +94,7 @@ final class Staff
     }
 
     /** Only short, single-line service messages are shown; anything else falls back to generic text. */
-    private static function clean(string $message): ?string
+    public static function clean(string $message): ?string
     {
         $message = trim($message);
         return $message !== '' && strlen($message) <= 300 && !str_contains($message, "\n") && !str_contains($message, 'SQLSTATE') ? $message : null;

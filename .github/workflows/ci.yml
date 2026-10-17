@@ -15,6 +15,8 @@ jobs:
       COMPOSER_CACHE_DIR: ${{ github.workspace }}/.cache/composer
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
       - uses: shivammathur/setup-php@44454db4f0199b8b9685a5d763dc37cbf79108e1 # 2.36.0
         with:
           php-version: '8.3'
@@ -37,7 +39,7 @@ jobs:
         if: failure()
         with:
           name: test-failures
-          path: .scratch/tests-*
+          path: /tmp/enom-tests-*
           include-hidden-files: true
           if-no-files-found: ignore
 
@@ -46,6 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
+          persist-credentials: false
           fetch-depth: 0
       - uses: jdx/mise-action@6d1e696aa24c1aa1bcc1adea0212707c71ab78a8 # v3.6.1
         with:
@@ -56,6 +59,6 @@ jobs:
         if: failure()
         with:
           name: public-failures
-          path: .scratch/tests-*
+          path: /tmp/enom-tests-*
           include-hidden-files: true
           if-no-files-found: ignore

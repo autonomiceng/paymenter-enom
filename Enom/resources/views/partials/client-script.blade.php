@@ -48,6 +48,7 @@
                 tab.tabIndex = on ? 0 : -1;
                 if (panels[i]) panels[i].hidden = !on;
             });
+            history.replaceState(null, '', index === 0 ? location.pathname + location.search : '#' + tabs[index].dataset.enomTab);
             if (focus) tabs[index].focus();
         };
         tabs.forEach((tab, i) => {
@@ -58,7 +59,6 @@
             tab.addEventListener('click', event => {
                 event.preventDefault();
                 select(i, false);
-                history.replaceState(null, '', i === 0 ? location.pathname + location.search : '#' + tab.dataset.enomTab);
             });
             tab.addEventListener('keydown', event => {
                 const step = {ArrowRight: 1, ArrowLeft: -1}[event.key];
@@ -66,6 +66,10 @@
                 event.preventDefault();
                 select((i + step + tabs.length) % tabs.length, true);
             });
+        });
+        window.addEventListener('hashchange', () => {
+            const index = tabs.findIndex(tab => '#' + tab.dataset.enomTab === location.hash);
+            select(index >= 0 ? index : 0, false);
         });
         const fromHash = tabs.findIndex(tab => '#' + tab.dataset.enomTab === location.hash);
         select(fromHash >= 0 ? fromHash : 0, false);
@@ -230,7 +234,6 @@
         const rows = [...list.querySelectorAll('[data-enom-result]')];
         const label = {available: ['Available', 'ok'], transferable: ['Registered', 'muted'], taken: ['Registered', 'muted'], premium: ['Premium name', 'muted'],
             managed: ['Already registered here', 'muted'], yours: ['In your account', 'ok'], invalid: ['Not available', 'muted'], error: ['Couldn’t check', 'warn']};
-        let available = 0, done = 0;
         const render = (row, data) => {
             const state = label[data.status] ? data.status : 'error';
             row.dataset.state = state;
@@ -258,7 +261,6 @@
             }
             showPrice(row);
             if (state === 'yours' && data.url) row.querySelector('[data-slot="yours"]')?.setAttribute('href', data.url);
-            if (state === 'available') available++;
             if (state === 'available' && 'resume' in row.dataset) row.querySelector('[data-when~="available"] button')?.focus();
         };
         const showPrice = row => {
@@ -305,8 +307,13 @@
                 render(row, {status: 'error'});
                 if (note) note.textContent = error.message === 'busy' ? 'Too many searches. Wait a minute, then retry.' : '';
             }
-            done++;
-            if (done === rows.length) say(available ? available + ' of ' + rows.length + ' names are available.' : 'None of these names are available. Try a different name.');
+            const states = rows.map(result => result.dataset.state);
+            if (!states.some(state => state === 'checking' || !label[state])) {
+                const available = states.filter(state => state === 'available').length;
+                const errors = states.filter(state => state === 'error').length;
+                say((available ? available + ' of ' + rows.length + ' names are available.' : errors ? '' : 'None of these names are available. Try a different name.')
+                    + (errors ? (available ? ' ' : '') + 'Couldn’t check ' + errors + ' names. Retry to check them.' : ''));
+            }
         };
         list.querySelectorAll('[data-enom-retry]').forEach(button => button.addEventListener('click', () => check(button.closest('[data-enom-result]'))));
         const queue = [...rows];

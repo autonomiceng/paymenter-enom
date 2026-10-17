@@ -35,7 +35,7 @@
             $described = trim(($field === 'phone' ? $id.'-hint ' : '').($error ? $id.'-error' : ''));
         @endphp
         <div class="{{ $span }}" data-field>
-            <label for="{{ $id }}" class="enom-label">{{ $label }}@if (!in_array($field, $requiredFields, true)) <span class="enom-opt">(optional)</span>@endif</label>
+            <label for="{{ $id }}" class="enom-label">{{ $label }}@if (!$isRequired) <span class="enom-opt">(optional)</span>@endif</label>
             @if ($type === 'select')
                 <select id="{{ $id }}" name="{{ $prefix }}[country]" class="enom-input" autocomplete="{{ $section ? $section.' ' : '' }}country" @required($isRequired)
                     @if ($error) aria-invalid="true" @endif @if ($described) aria-describedby="{{ $described }}" @endif>
@@ -60,7 +60,7 @@
                 @php $id = $idPrefix.'-'.$field; $error = $errors->first($errorPrefix.'.'.$field); @endphp
                 <div data-field>
                     <label for="{{ $id }}" class="enom-label">{{ $label }} <span class="enom-opt">(optional)</span></label>
-                    <input id="{{ $id }}" name="{{ $prefix }}[{{ $field }}]" type="{{ $type }}" value="{{ $value($field) }}" maxlength="255" class="enom-input" autocomplete="{{ $auto }}"
+                    <input id="{{ $id }}" name="{{ $prefix }}[{{ $field }}]" type="{{ $type }}" value="{{ $value($field) }}" maxlength="255" class="enom-input" autocomplete="{{ $section ? $section.' ' : '' }}{{ $auto }}"
                         @if ($error) aria-invalid="true" aria-describedby="{{ $id }}-error" @endif>
                     @if ($error)<p id="{{ $id }}-error" class="enom-error">{{ $error }}</p>@endif
                 </div>

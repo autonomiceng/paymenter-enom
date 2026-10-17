@@ -127,17 +127,22 @@ final class Pricing
         };
     }
 
+    public static function zeroRetail(Domain $domain): bool
+    {
+        return $domain->service !== null && RegistrarMoney::decimal((string) $domain->service->price) === '0.00';
+    }
+
     /** Save a domain's pricing. Custom needs a positive price, which becomes the service price. */
     public static function setDomainMode(Domain $domain, string $mode, ?string $customPrice = null): void
     {
         if ($mode !== 'inherit' && !in_array($mode, self::MODES, true)) { throw new InvalidArgumentException('Choose who pays for this domain.'); }
         $service = $domain->service;
+        $price = null;
         if ($mode === 'custom') {
             $price = is_string($customPrice) ? RegistrarMoney::decimal(trim($customPrice)) : null;
             if ($price === null || (float) $price <= 0) { throw new InvalidArgumentException('Enter a custom yearly price above 0.00.'); }
-            if ($service) { $service->price = $price; $service->save(); }
         }
-        DB::transaction(function () use ($domain, $mode) {
+        DB::transaction(function () use ($domain, $mode, $price, $service) {
             $owner = User::whereKey($domain->user_id)->lockForUpdate()->first();
             $grant = self::clientGrant($owner);
             $becomesFree = $mode === 'complimentary' || $mode === 'inherit' && $grant !== null;
@@ -146,6 +151,7 @@ final class Pricing
                 && self::liveDomains($domain->user_id)->where(fn ($q) => $q->whereNull('price_mode')->orWhere('price_mode', 'complimentary'))->count() >= $grant['max_domains']) {
                 throw new InvalidArgumentException('This client already has their limit of '.$grant['max_domains'].' complimentary domains.');
             }
+            if ($mode === 'custom' && $service) { $service->price = $price; $service->save(); }
             Domain::whereKey($domain->id)->lockForUpdate()->update(['price_mode' => $mode === 'inherit' ? null : $mode]);
         });
         $domain->refresh();
