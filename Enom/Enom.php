@@ -229,7 +229,11 @@ class Enom extends Server
         $domain = Domain::where('service_id', $service->id)->where('user_id', Auth::id())->first();
         if (!$domain) { return []; }
         // The native service status says "Active" once paid; the domain's own state is what the customer needs.
-        $snapshot = app(Services\DomainManager::class)->snapshot(Auth::user(), $domain->id);
+        try { $snapshot = app(Services\DomainManager::class)->snapshot(Auth::user(), $domain->id); }
+        catch (Throwable $e) {
+            report($e);
+            return [['type' => 'button', 'label' => 'Manage domain', 'url' => route('enom.domains.show', $domain->id)]];
+        }
         [$state] = Http\Controllers\DomainController::badge($snapshot['status'] ?? null, $snapshot['progress'] ?? null);
         $needsCode = $state === 'Needs your code';
         return [

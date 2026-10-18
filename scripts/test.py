@@ -20,7 +20,7 @@ SUITES = {
                'reconciliation-registration.php', 'automatic-refresh.php', 'capability-readbacks.php', 'provider-disposition.php', 'native-date-missing-schema.php',
                'request-gates.php', 'catalogue-integration.php', 'runtime-guard.php', 'management-actions.php',
                'cart-ordering.php', 'cart-funding.php', 'cart-integration.php', 'registration-setup.php', 'transfer-codes.php', 'pricing-complimentary.php', 'registrar-terms.php', 'registry-details.php', 'glue-records.php', 'refunds.php', 'reminders.php'],
-    'ui': ['cart-checkout-ui.php', 'catalogue-admin.php', 'client-controller.php', 'client-views.php', 'admin-staff.php', 'public-search.php', 'client-script.cjs'],
+    'ui': ['client-order-regressions.php', 'cart-checkout-ui.php', 'catalogue-admin.php', 'client-controller.php', 'client-views.php', 'admin-staff.php', 'public-search.php', 'client-script.cjs'],
 }
 
 def hashes(root):

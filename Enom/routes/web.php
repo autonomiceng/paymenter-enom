@@ -20,7 +20,7 @@ Route::middleware(['web', 'auth', MustVerfiyEmail::class])->group(function () {
     // Client area.
     Route::get('/domains', [DomainController::class, 'index'])->name('enom.domains.index');
     Route::get('/domains/help', [HelpController::class, 'customer'])->name('enom.help');
-    Route::get('/domains/transfer', [DomainController::class, 'transfer'])->name('enom.domains.transfer');
+    Route::get('/domains/transfer', [DomainController::class, 'transfer'])->name('enom.domains.transfer')->middleware('throttle:60,1,enom.domains.check');
     Route::get('/domains/{domain}', [DomainController::class, 'show'])->whereNumber('domain')->name('enom.domains.show');
     Route::post('/domains/{domain}/refresh', [DomainController::class, 'refresh'])->whereNumber('domain')->name('enom.domains.refresh')->middleware('throttle:10,1,enom.domains.refresh')->block(10, 10);
     Route::post('/domains/{domain}/renew', [DomainController::class, 'renew'])->whereNumber('domain')->name('enom.domains.renew')->middleware('throttle:10,1,enom.domains.renew')->block(10, 10);

@@ -60,6 +60,7 @@ class DomainManager
             'id' => $operation->id, 'action' => $operation->action,
             'state' => $operation->state, 'created_at' => $operation->created_at, 'not_sent' => $operation->state === 'queued' && !$processing,
             'invoice_id' => $links[(int) $operation->id]['id'] ?? null,
+            'invoice_number' => $links[(int) $operation->id]['number'] ?? null,
             'outcome' => DomainPresentation::outcome($operation->safe_code)
                 ?? ($domain->status === 'cancelled' && $operation->state === 'rejected' && in_array($operation->action, ['register', 'transfer'], true) ? 'cancelled_unknown' : null),
             'term' => (int) $operation->term,

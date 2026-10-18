@@ -120,13 +120,14 @@
             $kind = $isTransfer ? 'transfer' : 'registration';
             $awaiting = $badgeLabel === 'Awaiting payment';
             $delayed = $badgeLabel === 'Delayed';
-            $codeReceived = $isTransfer && $initial && !app(\Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class)->needsCode(\Paymenter\Extensions\Servers\Enom\Models\Operation::find($initial['id']));
+            $initialOperation = $isTransfer && $initial ? \Paymenter\Extensions\Servers\Enom\Models\Operation::find($initial['id']) : null;
+            $codeReceived = $initialOperation && !app(\Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class)->needsCode($initialOperation);
+            $deadline = $initialOperation ? \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::deadline($initialOperation) : null;
             $steps = $isTransfer ? ['Ordered' => true, 'Paid' => !$awaiting, 'Code' => $codeReceived, 'Transferred' => false]
                 : ['Ordered' => true, 'Paid' => !$awaiting, 'Registered' => false];
             $refund = is_array($initial['refund'] ?? null) ? $initial['refund'] : null;
             $refunded = $refund ? $controller::money($refund['amount'] ?? null, $refund['currency'] ?? 'USD') : null;
             $retryUrl = $isTransfer ? route('enom.domains.transfer', ['name' => $name]) : route('enom.domains.search', ['name' => $name]);
-            $creditButton = $credits ? '<a class="enom-btn enom-btn--primary" href="'.e($credits).'">View account credit</a>' : '';
         @endphp
         <section class="enom-panel enom-status-card" aria-labelledby="enom-status-heading">
             @if ($cancelled)
@@ -142,14 +143,13 @@
                     @if ($supportUrl)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ $supportUrl }}">Contact support</a></div>@endif
                 @endif
             @elseif ($codeTimedOut)
-                @php $deadline = \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::deadline(\Paymenter\Extensions\Servers\Enom\Models\Operation::find($initial['id'])); @endphp
                 <h2 id="enom-status-heading">Transfer cancelled</h2>
                 @if ($refunded)
                     <p>We didn’t receive the transfer code by {{ $deadline ? $deadline->format('M j, Y') : 'the deadline' }}, so we cancelled the transfer and added {{ $refunded }} to your account credit.</p>
                 @else
                     <p>We didn’t receive the transfer code in time, so we cancelled the transfer. The refund to your account credit is on its way.</p>
                 @endif
-                <div class="enom-row" style="margin-top:1.25rem">{!! $refunded ? $creditButton : '' !!}<a class="enom-btn enom-btn--secondary" href="{{ $retryUrl }}">Try again</a></div>
+                <div class="enom-row" style="margin-top:1.25rem">@if ($refunded && $credits)<a class="enom-btn enom-btn--primary" href="{{ $credits }}">View account credit</a>@endif<a class="enom-btn enom-btn--secondary" href="{{ $retryUrl }}">Try again</a></div>
             @elseif ($failed)
                 <h2 id="enom-status-heading">The {{ $kind }} didn’t go through</h2>
                 @if ($refunded)
@@ -162,7 +162,7 @@
                 @endif
                 <div class="enom-row" style="margin-top:1.25rem">
                     @if ($refunded || $free || ($initial && empty($initial['invoice_id'])))
-                        {!! $refunded ? $creditButton : '' !!}
+                        @if ($refunded && $credits)<a class="enom-btn enom-btn--primary" href="{{ $credits }}">View account credit</a>@endif
                         @if ($isTransfer)
                             <a class="enom-btn enom-btn--secondary" href="{{ $retryUrl }}">Try again</a>
                         @else

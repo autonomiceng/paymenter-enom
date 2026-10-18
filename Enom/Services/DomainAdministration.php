@@ -59,7 +59,7 @@ class DomainAdministration
      * Invoice display data for requests, keyed by request id. Read only.
      * A request shows its invoice only when the request has the exact domain and service, its invoice item
      * belongs to that invoice and references that service or nothing, and the invoice owner is the domain owner.
-     * Viewer permissions never widen this. Only invoice id, status and due date are read, never amounts.
+     * Viewer permissions never widen this. Only invoice id, number, status and due date are read, never amounts.
      *
      * @param  iterable  $requests  Rows with id, domain_id, service_id, invoice_id and invoice_item_id.
      * @param  array<int, array{service_id: int, user_id: int}>  $owners  Expected binding, keyed by domain id.
@@ -85,7 +85,7 @@ class DomainAdministration
             $items[(int) $item->id] = $item;
         }
         $invoices = [];
-        foreach (Invoice::query()->select(['id', 'user_id', 'status', 'due_at'])
+        foreach (Invoice::query()->select(['id', 'user_id', 'number', 'status', 'due_at'])
             ->whereIn('id', array_values(array_unique(array_column($candidates, 'invoice_id'))))->toBase()->get() as $invoice) {
             $invoices[(int) $invoice->id] = $invoice;
         }
@@ -97,7 +97,7 @@ class DomainAdministration
             $unreferenced = $item && $item->reference_type === null && $item->reference_id === null;
             if (!$item || !$invoice || self::key($item->invoice_id) !== $candidate['invoice_id'] || !($referenced || $unreferenced)
                 || self::key($invoice->user_id) !== (int) $candidate['owner']['user_id']) { continue; }
-            $verified[$requestId] = ['id' => $candidate['invoice_id'],
+            $verified[$requestId] = ['id' => $candidate['invoice_id'], 'number' => $invoice->number,
                 'status' => in_array($invoice->status, ['pending', 'paid', 'cancelled'], true) ? $invoice->status : null,
                 'due_at' => self::day($invoice->due_at)];
         }
