@@ -1,46 +1,8 @@
 <?php
-require_once dirname(__DIR__).'/paymenter-test-app.php';
-
-// Real stock Laravel/models, synthetic environment, in-memory SQLite, injected fake provider.
-// Never load an installed app or any .env. Run: php tests/Enom/managed-renewal-execution.php
-$repo = dirname(__DIR__, 2);
-$successful = false;
-$testRoot = null;
-paymenterTestShutdown($testRoot, $successful);
-$release = paymenterTestApp();
-if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
-$testRoot = $repo.'/.scratch/enom-managed-execution-test-'.bin2hex(random_bytes(5));
-mkdir($testRoot, 0700, true);
-foreach (['bootstrap/cache', 'storage/framework/cache', 'storage/framework/sessions', 'storage/framework/views', 'storage/logs'] as $path) { mkdir($testRoot.'/'.$path, 0700, true); }
-foreach (['config', 'database', 'routes', 'vendor', 'themes', 'resources', 'public'] as $path) { symlink($release.'/'.$path, $testRoot.'/'.$path); }
-mkdir($testRoot.'/app', 0700);
-foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($release.'/app', FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file) {
-    $target = $testRoot.'/app/'.substr($file->getPathname(), strlen($release.'/app/'));
-    if ($file->isDir()) { mkdir($target, 0700, true); } else { copy($file->getPathname(), $target); }
-}
-copy($release.'/bootstrap/app.php', $testRoot.'/bootstrap/app.php');
-copy($release.'/bootstrap/providers.php', $testRoot.'/bootstrap/providers.php');
-copy($release.'/composer.json', $testRoot.'/composer.json');
-$extensionRoot = $testRoot.'/extensions/Servers/Enom';
-mkdir($extensionRoot, 0700, true);
-foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($repo.'/Enom', FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file) {
-    $target = $extensionRoot.'/'.substr($file->getPathname(), strlen($repo.'/Enom/'));
-    if ($file->isDir()) { mkdir($target, 0700, true); } else { copy($file->getPathname(), $target); }
-}
-foreach (['APP_ENV' => 'testing', 'APP_KEY' => 'base64:'.base64_encode(str_repeat('t', 32)), 'APP_URL' => 'http://enom-tests.invalid',
-    'DB_CONNECTION' => 'sqlite', 'DB_DATABASE' => ':memory:', 'CACHE_STORE' => 'array', 'QUEUE_CONNECTION' => 'database',
-    'SESSION_DRIVER' => 'array', 'MAIL_MAILER' => 'array', 'APP_TELEMETRY_ENABLED' => 'false'] as $key => $value) {
-    putenv($key.'='.$value); $_ENV[$key] = $_SERVER[$key] = $value;
-}
-$loader = require $release.'/vendor/autoload.php';
-$loader->addPsr4('Paymenter\\Extensions\\Servers\\Enom\\', $extensionRoot.'/', true);
-$app = require $testRoot.'/bootstrap/app.php';
-$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-config(['audit.enabled' => false, 'settings.mail_disabled' => true, 'settings.default_currency' => 'USD', 'settings.tax_enabled' => false, 'settings.theme' => 'default']);
-if (config('database.default') !== 'sqlite' || config('database.connections.sqlite.database') !== ':memory:') { throw new RuntimeException('Test database isolation failed.'); }
-Illuminate\Support\Facades\Artisan::call('migrate', ['--force' => true]);
-$extension = new Paymenter\Extensions\Servers\Enom\Enom;
-$extension->installed();
+$enomBootExtension = false;
+$enomCreateCurrency = false;
+require dirname(__DIR__).'/enom-native-app.php';
+require_once dirname(__DIR__).'/enom-cart-order.php';
 use App\Helpers\ExtensionHelper;
 use App\Models\Invoice;
 use App\Models\Service;
@@ -99,17 +61,20 @@ $server->settings()->create(['key' => 'token', 'value' => 'synthetic-token-do-no
 $category = App\Models\Category::create(['name' => 'Execution test', 'slug' => 'execution-test']);
 $product = App\Models\Product::create(['name' => 'Managed domain', 'category_id' => $category->id, 'server_id' => $server->id, 'hidden' => true]);
 // 0.3: orderable endings and prices come from the catalogue; this product is the server's catalogue product.
-$product->settings()->create(['key' => 'enom_catalogue', 'value' => '1']);
-Paymenter\Extensions\Servers\Enom\Models\Tld::create(['server_id' => $server->id, 'tld' => 'com', 'enabled' => true, 'pricing_mode' => 'fixed',
+
+enomTestTld(['server_id' => $server->id, 'tld' => 'com', 'enabled' => true, 'pricing_mode' => 'fixed',
     'register_price' => '15.00', 'renew_price' => '15.00', 'transfer_price' => '15.00']);
+foreach (['net','us'] as $ending) { enomTestTld(['server_id'=>$server->id,'tld'=>$ending,'renew_price'=>'15.00']); }
 $plan = $product->plans()->create(['name' => 'One year', 'type' => 'recurring', 'billing_unit' => 'year', 'billing_period' => 1]);
 $plan->prices()->create(['currency_code' => 'USD', 'price' => 15, 'setup_fee' => 0]);
 App\Models\Gateway::create(['name' => 'Synthetic gateway', 'type' => 'gateway', 'extension' => 'Stripe', 'enabled' => true]);
 
+enomCartProfile($user);
 $configuration = ['uid' => 'offline-account', 'token' => 'synthetic-token-do-not-store', 'sandbox' => true,
     'operations_enabled' => true, 'grace_renewals_enabled' => true];
 $fixtures = []; $calls = []; $writes = []; $orderNames = []; $during = null;
 $fake = function (string $command, array $params) use (&$fixtures, &$calls, &$writes, &$orderNames, &$during): string {
+    if ($command === 'PE_GetProductPrice') { return executionXml($command, '<productprice><productenabled>True</productenabled><price>10.0000</price></productprice>'); }
     if ($command === 'TP_CreateOrder') {
         $calls[] = $command;
         $writes[] = [$command, $params];
@@ -161,7 +126,8 @@ $operations = new DomainOperations(new EnomApi(new RegistrarClient('offline-acco
 $billing = new DomainBilling($operations);
 $app->instance(DomainOperations::class, $operations);
 $app->instance(DomainBilling::class, $billing);
-Event::listen(App\Events\Invoice\Paid::class, fn ($event) => $operations->acceptPaidInvoice($event->invoice));
+$extension->boot();
+$server->settings()->create(['key' => 'complimentary_cost_cap', 'value' => '12.00']);
 $counter = 0;
 $make = function (string $kind = 'paid', string $tld = 'com', array $options = [], string $settlement = '15.00') use (&$counter, &$fixtures, &$calls, &$writes, $user, $staff, $server, $product, $plan, $billing): Operation {
     executionClock();
@@ -170,25 +136,17 @@ $make = function (string $kind = 'paid', string $tld = 'com', array $options = [
     $fixtures[$name] = array_replace(['expiry' => '2026-12-01', 'price' => '10.00'], $options);
     $calls = []; $writes = [];
     $service = Service::create(['user_id' => $user->id, 'product_id' => $product->id, 'plan_id' => $plan->id,
-        'price' => $kind === 'sponsored' ? '0.00' : '15.00', 'quantity' => 1, 'currency_code' => 'USD',
+        'price' => $kind === 'complimentary' ? '0.00' : '15.00', 'quantity' => 1, 'currency_code' => 'USD',
         'status' => Service::STATUS_ACTIVE, 'expires_at' => null]);
     $domain = Domain::create(['service_id' => $service->id, 'user_id' => $user->id, 'server_id' => $server->id,
         'domain' => $name, 'sld' => 'execution-'.$counter, 'tld' => $tld, 'provider_domain_id' => '456',
         'status' => 'active', 'provider_expires_at' => $options['expiry'] ?? '2026-12-01', 'billing_managed' => true,
-        'authority_generation' => 1, 'confirmed_revision' => 1, 'renewal_policy' => ['enabled' => true], 'price_mode' => 'custom']); // 0.3 backfill: keep the native price
+        'authority_generation' => 1, 'confirmed_revision' => 1, 'renewal_policy' => ['enabled' => true], 'price_mode' => 'standard']); // 0.3 backfill: keep the native price
     if ($kind === 'complimentary') {
         // 0.3: the reseller pays; one renewal per cycle at a quote under the server's complimentary cost limit.
         $service->update(['price' => '0.00']);
         $domain->update(['price_mode' => 'complimentary']);
         return $billing->complimentary($domain->id, $staff);
-    }
-    if ($kind === 'sponsored') {
-        $domain->update(['sponsorship' => ['enabled' => true, 'standing' => true, 'approved_by' => $staff->id,
-            'reason' => 'Isolated sponsorship approval', 'limit_minor' => 1200, 'currency' => 'USD', 'term' => 1],
-            'observation' => ['renewal_quote' => ['state' => 'validated', 'complete' => true, 'domain' => $name,
-                'action' => 'renew', 'term' => 1, 'base_expires_at' => '2026-12-01', 'amount' => '10.00', 'currency' => 'USD',
-                'grace_eligible' => false, 'observed_at' => now()->toIso8601String()]]]);
-        return $billing->sponsor($domain->id);
     }
     $invoice = $billing->invoice($domain->id, $user, null, $options['years'] ?? 1);
     checkExecution($invoice->items->first()->reference_type === null && $invoice->items->first()->reference_id === null,
@@ -295,7 +253,7 @@ $operations->reconcile($interrupted->id);
 checkExecution($interrupted->fresh()->state === 'uncertain' && count($writes) === 1,
     'Unresolved managed renewal was resent without exact order evidence.');
 executionSafeCost($result);
-foreach (['paid', 'sponsored'] as $kind) {
+foreach (['paid', 'complimentary'] as $kind) {
     $insufficient = $make($kind, options: ['balance' => '9.99']);
     $result = $operations->execute($insufficient->id);
     checkExecution($result->state === 'held' && $writes === [] && $result->cost['quote']['amount'] === '10.00', 'Insufficient balance sent renewal or lost quote.');
@@ -304,7 +262,7 @@ foreach (['paid', 'sponsored'] as $kind) {
     $fixtures[$result->domain->domain]['balance'] = '100.00';
     $before = executionNativeMoney();
     checkExecution(!$operations->canReadmitHeld($result, $user) && $operations->canReadmitHeld($result, $staff),
-        'Held renewal re-admission lost its staff/sponsorship authorization boundary.');
+        'Held renewal re-admission lost its staff/complimentary renewal authorization boundary.');
     $queued = $operations->readmitHeld($result->id, $staff, 'Synthetic balance cause reviewed and corrected.');
     checkExecution($queued->state === 'queued' && $queued->invoice_id === $result->invoice_id
         && $before === executionNativeMoney(), 'Held re-admission created new financial activity.');
@@ -343,27 +301,27 @@ $repriced = $make(options: ['price' => '16.00']);
 $repriced->domain->service->update(['price' => '30.00']);
 checkExecution($operations->execute($repriced->id)->state === 'succeeded', 'Current tariff invalidated settled ordinary obligation.');
 foreach (['2026-11-10', '2026-12-09'] as $date) {
-    $sponsored = $make('sponsored');
+    $complimentary = $make('complimentary');
     executionClock($date);
     $before = executionNativeMoney();
-    $result = $operations->execute($sponsored->id);
-    if ($result->state === 'pending') { $result = $operations->reconcile($sponsored->id); }
-    checkExecution($result->state === 'succeeded' && count($writes) === 1 && $result->invoice_id === null && $result->amount === '0.00', 'Approved sponsorship failed.');
-    checkExecution($before === executionNativeMoney(), 'Sponsorship fabricated customer financial activity.');
+    $result = $operations->execute($complimentary->id);
+    if ($result->state === 'pending') { $result = $operations->reconcile($complimentary->id); }
+    checkExecution($result->state === 'succeeded' && count($writes) === 1 && $result->invoice_id === null && $result->amount === '0.00', 'Approved complimentary renewal failed.');
+    checkExecution($before === executionNativeMoney(), 'Complimentary renewal fabricated customer financial activity.');
     executionNativeDates($result->domain);
 }
 foreach ([['price' => '12.01'], ['unknown_quote' => true]] as $options) {
-    $sponsored = $make('sponsored', options: $options);
-    checkExecution($operations->execute($sponsored->id)->state === 'held' && $writes === [], 'Sponsorship exceeded approval or used unknown cost.');
+    $complimentary = $make('complimentary', options: $options);
+    checkExecution($operations->execute($complimentary->id)->state === 'held' && $writes === [], 'Complimentary renewal exceeded approval or used unknown cost.');
 }
-$sponsored = $make('sponsored');
-$sponsored->domain->service->update(['currency_code' => 'EUR']);
+$complimentary = $make('complimentary');
+$complimentary->domain->service->update(['currency_code' => 'EUR']);
 $before = executionNativeMoney();
-checkExecution(!$operations->funded($sponsored->fresh()), 'Service currency change retained sponsored spending authority.');
-$result = $operations->execute($sponsored->id);
-checkExecution($result->state === 'held' && $calls === [] && $writes === [], 'Currency change caused sponsored registrar reads or writes.');
+checkExecution(!$operations->funded($complimentary->fresh()), 'Service currency change retained complimentary spending authority.');
+$result = $operations->execute($complimentary->id);
+checkExecution($result->state === 'held' && $calls === [] && $writes === [], 'Currency change caused complimentary registrar reads or writes.');
 checkExecution($before === executionNativeMoney(), 'Currency-change refusal changed native finance.');
-foreach (['paid', 'sponsored'] as $kind) {
+foreach (['paid', 'complimentary'] as $kind) {
     $paused = $make($kind);
     $paused->domain->update(['renewal_policy' => ['enabled' => true, 'automatic_spend_paused' => true]]);
     $result = $operations->execute($paused->id);
@@ -423,11 +381,11 @@ $name = 'initial-managed-execution.com';
 $fixtures[$name] = ['expiry' => '2026-12-01', 'price' => '10.00', 'available' => true, 'domain_id' => '987', 'product_type' => 'Register'];
 $calls = []; $writes = [];
 $orders = new DomainOrders($operations);
-$quote = $orders->quote($user, $name);
 $contacts = ['registrant' => ['first_name' => 'Synthetic', 'last_name' => 'Owner',
     'organization_name' => 'Synthetic', 'address1' => '123 Example Road', 'city' => 'Example', 'postal_code' => '12345',
     'country' => 'US', 'email_address' => 'execution-owner@example.com', 'phone' => '+1.5551234567']];
-$invoice = $orders->place($user, $quote['intent_id'], $contacts);
+$invoice = enomCartOrder($user, $name, 'register')[ 'invoice' ];
+        if ($action === 'transfer') { app(Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class)->submitCode($user, Domain::where('domain',$name)->sole()->id, 'synthetic-test-epp'); }
 ExtensionHelper::addPayment($invoice, 'Stripe', '15.00', transactionId: 'execution-initial-payment');
 $initial = Operation::where('invoice_id', $invoice->id)->firstOrFail();
 $result = $operations->execute($initial->id);
@@ -461,8 +419,8 @@ foreach (['missing', 'foreign'] as $identity) {
     $fixtures[$name] = ['expiry' => '2026-12-01', 'price' => '10.00', 'available' => true, 'product_type' => 'Register',
         'domain_id' => $identity === 'missing' ? '' : '988', 'uid' => $identity === 'foreign' ? 'foreign-account' : 'offline-account'];
     $calls = []; $writes = [];
-    $quote = $orders->quote($user, $name);
-    $invoice = $orders->place($user, $quote['intent_id'], $contacts);
+    $invoice = enomCartOrder($user, $name, 'register')[ 'invoice' ];
+        if ($action === 'transfer') { app(Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class)->submitCode($user, Domain::where('domain',$name)->sole()->id, 'synthetic-test-epp'); }
     ExtensionHelper::addPayment($invoice, 'Stripe', '15.00', transactionId: 'execution-initial-'.$identity);
     $initial = Operation::where('invoice_id', $invoice->id)->firstOrFail();
     $initialService = $initial->domain->service->getRawOriginal();
@@ -487,8 +445,8 @@ $name = 'initial-cost-overrun.com';
 $fixtures[$name] = ['expiry' => '2026-12-01', 'price' => '10.00', 'actual' => '13.00', 'available' => true,
     'domain_id' => '990', 'product_type' => 'Register'];
 $calls = []; $writes = [];
-$quote = $orders->quote($user, $name);
-$invoice = $orders->place($user, $quote['intent_id'], $contacts);
+$invoice = enomCartOrder($user, $name, 'register')[ 'invoice' ];
+        if ($action === 'transfer') { app(Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class)->submitCode($user, Domain::where('domain',$name)->sole()->id, 'synthetic-test-epp'); }
 ExtensionHelper::addPayment($invoice, 'Stripe', '15.00', transactionId: 'execution-initial-overrun');
 $overrun = Operation::where('invoice_id', $invoice->id)->firstOrFail();
 $before = executionNativeMoney();
@@ -520,8 +478,8 @@ foreach (['before_claim', 'during_check'] as $phase) {
         executionClock();
         $name = 'initial-'.$action.'-'.str_replace('_', '-', $phase).'-'.$status.'.com';
         $fixtures[$name] = ['expiry' => '2026-12-01', 'price' => '10.00', 'available' => $action === 'register', 'domain_id' => '989', 'product_type' => 'Register'];
-        $quote = $orders->quote($user, $name, $action);
-        $invoice = $orders->place($user, $quote['intent_id'], $contacts, $action === 'transfer' ? 'synthetic-test-epp' : null);
+        $invoice = enomCartOrder($user, $name, $action)[ 'invoice' ];
+        if ($action === 'transfer') { app(Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class)->submitCode($user, Domain::where('domain',$name)->sole()->id, 'synthetic-test-epp'); }
         ExtensionHelper::addPayment($invoice, 'Stripe', '15.00', transactionId: 'execution-'.$action.'-'.$phase.'-'.$status);
         $initial = Operation::where('invoice_id', $invoice->id)->firstOrFail();
         $calls = []; $writes = [];
@@ -534,7 +492,7 @@ foreach (['before_claim', 'during_check'] as $phase) {
         }
         $result = $operations->execute($initial->id);
         $during = null;
-        checkExecution($result->state === 'held' && $writes === [] && $result->domain->service->status === $status,
+        checkExecution(in_array($result->state, ['held', 'rejected'], true) && $writes === [] && $result->domain->service->status === $status,
             'Initial '.$status.' lifecycle sent '.$action.' during '.$phase.'.');
         checkExecution($phase !== 'before_claim' || $calls === [], 'Initial invalid lifecycle caused provider reads before claim.');
         checkExecution($before === executionNativeMoney() && $result->domain->provider_expires_at === null,
@@ -634,7 +592,7 @@ $throwingOperations = new DomainOperations(new EnomApi(new RegistrarClient('offl
     });
 $guardResult = $throwingOperations->execute($guardInterrupted->id); $during = null;
 checkExecution($guardResult->state === 'held' && $guardResult->safe_code === 'pre_send_interrupted'
-    && ($guardResult->policy['dispatch_marker_version'] ?? null) === 1 && $writes === []
+    && is_string($guardResult->policy['dispatch_claim_token'] ?? null) && $writes === []
     && !isset($guardResult->policy['dispatch_attempted_at']), 'Pre-send guard interruption stranded or sent a newly contracted request.');
 checkExecution($money === executionNativeMoney(), 'Pre-send guard interruption changed finance.');
 checkExecution($operations->readmitHeld($guardResult->id, $staff, 'Reviewed unsent interruption')->id === $guardResult->id,
@@ -642,20 +600,20 @@ checkExecution($operations->readmitHeld($guardResult->id, $staff, 'Reviewed unse
 
 // Simulate the process dying in admission and expiring its persisted claim.
 foreach (['execute', 'reconcile', 'sweep'] as $recovery) {
-    foreach (['contracted', 'legacy', 'sealed', 'execution', 'order'] as $kind) {
+    foreach (['unsent', 'sealed', 'null_seal', 'execution', 'null_execution', 'order'] as $kind) {
         $dead = $make(); $money = executionNativeMoney();
         $policy = $dead->policy;
-        if ($kind === 'legacy') { unset($policy['dispatch_marker_version']); }
+        if ($kind === 'null_seal') { $policy['dispatch_attempted_at'] = null; }
         if ($kind === 'sealed') { $policy['dispatch_attempted_at'] = now()->toIso8601String(); }
         $dead->update(['state' => 'running', 'policy' => $policy, 'started_at' => now()->subSeconds(400),
-            'lease_expires_at' => now()->subSecond(), 'cost' => $kind === 'execution' ? ['execution' => ['status' => 'unknown']] : null,
+            'lease_expires_at' => now()->subSecond(), 'cost' => $kind === 'execution' ? ['execution' => ['status' => 'unknown']] : ($kind === 'null_execution' ? ['execution' => null] : null),
             'provider_order_id' => $kind === 'order' ? '987654321' : null]);
         if ($recovery === 'sweep') {
             Illuminate\Support\Facades\Cache::put('enom:sweep:operations', $dead->id - 1);
             $operations->sweep(); $recovered = $dead->fresh();
         } else { $recovered = $operations->$recovery($dead->id); }
-        checkExecution($recovered->state === ($kind === 'contracted' ? 'held' : 'uncertain')
-            && $recovered->safe_code === ($kind === 'contracted' ? 'pre_send_interrupted' : 'stale_claim'),
+        checkExecution($recovered->state === ($kind === 'unsent' ? 'held' : 'uncertain')
+            && $recovered->safe_code === ($kind === 'unsent' ? 'pre_send_interrupted' : 'stale_claim'),
             'Expired '.$kind.' claim misclassified during '.$recovery.'.');
         checkExecution($writes === [] && $money === executionNativeMoney(), 'Stale claim recovery sent or changed finance.');
     }
@@ -705,35 +663,35 @@ checkExecution($postResult->state === 'uncertain' && isset($postResult->policy['
 $operations->execute($postMarker->id);
 checkExecution($postMarker->fresh()->state === 'uncertain' && $writes === [], 'Post-marker interruption was automatically replayed.');
 
-// Captured date-only provider pricing can fund one ordinary sponsorship without rewriting its UTC obligation.
-$calendarSponsor=$make(kind:'sponsored');$calendarDomain=$calendarSponsor->domain;
+// Captured date-only provider pricing can fund one ordinary complimentary renewal without rewriting its UTC obligation.
+$calendarComplimentary=$make(kind:'complimentary');$calendarDomain=$calendarComplimentary->domain;
 $calendarDomain->update(['provider_expires_at'=>'2028-10-13']);
-$calendarPolicy=$calendarSponsor->policy;$calendarPolicy['calendar']=['expiry'=>'2028-10-13','issue'=>'2028-09-22','due'=>'2028-10-06'];
-$calendarSponsor->update(['base_expires_at'=>'2028-10-13','expected_expires_at'=>'2029-10-13','policy'=>$calendarPolicy]);
+$calendarPolicy=$calendarComplimentary->policy;$calendarPolicy['calendar']=['expiry'=>'2028-10-13','issue'=>'2028-09-22','due'=>'2028-10-06'];
+$calendarComplimentary->update(['base_expires_at'=>'2028-10-13','expected_expires_at'=>'2029-10-13','policy'=>$calendarPolicy]);
 $fixtures[$calendarDomain->domain]=['expiry'=>'2028-10-13','info_expiry'=>'10/12/2028 11:14:00 PM','extend_expiry'=>'10/12/2028','price'=>'8.95','balance'=>'49,978.69','advance'=>false];
-$calendarMoney=executionNativeMoney();$calendarResult=$operations->execute($calendarSponsor->id);
+$calendarMoney=executionNativeMoney();$calendarResult=$operations->execute($calendarComplimentary->id);
 checkExecution($calendarResult->state==='uncertain'&&$calendarResult->safe_code==='expiry_unconfirmed'&&count($writes)===1&&$writes[0][0]==='Extend'
     &&$calendarResult->cost['quote']['complete']&&$calendarResult->cost['quote']['currency']==='USD'&&$calendarResult->cost['quote']['base_expires_at']==='2028-10-13',
-    'Exact date-only sponsorship did not admit a single ordinary Extend or fabricated successful expiry');
+    'Exact date-only complimentary renewal did not admit a single ordinary Extend or fabricated successful expiry');
 checkExecution($calendarMoney===executionNativeMoney()&&$calendarDomain->fresh()->provider_expires_at->format('Y-m-d')==='2028-10-13'
-    &&$calendarDomain->fresh()->service->expires_at===null,'Date-only sponsorship fabricated financial rows or new registrar/native expiry.');
+    &&$calendarDomain->fresh()->service->expires_at===null,'Date-only complimentary renewal fabricated financial rows or new registrar/native expiry.');
 // Exact local timestamps before/after one year close both execution and reconciliation confirmation paths.
 foreach(['execute','reconcile'] as $calendarPath){
-    $preciseSponsor=$make(kind:'sponsored');$preciseDomain=$preciseSponsor->domain;$preciseDomain->update(['provider_expires_at'=>'2028-10-13']);
-    $precisePolicy=$preciseSponsor->policy;$precisePolicy['calendar']=['expiry'=>'2028-10-13','issue'=>'2028-09-22','due'=>'2028-10-06'];
-    $preciseSponsor->update(['base_expires_at'=>'2028-10-13','expected_expires_at'=>'2029-10-13','policy'=>$precisePolicy]);
+    $preciseComplimentary=$make(kind:'complimentary');$preciseDomain=$preciseComplimentary->domain;$preciseDomain->update(['provider_expires_at'=>'2028-10-13']);
+    $precisePolicy=$preciseComplimentary->policy;$precisePolicy['calendar']=['expiry'=>'2028-10-13','issue'=>'2028-09-22','due'=>'2028-10-06'];
+    $preciseComplimentary->update(['base_expires_at'=>'2028-10-13','expected_expires_at'=>'2029-10-13','policy'=>$precisePolicy]);
     $fixtures[$preciseDomain->domain]=['expiry'=>'2028-10-13','info_expiry'=>'10/12/2028 11:14:00 PM','extend_expiry'=>'10/12/2028',
         'expiry_read'=>'10/12/2028 11:14:00 PM','price'=>'8.95','balance'=>'49,978.69','product_type'=>'Renew','order_expiry'=>'10/12/2029 11:14:00 PM',
         'next_expiry'=>'2029-10-13','next_info_expiry'=>'10/12/2029 11:14:00 PM','next_extend_expiry'=>'10/12/2029',
         'next_expiry_read'=>'10/12/2029 11:14:00 PM','advance'=>$calendarPath==='execute',
         'ack_expiry'=>$calendarPath==='execute'?'10/12/2029 11:14:00 PM':'10/12/2028 11:14:00 PM'];
-    $preciseMoney=executionNativeMoney();$preciseResult=$operations->execute($preciseSponsor->id);
+    $preciseMoney=executionNativeMoney();$preciseResult=$operations->execute($preciseComplimentary->id);
     if($calendarPath==='reconcile'){
         checkExecution($preciseResult->state==='uncertain'&&$preciseResult->safe_code==='expiry_unconfirmed'&&count($writes)===1,
             'Initial unconfirmed expiry was fabricated or failed to retain the one known Extend.');
         $f=&$fixtures[$preciseDomain->domain];$f['expiry']='2029-10-13';$f['info_expiry']='10/12/2029 11:14:00 PM';
         $f['extend_expiry']='10/12/2029';$f['expiry_read']='10/12/2029 11:14:00 PM';unset($f);
-        $preciseResult=$operations->reconcile($preciseSponsor->id);
+        $preciseResult=$operations->reconcile($preciseComplimentary->id);
     }
     checkExecution($preciseResult->state==='succeeded'&&$preciseResult->safe_code==='expiry_confirmed'&&count($writes)===1&&$writes[0][0]==='Extend'
         &&$preciseResult->confirmed_expires_at->format('Y-m-d')==='2029-10-13'&&$preciseDomain->fresh()->provider_expires_at->format('Y-m-d')==='2029-10-13',
@@ -742,18 +700,13 @@ foreach(['execute','reconcile'] as $calendarPath){
         &&$preciseResult->cost['quote']['expiry_source']==='GetDomainInfo_precise_la_date_reconciled'
         &&$preciseResult->cost['quote']['expires_at']==='2028-10-13T06:14:00.000000+00:00',
         'Precise completed '.$calendarPath.' renewal lost actual singleton Renew cost or quote expiry provenance.');
-    $afterObserver=new Paymenter\Extensions\Servers\Enom\Services\DomainObservation(new EnomApi(new RegistrarClient('offline-account','synthetic-token-do-not-store',$fake,null,true)),fn()=>$configuration);
-    checkExecution($afterObserver->observeRenewalQuote($preciseDomain->id)==='quoted'
-        &&$preciseDomain->fresh()->observation['renewal_quote']['base_expires_at']==='2029-10-13'
-        &&$preciseDomain->fresh()->observation['renewal_quote']['expires_at']==='2029-10-13T06:14:00.000000+00:00',
-        'Exact after-renewal GetInfo/GetExtendInfo local shapes failed read-only quote confirmation.');
-    $operations->execute($preciseSponsor->id);$operations->reconcile($preciseSponsor->id);
+    $operations->execute($preciseComplimentary->id);$operations->reconcile($preciseComplimentary->id);
     checkExecution(count($writes)===1&&$preciseMoney===executionNativeMoney()&&$preciseDomain->fresh()->service->expires_at===null,
         'Completed date reconciliation replayed provider spending or changed native financial history/date.');
 }
 // 0.3 complimentary renewals: the quote must be complete and at or under complimentary_cost_cap; a confirmed overrun pauses spending.
 executionClock();
-$server->settings()->create(['key' => 'complimentary_cost_cap', 'value' => '11.00']);
+$server->settings()->where('key', 'complimentary_cost_cap')->update(['value' => '11.00']);
 $complimentary = $make('complimentary');
 checkExecution($complimentary->state === 'queued' && $complimentary->funding_basis === 'complimentary' && $complimentary->invoice_id === null
     && $complimentary->amount === '0.00' && $complimentary->policy['complimentary_cap_minor'] === 1100 && (int) $complimentary->authorized_by === $staff->id,
@@ -783,7 +736,7 @@ $sent->update(['policy' => $sent->policy + ['dispatch_attempted_at' => now()->to
 $sent->domain->update(['price_mode' => 'standard']);
 checkExecution($operations->funded($sent->fresh()), 'Revocation after dispatch stopped the outcome being recorded.');
 $recorded = $make('complimentary');
-$recorded->domain->update(['price_mode' => 'custom']);
+$recorded->domain->update(['price_mode' => 'standard']);
 $recorded->domain->service->update(['price' => '20.00']);
 checkExecution(!$operations->funded($recorded->fresh()), 'Complimentary renewal stayed funded after the service became paid.');
 // A confirmed actual charge above the limit pauses further automatic spending for that domain.

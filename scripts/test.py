@@ -24,6 +24,11 @@ SUITES = {
         'transfer-rdap.php',
     ],
     'native': [
+        'billing-integration.php',
+        'domain-billing.php',
+        'managed-renewal-execution.php',
+        'renewal-admission.php',
+        'renewal-lifecycle-proof.php',
         'capability-readbacks.php',
         'provider-disposition.php',
         'native-date-missing-schema.php',
@@ -36,7 +41,10 @@ SUITES = {
         'cart-integration.php',
         'registration-setup.php',
         'transfer-codes.php',
+        'registrar-terms.php',
+        'registry-details.php',
         'glue-records.php',
+        'refunds.php',
         'reminders.php',
     ],
     'ui': [

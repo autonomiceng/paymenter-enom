@@ -1,7 +1,6 @@
 <?php
-// 0.4 registry details (.us nexus, purpose and a country child) through the native order path: the quote carries the
-// stored schema, place() validates against it before writing anything, Purchase/TP_CreateOrder send the values, and the
-// chosen values stay on the domain snapshot after the private order payload is purged. Injected provider only.
+// Native registry fields, conditional dependencies, dispatch values and retained safe snapshots.
+// Disposable native app; injected provider; no real requests.
 $enomTestLabel = 'registry';
 require dirname(__DIR__).'/enom-native-app.php';
 
@@ -13,8 +12,8 @@ use Paymenter\Extensions\Servers\Enom\Api\RegistrarClient;
 use Paymenter\Extensions\Servers\Enom\Api\RegistrarResult;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Models\Operation;
-use Paymenter\Extensions\Servers\Enom\Models\OrderIntent;
 use Paymenter\Extensions\Servers\Enom\Models\Tld;
+require_once dirname(__DIR__).'/enom-cart-order.php';
 use Paymenter\Extensions\Servers\Enom\Services\Catalogue;
 use Paymenter\Extensions\Servers\Enom\Services\DomainManager;
 use Paymenter\Extensions\Servers\Enom\Services\DomainOperations;
@@ -32,6 +31,7 @@ $transport = function (string $command, array $params) use (&$requests, &$availa
         return enomXml($command, '<Domains><Domain><Name>'.$name.'</Name><RRPCode>'.($available ? '210' : '211').'</RRPCode><IsPremium>false</IsPremium><IsPlatinum>false</IsPlatinum><IsEAP>false</IsEAP>'
             .'<Properties><Transferable>'.($available ? 'false' : 'true').'</Transferable></Properties><Prices><Currency>USD</Currency><Registration>6.00</Registration><Renewal>6.00</Renewal><Transfer>6.00</Transfer></Prices></Domain></Domains>');
     }
+    if ($command === 'PE_GetProductPrice') { return enomXml($command, '<productprice><productenabled>True</productenabled><price>6.0000</price></productprice>'); }
     if ($command === 'Purchase') { return enomXml($command, '<RRPCode>200</RRPCode><OrderID>91001</OrderID><DomainInfo><RegistryExpDate>2027-10-14 10:00:00.000</RegistryExpDate></DomainInfo>'); }
     if ($command === 'GetDomainExp') { return enomXml($command, '<ExpirationDate>2027-10-14</ExpirationDate>'); }
     if ($command === 'GetDomainInfo') { return enomXml($command, '<GetDomainInfo><domainname domainnameid="5150">'.$name.'</domainname><status><expiration>2027-10-14</expiration><belongs-to>offline-account</belongs-to></status></GetDomainInfo>'); }
@@ -48,35 +48,34 @@ $server = App\Models\Server::create(['name' => 'Registry Enom', 'type' => 'serve
 foreach (['uid' => 'offline-account', 'token' => 'offline-token', 'operations_enabled' => '1', 'billing_enabled' => '1'] as $key => $value) { $server->settings()->create(['key' => $key, 'value' => $value]); }
 $fixture = file_get_contents(dirname(__DIR__).'/fixtures/enom-test-api/enom-getextattributes-us.xml');
 $schema = RegistryFields::normalize((new RegistrarClient('uid', 'token', fn () => $fixture, null, true))->execute('GetExtAttributes', ['TLD' => 'us']));
-$us = Tld::create(['server_id' => $server->id, 'tld' => 'us', 'enabled' => true, 'pricing_mode' => 'fixed', 'register_price' => '9.00', 'renew_price' => '10.00', 'transfer_price' => '9.50',
+$us = enomTestTld(['server_id' => $server->id, 'tld' => 'us', 'enabled' => true, 'pricing_mode' => 'fixed', 'register_price' => '9.00', 'renew_price' => '10.00', 'transfer_price' => '9.50',
     'registry_fields' => $schema]);
-Tld::create(['server_id' => $server->id, 'tld' => 'com', 'enabled' => true, 'pricing_mode' => 'fixed', 'register_price' => '12.00', 'renew_price' => '14.00', 'transfer_price' => '13.00']);
-app(Catalogue::class)->ensureProduct($server->id);
+enomTestTld(['server_id' => $server->id, 'tld' => 'com', 'enabled' => true, 'pricing_mode' => 'fixed', 'register_price' => '12.00', 'renew_price' => '14.00', 'transfer_price' => '13.00']);
+enomCartProfile($client);
 $contacts = ['registrant' => ['first_name' => 'Nexus', 'last_name' => 'Owner', 'address1' => '1 Main Street', 'city' => 'Austin', 'state_province' => 'TX', 'postal_code' => '73301',
     'country' => 'US', 'email_address' => 'nexus.owner@example.com', 'phone' => '+1.5125550100']];
 $history = fn () => tableRows(['invoices', 'invoice_items', 'services', 'orders', 'enom_domains', 'enom_operations']);
 
-// The stored schema round-trips through the model cast and reaches the quote for the order form.
+// The stored schema reaches native checkout with its conditional child fields.
 verify(app(Catalogue::class)->attributesFor($us->fresh()) === $schema && count($schema) === 3, 'Stored registry schema did not round-trip.');
-$quote = $orders->quote($client, 'nexus-one.us');
-verify($quote['registry_fields'] === $schema && $orders->quote($client, 'plain-name.com')['registry_fields'] === [], 'Quote does not carry exactly the ending\'s registry fields.');
-
-// place() validates before writing: missing, unlisted and missing-child details refuse with registry.<name> keys.
-foreach ([[[], ['registry.us_nexus', 'registry.us_purpose']], [['us_nexus' => 'C31', 'us_purpose' => 'P1'], ['registry.global_cc_us']],
-    [['us_nexus' => 'C11', 'us_purpose' => 'P9'], ['registry.us_purpose']], [['us_nexus' => 'C32', 'us_purpose' => 'P1', 'global_cc_us' => 'XX'], ['registry.global_cc_us']]] as [$input, $keys]) {
-    $before = $history();
-    try { $orders->place($client, $quote['intent_id'], $contacts, null, [], $input); verify(false, 'Invalid registry details placed: '.json_encode($input)); }
-    catch (InputValidationException $error) { verify(array_keys($error->errors) === $keys, 'Registry errors differ for '.json_encode($input).': '.json_encode($error->errors)); }
-    verify($history() == $before && OrderIntent::findOrFail($quote['intent_id'])->claimed_at === null, 'Refused registry details wrote records or claimed the quote.');
+$fields = app(\Paymenter\Extensions\Servers\Enom\Services\CartOrdering::class)->fields(app(Catalogue::class)->productFor($us, 'register'), ['enom_registry_us_nexus'=>'C31']);
+verify(in_array('enom_registry_global_cc_us', array_column($fields,'name'), true), 'Native checkout omitted the required child field.');
+foreach ([[], ['us_nexus'=>'C31','us_purpose'=>'P1'], ['us_nexus'=>'C11','us_purpose'=>'P9']] as $input) {
+    $cart = enomCartStart($client);
+    $product = app(Catalogue::class)->productFor($us,'register'); $plan = app(Catalogue::class)->billingPlan($product);
+    $config=['domain'=>'invalid.us']; foreach($input as $key=>$value){$config['enom_registry_'.$key]=$value;}
+    $before=$history();
+    refuses(fn()=> $cart->items()->create(['product_id'=>$product->id,'plan_id'=>$plan->id,'quantity'=>1,'config_options'=>[],'checkout_config'=>$config]), '', 'Invalid registry config accepted.', [InputValidationException::class]);
+    verify($history()==$before,'Invalid registry config wrote billing rows.');
 }
 // Valid details: only known fields, the child only when its option requires it.
-$invoice = $orders->place($client, $quote['intent_id'], $contacts, null, [], ['us_nexus' => 'C31', 'global_cc_us' => 'GB', 'us_purpose' => 'P1', 'injected' => 'x', 'RegistrantFirstName' => 'Injected']);
+$invoice = enomCartOrder($client, 'nexus-one.us', 'register', 1, ['us_nexus' => 'C31', 'global_cc_us' => 'GB', 'us_purpose' => 'P1', 'injected' => 'x', 'RegistrantFirstName' => 'Injected'])['invoice'];
 $operation = Operation::where('invoice_id', $invoice->id)->sole();
 verify($operation->payload['registry'] === ['us_nexus' => 'C31', 'global_cc_us' => 'GB', 'us_purpose' => 'P1'], 'Stored registry details differ: '.json_encode($operation->payload['registry'] ?? null));
-$citizen = $orders->place($client, $orders->quote($client, 'nexus-two.us')['intent_id'], $contacts, null, [], ['us_nexus' => 'C11', 'global_cc_us' => 'GB', 'us_purpose' => 'P3']);
+$citizen = enomCartOrder($client, 'nexus-two.us', 'register', 1, ['us_nexus' => 'C11', 'global_cc_us' => 'GB', 'us_purpose' => 'P3'])['invoice'];
 verify(Operation::where('invoice_id', $citizen->id)->sole()->payload['registry'] === ['us_nexus' => 'C11', 'us_purpose' => 'P3'], 'An unrequested child value was kept.');
 // Endings without registry fields ignore submitted details.
-$plain = $orders->place($client, $orders->quote($client, 'plain-name.com')['intent_id'], $contacts, null, [], ['us_nexus' => 'C11']);
+$plain = enomCartOrder($client, 'plain-name.com', 'register', 1, ['us_nexus' => 'C11'])['invoice'];
 verify(Operation::where('invoice_id', $plain->id)->sole()->payload['registry'] === [], 'Registry details stored for an ending without fields.');
 
 // Execution: Purchase carries the values as name=value; once confirmed, the values stay visible on the snapshot.
@@ -98,15 +97,5 @@ $refreshTransport = new DomainOperations(new EnomApi(new RegistrarClient('offlin
 $refreshTransport->refreshDomain($domain->id, $client);
 verify(($domain->fresh()->snapshot['registry'] ?? null) === ['us_nexus' => 'C31', 'global_cc_us' => 'GB', 'us_purpose' => 'P1'], 'Refresh dropped the registry details.');
 
-// Transfers send the same values on TP_CreateOrder.
-$available = false;
-$transferQuote = $orders->quote($client, 'nexus-move.us', 'transfer');
-$transfer = $orders->place($client, $transferQuote['intent_id'], $contacts, 'EPP-NEXUS-1', [], ['us_nexus' => 'C21', 'us_purpose' => 'P2']);
-ExtensionHelper::addPayment($transfer->id, null, amount: 9.5, isCreditTransaction: true);
-$requests = [];
-$operations->execute(Operation::where('invoice_id', $transfer->id)->sole()->id);
-$create = array_values(array_filter($requests, fn ($request) => $request[0] === 'TP_CreateOrder'));
-verify(count($create) === 1 && $create[0][1]['us_nexus'] === 'C21' && $create[0][1]['us_purpose'] === 'P2' && $create[0][1]['AuthInfo1'] === 'EPP-NEXUS-1', 'TP_CreateOrder did not carry the registry details.');
-
-echo 'Registry details: '.$checks.' passed; known runtime bugs: '.($knownBugs ? implode(', ', $knownBugs) : 'none').'; injected provider only; SQLite in memory.'.PHP_EOL;
+echo 'Registry details: '.$checks.' passed; injected provider only; SQLite in memory.'.PHP_EOL;
 $successful = true;

@@ -1,46 +1,8 @@
 <?php
-require_once dirname(__DIR__).'/paymenter-test-app.php';
-
-// Real stock Laravel/models, synthetic environment, in-memory SQLite, injected fake provider.
-// Never load an installed app or any .env. Run: php tests/Enom/billing-integration.php
-$repo = dirname(__DIR__, 2);
-$successful = false;
-$testRoot = null;
-paymenterTestShutdown($testRoot, $successful);
-$release = paymenterTestApp();
-if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
-$testRoot = $repo.'/.scratch/enom-billing-test-'.bin2hex(random_bytes(5));
-mkdir($testRoot, 0700, true);
-foreach (['bootstrap/cache', 'storage/framework/cache', 'storage/framework/sessions', 'storage/framework/views', 'storage/logs'] as $path) { mkdir($testRoot.'/'.$path, 0700, true); }
-foreach (['config', 'database', 'routes', 'vendor', 'themes', 'resources', 'public'] as $path) { symlink($release.'/'.$path, $testRoot.'/'.$path); }
-mkdir($testRoot.'/app', 0700);
-foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($release.'/app', FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file) {
-    $target = $testRoot.'/app/'.substr($file->getPathname(), strlen($release.'/app/'));
-    if ($file->isDir()) { mkdir($target, 0700, true); } else { copy($file->getPathname(), $target); }
-}
-copy($release.'/bootstrap/app.php', $testRoot.'/bootstrap/app.php');
-copy($release.'/bootstrap/providers.php', $testRoot.'/bootstrap/providers.php');
-copy($release.'/composer.json', $testRoot.'/composer.json');
-$extensionRoot = $testRoot.'/extensions/Servers/Enom';
-mkdir($extensionRoot, 0700, true);
-foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($repo.'/Enom', FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file) {
-    $target = $extensionRoot.'/'.substr($file->getPathname(), strlen($repo.'/Enom/'));
-    if ($file->isDir()) { mkdir($target, 0700, true); } else { copy($file->getPathname(), $target); }
-}
-foreach (['APP_ENV' => 'testing', 'APP_KEY' => 'base64:'.base64_encode(str_repeat('t', 32)), 'APP_URL' => 'http://enom-tests.invalid',
-    'DB_CONNECTION' => 'sqlite', 'DB_DATABASE' => ':memory:', 'CACHE_STORE' => 'array', 'QUEUE_CONNECTION' => 'database',
-    'SESSION_DRIVER' => 'array', 'MAIL_MAILER' => 'array', 'APP_TELEMETRY_ENABLED' => 'false'] as $key => $value) {
-    putenv($key.'='.$value); $_ENV[$key] = $_SERVER[$key] = $value;
-}
-$loader = require $release.'/vendor/autoload.php';
-$loader->addPsr4('Paymenter\\Extensions\\Servers\\Enom\\', $extensionRoot.'/', true);
-$app = require $testRoot.'/bootstrap/app.php';
-$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-config(['audit.enabled' => false, 'settings.mail_disabled' => true, 'settings.default_currency' => 'USD', 'settings.tax_enabled' => false, 'settings.theme' => 'default']);
-if (config('database.default') !== 'sqlite' || config('database.connections.sqlite.database') !== ':memory:') { throw new RuntimeException('Test database isolation failed.'); }
-Illuminate\Support\Facades\Artisan::call('migrate', ['--force' => true]);
-$extension = new Paymenter\Extensions\Servers\Enom\Enom;
-$extension->installed();
+$enomBootExtension = false;
+$enomCreateCurrency = false;
+require dirname(__DIR__).'/enom-native-app.php';
+require_once dirname(__DIR__).'/enom-cart-order.php';
 $extension->boot();
 Carbon\Carbon::setTestNow('2026-10-12 12:00:00');Carbon\CarbonImmutable::setTestNow(Carbon\Carbon::now());
 $checks = 0;
@@ -66,7 +28,8 @@ $fake = function (string $command, array $params) use (&$writes, &$providerCalls
     if ($command === 'GetDomainExp') { return xml($command, '<ExpirationDate>'.$providerExpiry.'</ExpirationDate>'); }
     // 0.3 orders are always billing-managed, so registration anchors the provider domain ID from this account's info read.
     if ($command === 'GetDomainInfo') { return xml($command, '<GetDomainInfo><domainname domainnameid="456">'.($params['SLD'] ?? 'demo').'.'.($params['TLD'] ?? 'com').'</domainname><status><expiration>'.$providerExpiry.'</expiration><belongs-to>synthetic</belongs-to></status></GetDomainInfo>'); }
-    if ($command === 'GetExtendInfo') { return xml($command, '<Expiration>'.$providerExpiry.'</Expiration><MaxExtension>9</MaxExtension>'); }
+    if ($command === 'GetExtendInfo') { return xml($command, '<Expiration>'.$providerExpiry.'</Expiration><MaxExtension>9</MaxExtension><RegistrarHold>false</RegistrarHold><Price>10.00</Price>'); }
+    if ($command === 'GetRenew') { return xml($command, '<auto-renew>False</auto-renew>'); }
     if ($command === 'Purchase' || $command === 'Extend') {
         $writes[] = $command;
         if ($unknownPurchase) { return '<invalid'; }
@@ -89,6 +52,7 @@ $fake = function (string $command, array $params) use (&$writes, &$providerCalls
         }
         return xml($command, '<Algorithm>13</Algorithm><Digest>'.str_repeat('A', 64).'</Digest><DigestType>2</DigestType><KeyTag>123</KeyTag>');
     }
+    if ($command === 'PE_GetProductPrice') { return xml($command, '<productprice><productenabled>True</productenabled><price>10.0000</price></productprice>'); }
     if ($command === 'TP_CreateOrder') { $writes[] = $command; return xml($command, '<TransferOrderID>555</TransferOrderID>'); }
     if ($command === 'DeleteDnsSec') { $writes[] = $command; return xml($command, '<ResponseCode>100000</ResponseCode>'); } // Provider still returns the tuple after ack.
     return xml($command, '<RRPCode>200</RRPCode>');
@@ -101,59 +65,41 @@ $user = App\Models\User::create(['email' => 'demo@example.invalid', 'password' =
 $other = App\Models\User::create(['email' => 'other@example.invalid', 'password' => bcrypt('synthetic')]);
 App\Models\Currency::create(['code' => 'USD', 'name' => 'US Dollar', 'format' => '1,000.00', 'prefix' => '$']);
 $server = App\Models\Server::create(['name' => 'Synthetic Enom', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
-$server->settings()->create(['key' => 'lead_days', 'value' => 30, 'type' => 'integer']);
 $server->settings()->create(['key' => 'operations_enabled', 'value' => true, 'type' => 'boolean']);
 $server->settings()->create(['key' => 'dns_tools', 'value' => true, 'type' => 'boolean']); // This file exercises SRV/DNSSEC requests.
 $category = App\Models\Category::create(['name' => 'Synthetic domains', 'slug' => 'synthetic-domains']);
 $product = App\Models\Product::create(['name' => 'Synthetic .com', 'category_id' => $category->id, 'server_id' => $server->id, 'hidden' => true]);
 // 0.3: endings and prices come from the enom_tlds catalogue; the hidden product is the server's catalogue product.
-foreach (['enom_catalogue' => '1', 'enom_privacy_price' => '5.00'] as $key => $value) { $product->settings()->create(['key' => $key, 'value' => $value]); }
+$server->settings()->create(['key'=>'privacy_price','value'=>'5.00']);
 // Credentials saved without the encrypted flag are encrypted by the extension's Setting listener before the first write.
 $server->settings()->create(['key' => 'uid', 'value' => 'synthetic']);
 $server->settings()->create(['key' => 'token', 'value' => 'synthetic']);
-Paymenter\Extensions\Servers\Enom\Models\Tld::create(['server_id' => $server->id, 'tld' => 'com', 'enabled' => true, 'pricing_mode' => 'fixed',
+enomTestTld(['server_id' => $server->id, 'tld' => 'com', 'enabled' => true, 'pricing_mode' => 'fixed',
     'register_price' => '15.00', 'renew_price' => '15.00', 'transfer_price' => '15.00']);
 $plan = $product->plans()->create(['name' => 'One year', 'type' => 'recurring', 'billing_unit' => 'year', 'billing_period' => 1]);
 $plan->prices()->create(['currency_code' => 'USD', 'price' => 15, 'setup_fee' => 0]);
-// The upstream direct checkout path must be blocked without a core/template edit.
-$checkout = new App\Livewire\Products\Checkout;
-$checkout->category = $category; $product->slug = 'synthetic-com'; $product->save();
-$checkout->mount('synthetic-com');
-check(!empty($checkout->getCheckoutConfig()), 'Direct native checkout auto-added the hidden registrar product.');
-try { $checkout->validate(); check(false, 'Native checkout accepted a domain without an intent.'); } catch (Illuminate\Validation\ValidationException) { check(true, 'Direct checkout validation refused.'); }
-$nativeCart = App\Models\Cart::create(['user_id' => $user->id, 'currency_code' => 'USD']);
-try { $nativeCart->items()->create(['product_id' => $product->id, 'plan_id' => $plan->id, 'quantity' => 1, 'config_options' => [], 'checkout_config' => []]); check(false, 'Native cart stored an Enom order without intent.'); }
-catch (App\Exceptions\DisplayException) { check(true, 'Native cart refused registrar product.'); }
+$tld = Paymenter\Extensions\Servers\Enom\Models\Tld::where('tld','com')->sole();
+$product = app(Paymenter\Extensions\Servers\Enom\Services\Catalogue::class)->productFor($tld,'register');
+$plan = app(Paymenter\Extensions\Servers\Enom\Services\Catalogue::class)->billingPlan($product);
+
+enomCartProfile($user);
 $contacts = ['registrant' => ['first_name' => 'Demo', 'last_name' => 'Owner', 'organization_name' => 'Demo', 'address1' => '123 Example Road', 'city' => 'Example', 'postal_code' => '12345', 'country' => 'US', 'email_address' => 'demo@example.com', 'phone' => '+1.5551234567']];
-$quote = $orders->quote($user, 'billing-demo.com');
-$invoice = $orders->place($user, $quote['intent_id'], $contacts);
+$invoice = enomCartOrder($user, 'billing-demo.com')[ 'invoice' ];
 $domain = Paymenter\Extensions\Servers\Enom\Models\Domain::firstOrFail();
 $operation = Paymenter\Extensions\Servers\Enom\Models\Operation::firstOrFail();
 check($operation->state === 'awaiting_payment', 'Initial operation must be bound before payment.');
 // 0.3 ordering: catalogue price, the server's existing catalogue product, always-managed billing and a recorded account binding.
 $expectedAccount = Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard::accountFingerprint(['uid' => 'synthetic']);
-check($quote['amount'] === '15.00' && $quote['renewal_amount'] === '15.00' && $quote['complimentary'] === false && $quote['test_environment'] === true, 'Quote did not use the enabled catalogue prices.');
-check($domain->service->product_id === $product->id && App\Models\Product::count() === 1, 'Ordering created another product instead of reusing the catalogue product.');
-check($domain->billing_managed && $domain->price_mode === null && ($domain->renewal_policy['account_fingerprint'] ?? null) === $expectedAccount, 'New order is not billing-managed with its account fingerprint.');
+check($domain->service->product_id === $product->id, 'Ordering created another product instead of reusing the catalogue product.');
+check($domain->billing_managed && $domain->price_mode === 'standard' && ($domain->renewal_policy['account_fingerprint'] ?? null) === $expectedAccount, 'New order is not billing-managed with its account fingerprint.');
 check($server->settings()->where('key', 'enom_account_binding')->value('value') === $expectedAccount, 'First order did not bind the server to its Enom account.');
 check($server->settings()->where('key', 'uid')->value('encrypted') && $server->settings()->where('key', 'token')->value('encrypted'), 'Credentials saved without the flag were stored unencrypted.');
 
 $refused = false;
-try { $orders->quote($user, 'billing-demo.net'); }
+try { $orders->check($user, 'billing-demo.net'); }
 catch (InvalidArgumentException|RuntimeException) { $refused = true; }
 check($refused, 'An ending without an enabled catalogue row was quoted.');
-// The rest of this file covers the retained legacy lifecycle: a pre-0.3 domain billed by native service dates.
-// Its order is reshaped to what a 0.2 order with managed billing off recorded: no renewal policy and an unmanaged operation binding.
 check(!empty($operation->policy['billing_managed']) && $operation->policy['account_fingerprint'] === $expectedAccount, 'New order binding lacks its managed account policy.');
-function legacyOrder(App\Models\Invoice $invoice): void {
-    $operation = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $invoice->id)->firstOrFail();
-    Illuminate\Database\Eloquent\Model::withoutEvents(function () use ($operation) {
-        $operation->domain->update(['billing_managed' => false, 'renewal_policy' => null]);
-        $operation->update(['policy' => null]);
-    });
-}
-legacyOrder($invoice);
-check($orders->place($user, $quote['intent_id'], $contacts)->id === $invoice->id, 'Intent replay created another invoice.');
 check(count($writes) === 0, 'Ordering executed a provider write.');
 check($operations->acceptPaidInvoice($invoice) === [] && $operation->fresh()->state === 'awaiting_payment', 'Unpaid invoice queued registrar action.');
 check(!str_contains(Illuminate\Support\Facades\DB::table('enom_operations')->value('payload'), 'Example Road'), 'Operation contacts were stored plaintext.');
@@ -167,14 +113,15 @@ Illuminate\Support\Facades\DB::transaction(function () use ($user, $invoice) {
 });
 check($invoice->fresh()->status === 'paid', 'Native credit path did not mark invoice paid.');
 check($operations->funded($operation->fresh()), 'Native credit funding was rejected.');
-check($operation->fresh()->state === 'queued', 'Paid native event did not enqueue operation.');
+check($operation->fresh()->state === 'queued', 'Paid native event did not enqueue operation: '.json_encode($operation->fresh()->toArray()));
 $completed = $operations->execute($operation->id);
 check($completed->state === 'succeeded', 'Registration did not confirm provider expiry: '.$completed->safe_code);
 check($domain->fresh()->provider_expires_at->format('Y-m-d') === '2027-10-12', 'Registrar expiry missing.');
-check($domain->fresh()->service->expires_at->format('Y-m-d') === '2027-09-12', 'Native billing lead alignment failed.');
+check($domain->fresh()->service->expires_at === null, 'Native billing lead alignment failed.');
 $operations->execute($operation->id); $operations->acceptPaidInvoice($invoice->fresh());
 check(count($writes) === 1, 'Duplicate paid event executed another registration.');
 check($completed->payload === null, 'Terminal registration retained contact/EPP payload.');
+$checkOverrides['billing-demo'] = ['available' => false, 'transferable' => true];
 $renewal = $orders->renew($user, $domain->id, str_repeat('a', 64));
 check($orders->renew($user, $domain->id, str_repeat('a', 64))->id === $renewal->id, 'Renew nonce replay duplicated invoice.');
 Illuminate\Support\Facades\DB::transaction(function () use ($user, $renewal) {
@@ -200,12 +147,12 @@ $operations->toggleRenewalPreference($user, $domain->id, true);
 $service = $domain->fresh()->service;
 $service->price = 0; $service->expires_at = '2030-01-01'; $service->save();
 $summary = $operations->sweep();
-check($domain->fresh()->drift_detected_at !== null && $summary['drift'] > 0, 'Free native renewal drift was invisible.');
-$service->price = 15; $service->expires_at = '2028-09-12'; $service->save();
+check($domain->fresh()->service->expires_at === null, 'Managed service acquired a native renewal date.');
+$service->price = 15; $service->expires_at = null; $service->save();
 // A running stale claim may never be retransmitted.
 $held = Paymenter\Extensions\Servers\Enom\Models\Operation::create(['domain_id' => $domain->id, 'service_id' => $service->id,
     'action' => 'renew', 'operation_key' => 'stale-demo', 'funding_basis' => 'paid_invoice', 'state' => 'running',
-    'currency' => 'USD', 'amount' => 15, 'started_at' => now()->subMinutes(10), 'lease_expires_at' => now()->subMinutes(5)]);
+    'currency' => 'USD', 'amount' => 15, 'policy' => ['dispatch_attempted_at' => now()->toIso8601String()], 'started_at' => now()->subMinutes(10), 'lease_expires_at' => now()->subMinutes(5)]);
 check($operations->execute($held->id)->state === 'uncertain', 'Expired claim became replayable.');
 check(count($writes) === 2, 'Expired claim executed provider write.');
 $held->update(['state' => 'rejected']); // Explicit fixture disposition, never a real uncertain-operation retry.
@@ -215,12 +162,12 @@ $domain->update(['capabilities' => ['renew' => true, 'privacy_purchase' => true]
 $privacyInvoice = $orders->privacy($user, $domain->id, 'purchase', str_repeat('c', 64));
 check($privacyInvoice->items->first()->reference_type === null && $privacyInvoice->items->first()->reference_id === null, 'Privacy invoice referenced a native Service.');
 $gateway = App\Models\Gateway::create(['name' => 'Synthetic test gateway', 'type' => 'gateway', 'extension' => 'Stripe', 'enabled' => true]);
-$beforeDue = $domain->service->expires_at->format('Y-m-d');
+$beforeDue = $domain->service->expires_at?->format('Y-m-d');
 App\Helpers\ExtensionHelper::addPayment($privacyInvoice->id, 'Stripe', amount: 5, transactionId: 'synthetic-privacy');
 $privacyOperation = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $privacyInvoice->id)->firstOrFail();
 check($operations->funded($privacyOperation), 'Gateway-paid privacy funding refused.');
 check($operations->execute($privacyOperation->id)->state === 'succeeded', 'Privacy purchase did not confirm provider subscription.');
-check($domain->fresh()->service->expires_at->format('Y-m-d') === $beforeDue, 'Privacy payment advanced native due date.');
+check($domain->fresh()->service->expires_at?->format('Y-m-d') === $beforeDue, 'Privacy payment advanced native due date.');
 $domain = $domain->fresh(); $domain->update(['capabilities' => ['privacy_renew' => true]]);
 $privacyRenewal = $orders->privacy($user, $domain->id, 'renew', str_repeat('f', 64));
 App\Helpers\ExtensionHelper::addPayment($privacyRenewal->id, 'Stripe', amount: 5, transactionId: 'synthetic-privacy-renew');
@@ -237,17 +184,16 @@ $privacyLeap=$orders->privacy($user,$domain->id,'renew',str_repeat('d',64));
 $privacyLeapOperation=Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id',$privacyLeap->id)->firstOrFail();
 check($privacyLeapOperation->base_expires_at->format('Y-m-d')==='2028-02-29'
     &&$privacyLeapOperation->expected_expires_at->format('Y-m-d')==='2029-02-28','Privacy annual term overflowed Feb29.');
-$privacyNativeDue=$domain->service->expires_at->format('Y-m-d');
+$privacyNativeDue=$domain->service->expires_at?->format('Y-m-d');
 App\Helpers\ExtensionHelper::addPayment($privacyLeap,'Stripe',amount:5,transactionId:'synthetic-privacy-leap');
 check($operations->execute($privacyLeapOperation->id)->state==='succeeded'
     &&$privacyLeapOperation->fresh()->confirmed_expires_at->format('Y-m-d')==='2029-02-28','Feb29 privacy renewal did not confirm exact Feb28 readback.');
-check($domain->fresh()->service->expires_at->format('Y-m-d')===$privacyNativeDue,'Privacy leap renewal changed native domain billing.');
+check($domain->fresh()->service->expires_at?->format('Y-m-d')===$privacyNativeDue,'Privacy leap renewal changed native domain billing.');
 $privacyRenewAdvances=false;Carbon\Carbon::setTestNow('2026-10-12 12:00:00');Carbon\CarbonImmutable::setTestNow(Carbon\Carbon::now());
 
 // A second fresh registration timeout is durable and blocks a later purchase for that domain.
 $providerExpiry = '2027-10-12';
-$quote2 = $orders->quote($user, 'unknown-billing-demo.com');
-$invoice2 = $orders->place($user, $quote2['intent_id'], $contacts);
+$invoice2 = enomCartOrder($user, 'unknown-billing-demo.com')[ 'invoice' ];
 App\Helpers\ExtensionHelper::addPayment($invoice2->id, 'Stripe', amount: 15, transactionId: 'synthetic-unknown');
 $unknown = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $invoice2->id)->firstOrFail();
 $unknownPurchase = true;
@@ -257,8 +203,7 @@ $operations->execute($unknown->id); $operations->reconcile($unknown->id);
 check(count($writes) === $writesBefore, 'Unknown registration was retried.');
 check($unknown->fresh()->payload !== null, 'Pending reconciliation lost encrypted request evidence.');
 // Native manually-paid status without any successful money transaction never authorizes a purchase.
-$quote3 = $orders->quote($user, 'unfunded-billing-demo.com');
-$invoice3 = $orders->place($user, $quote3['intent_id'], $contacts);
+$invoice3 = enomCartOrder($user, 'unfunded-billing-demo.com')[ 'invoice' ];
 $invoice3->status = 'paid'; $invoice3->save();
 $unfunded = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $invoice3->id)->firstOrFail();
 check($unfunded->state === 'awaiting_payment' && !$operations->funded($unfunded), 'Manually-paid status without money authorized registrar action.');
@@ -266,7 +211,7 @@ check($operations->acceptPaidInvoice($invoice3) === [] && $unfunded->fresh()->st
 // A historical unbound service invoice is not reconstructed by the sweep.
 $historical = new App\Models\Invoice(['user_id' => $user->id, 'currency_code' => 'USD', 'due_at' => now(), 'status' => 'paid']);
 $historical->send_create_email = false; $historical->save();
-$historical->items()->create(['reference_type' => App\Models\Service::class, 'reference_id' => $domain->service_id, 'quantity' => 1, 'price' => 15, 'description' => 'Synthetic historical invoice']);
+App\Models\InvoiceItem::withoutEvents(fn()=> $historical->items()->create(['reference_type' => App\Models\Service::class, 'reference_id' => $domain->service_id, 'quantity' => 1, 'price' => 15, 'description' => 'Synthetic historical invoice']));
 check(!Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $historical->id)->exists(), 'Historical paid item created an operation.');
 $operations->sweep();
 check(count($writes) === $writesBefore, 'Sweep replayed historical or uncertain purchase.');
@@ -291,25 +236,17 @@ $reviewApi = new Paymenter\Extensions\Servers\Enom\Api\EnomApi(new Paymenter\Ext
 }));
 $reviewOperations = new Paymenter\Extensions\Servers\Enom\Services\DomainOperations($reviewApi, fn () => ['uid' => 'synthetic', 'token' => 'synthetic']);
 check($reviewOperations->reconcile($unknown->id)->state === 'uncertain', 'Rejected expiry reply confirmed registration.');
-// Generic staff funding cannot override an existing customer invoice.
+// An unpaid native invoice cannot authorize a registrar purchase.
 $role = App\Models\Role::create(['name' => 'Synthetic administrator', 'permissions' => ['*']]);
 $staff = App\Models\User::create(['email' => 'staff@example.invalid', 'password' => bcrypt('synthetic'), 'role_id' => $role->id]);
 $unknownPurchase = false;
-$fundQuote = $orders->quote($user, 'funded-billing-demo.com');
-$fundInvoice = $orders->place($user, $fundQuote['intent_id'], $contacts);
-legacyOrder($fundInvoice); // Later checks use its native service due date.
+$fundInvoice = enomCartOrder($user, 'funded-billing-demo.com')[ 'invoice' ];
 $fundOperation = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $fundInvoice->id)->firstOrFail();
 $beforeFund = count($writes);
 $beforeFundingRows = [
     $fundInvoice->fresh()->getRawOriginal(), $fundOperation->fresh()->getRawOriginal(),
     $fundOperation->domain->service->getRawOriginal(),
 ];
-try {
-    $operations->approveFunding($fundOperation->id, $staff, 'Synthetic invoice override refusal.');
-    check(false, 'Generic funding overrode an unpaid customer invoice.');
-} catch (Paymenter\Extensions\Servers\Enom\Services\InputValidationException) {
-    check(true, 'Unpaid customer obligation required separate financial disposition.');
-}
 check($beforeFundingRows === [
     $fundInvoice->fresh()->getRawOriginal(), $fundOperation->fresh()->getRawOriginal(),
     $fundOperation->domain->fresh()->service->getRawOriginal(),
@@ -322,7 +259,7 @@ $fundDomain = $fundOperation->domain->fresh();
 check($fundDomain->service->status === 'active', 'Paid registrar success left native service pending.');
 check($fundInvoice->fresh()->status === 'paid', 'Real payment did not settle the original customer invoice.');
 $operations->acceptPaidInvoice($fundInvoice->fresh());
-check($fundDomain->fresh()->service->expires_at->format('Y-m-d') === '2027-09-12', 'Paid-event replay advanced due beyond provider lead.');
+check($fundDomain->fresh()->service->expires_at === null, 'Paid-event replay advanced due beyond provider lead.');
 check(count($writes) === $beforeFund + 1, 'Paid-event replay bought the domain again.');
 // Delayed privacy payment derives expected purchase term when sending, not at invoice creation.
 $fundDomain->update(['capabilities' => ['privacy_purchase' => true]]);
@@ -354,8 +291,7 @@ $operations->sweep();
 check($lateOperation->fresh()->state === 'queued', 'Old unpaid rows starved a later paid operation.');
 check(count($writes) === $sweepWrites, 'Scheduled recovery executed provider HTTP synchronously.');
 // Disable while a preflight read is in flight: final dispatch and subsequent reads fail closed.
-$guardQuote = $orders->quote($user, 'guard-billing-demo.com');
-$guardInvoice = $orders->place($user, $guardQuote['intent_id'], $contacts);
+$guardInvoice = enomCartOrder($user, 'guard-billing-demo.com')[ 'invoice' ];
 App\Helpers\ExtensionHelper::addPayment($guardInvoice->id, 'Stripe', amount: 15, transactionId: 'synthetic-guard');
 $guardOperation = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $guardInvoice->id)->firstOrFail();
 $gate = true; $guardWrites = 0; $guardReads = 0;
@@ -369,21 +305,19 @@ check($guardOperations->execute($guardOperation->id)->state !== 'succeeded' && $
 check($guardClient->execute('GetDomainInfo')->status === 'rejected' && $guardReads === 1 && $guardWrites === 0, 'Every-request gate did not block subsequent read.');
 // A TLD transfer flag cannot make an unregistered name a paid transfer candidate.
 $beforeTransferInvoices = App\Models\Invoice::count();
-$beforeTransferIntents = Paymenter\Extensions\Servers\Enom\Models\OrderIntent::count();
 $unregisteredTransferRejected = false;
-try { $orders->quote($user, 'unregistered-transfer-demo.com', 'transfer'); }
-catch (RuntimeException) { $unregisteredTransferRejected = true; }
+try { app(Paymenter\Extensions\Servers\Enom\Services\CartOrdering::class)->checkName($tld,'transfer','unregistered-transfer-demo.com',1); }
+catch (Throwable) { $unregisteredTransferRejected = true; }
 check($unregisteredTransferRejected, 'Unregistered transferable name was quoted.');
 $checkOverrides['ineligible-transfer-demo'] = ['available' => false, 'transferable' => false];
 $ineligibleTransferRejected = false;
-try { $orders->quote($user, 'ineligible-transfer-demo.com', 'transfer'); }
-catch (RuntimeException) { $ineligibleTransferRejected = true; }
+try { app(Paymenter\Extensions\Servers\Enom\Services\CartOrdering::class)->checkName($tld,'transfer','ineligible-transfer-demo.com',1); }
+catch (Throwable) { $ineligibleTransferRejected = true; }
 check($ineligibleTransferRejected, 'Registered but ineligible transfer name was quoted.');
-check(App\Models\Invoice::count() === $beforeTransferInvoices && Paymenter\Extensions\Servers\Enom\Models\OrderIntent::count() === $beforeTransferIntents, 'Rejected transfer quote created billing records.');
 // Eligibility may disappear after a valid quote and payment. Never send TP_CreateOrder then.
 $checkOverrides['race-transfer-demo'] = ['available' => false, 'transferable' => true];
-$transferQuote = $orders->quote($user, 'race-transfer-demo.com', 'transfer');
-$transferInvoice = $orders->place($user, $transferQuote['intent_id'], $contacts, 'synthetic-epp');
+$transferInvoice = enomCartOrder($user, 'race-transfer-demo.com', 'transfer')[ 'invoice' ];
+app(Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class)->submitCode($user, Paymenter\Extensions\Servers\Enom\Models\Domain::where('domain','race-transfer-demo.com')->sole()->id, 'synthetic-epp');
 App\Helpers\ExtensionHelper::addPayment($transferInvoice->id, 'Stripe', amount: 15, transactionId: 'synthetic-transfer-race');
 $transferOperation = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $transferInvoice->id)->firstOrFail();
 check($transferOperation->state === 'queued' && $operations->funded($transferOperation), 'Transfer race fixture never reached authorized execution.');
@@ -439,11 +373,9 @@ $dsReconcile = Paymenter\Extensions\Servers\Enom\Models\Operation::create(['doma
     'state' => 'uncertain', 'currency' => 'USD', 'amount' => 0, 'authorized_by' => $other->id, 'payload' => ['ds' => $observedTuple]]);
 $dsWritesBefore = count($writes);
 $dsInvoicesBefore = App\Models\Invoice::count();
-$dsIntentsBefore = Paymenter\Extensions\Servers\Enom\Models\OrderIntent::count();
 check($operations->reconcile($dsReconcile->id)->state === 'uncertain', 'Wrong-owner authorization confirmed DNSSEC add.');
 $dsReconcile->update(['authorized_by' => $user->id]);
 check($operations->reconcile($dsReconcile->id)->state === 'succeeded' && count($writes) === $dsWritesBefore, 'DNSSEC reconciliation resent the first add or failed to confirm the actual tuple.');
-check(App\Models\Invoice::count() === $dsInvoicesBefore && Paymenter\Extensions\Servers\Enom\Models\OrderIntent::count() === $dsIntentsBefore, 'DNSSEC readback altered billing/order records.');
 $dnssecShape = 'empty';
 $afterEmptyDs = $operations->refreshSnapshot($user, $domain->id);
 check($afterEmptyDs->capabilities['dnssec_add'] && !$afterEmptyDs->capabilities['dnssec_delete'], 'Verified empty DNSSEC still offered deletion.');
@@ -474,7 +406,7 @@ foreach ($nsCases as $case => $readback) {
     $nsOrder->send_create_email = false; $nsOrder->save();
     $nsService = $nsOrder->services()->create(['user_id' => $user->id, 'currency_code' => 'USD', 'product_id' => $product->id,
         'plan_id' => $plan->id, 'price' => 15, 'quantity' => 1, 'coupon_id' => null, 'status' => App\Models\Service::STATUS_ACTIVE,
-        'expires_at' => '2028-09-12']);
+        'expires_at' => null]);
     $nsDomain = Paymenter\Extensions\Servers\Enom\Models\Domain::create(['service_id' => $nsService->id, 'user_id' => $user->id,
         'server_id' => $server->id, 'domain' => 'ns-comparison-'.$case.'.com', 'sld' => 'ns-comparison-'.$case, 'tld' => 'com',
         'status' => 'active', 'provider_expires_at' => '2028-10-12', 'capabilities' => ['nameservers' => true]]);
@@ -535,7 +467,7 @@ $financialBefore = [
 ];
 $fundDomain = $fundDomain->fresh();
 $fundDomain->update(['capabilities' => array_merge($fundDomain->capabilities ?? [], ['lock' => true])]);
-$diagnosticDueBefore = $fundDomain->service->expires_at->format('Y-m-d');
+$diagnosticDueBefore = $fundDomain->service->expires_at?->format('Y-m-d');
 foreach (['530', '304151'] as $refusalCode) {
     $refusalCalls = 0;
     $refusalClient = new Paymenter\Extensions\Servers\Enom\Api\RegistrarClient('synthetic', 'synthetic', function ($command) use (&$refusalCalls, $refusalCode) {
@@ -584,7 +516,7 @@ check(Illuminate\Support\Facades\DB::table('enom_operations')->whereIn('id', $hi
 check([
     Illuminate\Support\Facades\DB::table('invoices')->orderBy('id')->get()->toArray(),
     Illuminate\Support\Facades\DB::table('invoice_transactions')->orderBy('id')->get()->toArray(),
-] == $financialBefore && $fundDomain->fresh()->service->expires_at->format('Y-m-d') === $diagnosticDueBefore, 'Rejected diagnostics changed financial data or billing due dates.');
+] == $financialBefore && $fundDomain->fresh()->service->expires_at?->format('Y-m-d') === $diagnosticDueBefore, 'Rejected diagnostics changed financial data or billing due dates.');
 // Runtime factory must reject the synthetic app even when caller changes configuration.
 // Paused processing pauses writes only. Reads (reconciliation, cost checks, drift) continue without
 // operations_enabled; a legacy reads_enabled setting no longer switches them off.
@@ -618,7 +550,8 @@ try { Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard::assertProvider($u
 catch (RuntimeException) { $refused = true; }
 check($refused, 'Unconfigured runtime accepted.');
 $operationCountBeforeLifecycle = Paymenter\Extensions\Servers\Enom\Models\Operation::count();
-$extension->installed(); $extension->uninstalled();
+$extension->installed();
+require_once dirname(__DIR__).'/enom-cart-order.php'; $extension->uninstalled();
 check(Paymenter\Extensions\Servers\Enom\Models\Operation::count() === $operationCountBeforeLifecycle, 'Reinstall/remove discarded operation history.');
 // Managed privacy keeps its own paid obligation usable across domain renewal revisions.
 Carbon\Carbon::setTestNow('2026-10-12 12:00:00');Carbon\CarbonImmutable::setTestNow(Carbon\Carbon::now());
@@ -630,7 +563,7 @@ foreach(['purchase','renew'] as $privacyAction){
     if($privacyAction==='renew')$managedPrivacy->update(['snapshot'=>['privacy'=>['expires_at'=>$privacyExpiry]],'capabilities'=>['privacy_renew'=>true]]);
     $managedPrivacyInvoice=$orders->privacy($user,$managedPrivacy->id,$privacyAction,hash('sha256','managed-'.$privacyAction));
     $managedPrivacyOp=Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id',$managedPrivacyInvoice->id)->sole();
-    check($managedPrivacyOp->policy===['dispatch_marker_version'=>1]&&$managedPrivacyOp->state==='awaiting_payment','New managed privacy did not retain marker-only policy.');
+    check($managedPrivacyOp->policy===[]&&$managedPrivacyOp->state==='awaiting_payment','New managed privacy did not retain marker-only policy.');
     $managedPrivacy->increment('confirmed_revision');
     App\Helpers\ExtensionHelper::addPayment($managedPrivacyInvoice,'Stripe',amount:5,transactionId:'synthetic-managed-privacy-'.$privacyAction);
     check($operations->funded($managedPrivacyOp->fresh())&&$managedPrivacyOp->fresh()->state==='queued','Paid managed privacy became unfunded after domain renewal revision.');

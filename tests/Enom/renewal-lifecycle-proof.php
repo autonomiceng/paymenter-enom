@@ -1,46 +1,8 @@
 <?php
-require_once dirname(__DIR__).'/paymenter-test-app.php';
-
-// Real stock Laravel/models, synthetic environment, in-memory SQLite, injected fake provider.
-// Never load an installed app or any .env. Run: php tests/Enom/renewal-lifecycle-proof.php
-$repo = dirname(__DIR__, 2);
-$successful = false;
-$testRoot = null;
-paymenterTestShutdown($testRoot, $successful);
-$release = paymenterTestApp();
-if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
-$testRoot = $repo.'/.scratch/enom-renewal-lifecycle-proof-'.bin2hex(random_bytes(5));
-mkdir($testRoot, 0700, true);
-foreach (['bootstrap/cache', 'storage/framework/cache', 'storage/framework/sessions', 'storage/framework/views', 'storage/logs'] as $path) { mkdir($testRoot.'/'.$path, 0700, true); }
-foreach (['config', 'database', 'routes', 'vendor', 'themes', 'resources', 'public'] as $path) { symlink($release.'/'.$path, $testRoot.'/'.$path); }
-mkdir($testRoot.'/app', 0700);
-foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($release.'/app', FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file) {
-    $target = $testRoot.'/app/'.substr($file->getPathname(), strlen($release.'/app/'));
-    if ($file->isDir()) { mkdir($target, 0700, true); } else { copy($file->getPathname(), $target); }
-}
-copy($release.'/bootstrap/app.php', $testRoot.'/bootstrap/app.php');
-copy($release.'/bootstrap/providers.php', $testRoot.'/bootstrap/providers.php');
-copy($release.'/composer.json', $testRoot.'/composer.json');
-$extensionRoot = $testRoot.'/extensions/Servers/Enom';
-mkdir($extensionRoot, 0700, true);
-foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($repo.'/Enom', FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file) {
-    $target = $extensionRoot.'/'.substr($file->getPathname(), strlen($repo.'/Enom/'));
-    if ($file->isDir()) { mkdir($target, 0700, true); } else { copy($file->getPathname(), $target); }
-}
-foreach (['APP_ENV' => 'testing', 'APP_KEY' => 'base64:'.base64_encode(str_repeat('t', 32)), 'APP_URL' => 'http://enom-tests.invalid',
-    'DB_CONNECTION' => 'sqlite', 'DB_DATABASE' => ':memory:', 'CACHE_STORE' => 'array', 'QUEUE_CONNECTION' => 'database',
-    'SESSION_DRIVER' => 'array', 'MAIL_MAILER' => 'array', 'APP_TELEMETRY_ENABLED' => 'false'] as $key => $value) {
-    putenv($key.'='.$value); $_ENV[$key] = $_SERVER[$key] = $value;
-}
-$loader = require $release.'/vendor/autoload.php';
-$loader->addPsr4('Paymenter\\Extensions\\Servers\\Enom\\', $extensionRoot.'/', true);
-$app = require $testRoot.'/bootstrap/app.php';
-$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-config(['audit.enabled' => false, 'settings.mail_disabled' => true, 'settings.default_currency' => 'USD', 'settings.tax_enabled' => false, 'settings.theme' => 'default']);
-if (config('database.default') !== 'sqlite' || config('database.connections.sqlite.database') !== ':memory:') { throw new RuntimeException('Test database isolation failed.'); }
-Illuminate\Support\Facades\Artisan::call('migrate', ['--force' => true]);
-$extension = new Paymenter\Extensions\Servers\Enom\Enom;
-$extension->installed();
+$enomBootExtension = false;
+$enomCreateCurrency = false;
+require dirname(__DIR__).'/enom-native-app.php';
+require_once dirname(__DIR__).'/enom-cart-order.php';
 // This proof installs only extension-owned tables. Proposed listeners below exist
 // only in this disposable process; no installed extension/application is booted.
 use App\Helpers\ExtensionHelper;
@@ -100,6 +62,7 @@ foreach (['app/Console/Commands/CronJob.php', 'app/Services/Invoice/ProcessPaidI
 $user = App\Models\User::create(['email' => 'lifecycle@example.invalid', 'password' => bcrypt('synthetic')]);
 App\Models\Currency::create(['code' => 'USD', 'name' => 'US Dollar', 'format' => '1,000.00', 'prefix' => '$']);
 $server = App\Models\Server::create(['name' => 'Isolated Enom proof', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
+enomTestTld(['server_id'=>$server->id,'tld'=>'com','renew_price'=>'15.00']);
 $category = App\Models\Category::create(['name' => 'Lifecycle proof', 'slug' => 'lifecycle-proof']);
 $product = App\Models\Product::create(['name' => 'Isolated domain', 'category_id' => $category->id, 'server_id' => $server->id, 'hidden' => true]);
 $plan = $product->plans()->create(['name' => 'One year', 'type' => 'recurring', 'billing_unit' => 'year', 'billing_period' => 1]);
@@ -143,7 +106,7 @@ clockAt('2026-11-09'); // E-22.
 [$early] = $create('early-payment');
 [$suspended] = $create('staff-suspended', 'suspended');
 [$cancelled] = $create('staff-cancelled', 'cancelled');
-[$sponsored] = $create('zero-no-sponsor', price: 0);
+[$free] = $create('zero-no-approval', price: 0);
 [$unmarked] = $create('unmarked', managed: false);
 nativeCron();
 proof(Invoice::count() === 0, 'Native cron billed a nullable domain.');
@@ -172,7 +135,7 @@ foreach (['2026-11-24', '2026-11-27', '2026-12-01', '2026-12-09', '2026-12-20'] 
     nativeCron();
     proof($late->fresh()->status === 'active' && $late->fresh()->expires_at === null, 'Native lifecycle closed grace before provider eligibility.');
     proof($lateInvoice->fresh()->status === 'pending', 'Native cron cancelled a payable grace invoice.');
-    proof($sponsored->fresh()->expires_at === null && $sponsored->fresh()->status === 'active', 'Native zero-price path advanced the sponsored fixture.');
+    proof($free->fresh()->expires_at === null && $free->fresh()->status === 'active', 'Native zero-price path advanced the zero-price fixture.');
     proof($suspended->fresh()->status === 'suspended', 'Native cron terminated a nullable suspended service.');
 }
 creditPay($lateInvoice);

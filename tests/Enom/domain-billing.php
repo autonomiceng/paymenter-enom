@@ -1,46 +1,8 @@
 <?php
-require_once dirname(__DIR__).'/paymenter-test-app.php';
-
-// Real stock Laravel/models, synthetic environment, in-memory SQLite, injected fake provider.
-// Never load an installed app or any .env. Run: php tests/Enom/domain-billing.php
-$repo = dirname(__DIR__, 2);
-$successful = false;
-$testRoot = null;
-paymenterTestShutdown($testRoot, $successful);
-$release = paymenterTestApp();
-if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
-$testRoot = $repo.'/.scratch/enom-domain-billing-test-'.bin2hex(random_bytes(5));
-mkdir($testRoot, 0700, true);
-foreach (['bootstrap/cache', 'storage/framework/cache', 'storage/framework/sessions', 'storage/framework/views', 'storage/logs'] as $path) { mkdir($testRoot.'/'.$path, 0700, true); }
-foreach (['config', 'database', 'routes', 'vendor', 'themes', 'resources', 'public'] as $path) { symlink($release.'/'.$path, $testRoot.'/'.$path); }
-mkdir($testRoot.'/app', 0700);
-foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($release.'/app', FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file) {
-    $target = $testRoot.'/app/'.substr($file->getPathname(), strlen($release.'/app/'));
-    if ($file->isDir()) { mkdir($target, 0700, true); } else { copy($file->getPathname(), $target); }
-}
-copy($release.'/bootstrap/app.php', $testRoot.'/bootstrap/app.php');
-copy($release.'/bootstrap/providers.php', $testRoot.'/bootstrap/providers.php');
-copy($release.'/composer.json', $testRoot.'/composer.json');
-$extensionRoot = $testRoot.'/extensions/Servers/Enom';
-mkdir($extensionRoot, 0700, true);
-foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($repo.'/Enom', FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file) {
-    $target = $extensionRoot.'/'.substr($file->getPathname(), strlen($repo.'/Enom/'));
-    if ($file->isDir()) { mkdir($target, 0700, true); } else { copy($file->getPathname(), $target); }
-}
-foreach (['APP_ENV' => 'testing', 'APP_KEY' => 'base64:'.base64_encode(str_repeat('t', 32)), 'APP_URL' => 'http://enom-tests.invalid',
-    'DB_CONNECTION' => 'sqlite', 'DB_DATABASE' => ':memory:', 'CACHE_STORE' => 'array', 'QUEUE_CONNECTION' => 'database',
-    'SESSION_DRIVER' => 'array', 'MAIL_MAILER' => 'array', 'APP_TELEMETRY_ENABLED' => 'false'] as $key => $value) {
-    putenv($key.'='.$value); $_ENV[$key] = $_SERVER[$key] = $value;
-}
-$loader = require $release.'/vendor/autoload.php';
-$loader->addPsr4('Paymenter\\Extensions\\Servers\\Enom\\', $extensionRoot.'/', true);
-$app = require $testRoot.'/bootstrap/app.php';
-$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-config(['audit.enabled' => false, 'settings.mail_disabled' => true, 'settings.default_currency' => 'USD', 'settings.tax_enabled' => false, 'settings.theme' => 'default']);
-if (config('database.default') !== 'sqlite' || config('database.connections.sqlite.database') !== ':memory:') { throw new RuntimeException('Test database isolation failed.'); }
-Illuminate\Support\Facades\Artisan::call('migrate', ['--force' => true]);
-$extension = new Paymenter\Extensions\Servers\Enom\Enom;
-$extension->installed();
+$enomBootExtension = false;
+$enomCreateCurrency = false;
+require dirname(__DIR__).'/enom-native-app.php';
+require_once dirname(__DIR__).'/enom-cart-order.php';
 use App\Helpers\ExtensionHelper;
 use App\Models\Invoice;
 use App\Models\Service;
@@ -77,6 +39,7 @@ $role = App\Models\Role::create(['name' => 'Synthetic Enom staff', 'permissions'
 $staff = App\Models\User::create(['email' => 'billing-staff@example.invalid', 'password' => bcrypt('synthetic'), 'role_id' => $role->id]);
 App\Models\Currency::create(['code' => 'USD', 'name' => 'US Dollar', 'format' => '1,000.00', 'prefix' => '$']);
 $server = App\Models\Server::create(['name' => 'Synthetic billing', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
+enomTestTld(['server_id'=>$server->id,'tld'=>'com','renew_price'=>'15.00']);
 $server->settings()->create(['key' => 'billing_enabled', 'value' => true, 'type' => 'boolean']);
 $server->settings()->create(['key' => 'operations_enabled', 'value' => true, 'type' => 'boolean']);
 $graceSetting = $server->settings()->create(['key' => 'grace_renewals_enabled', 'value' => true, 'type' => 'boolean']);
@@ -96,7 +59,7 @@ $make = function (string $name, int $price = 15, string $status = 'active', arra
         'price' => $price, 'quantity' => 1, 'currency_code' => 'USD', 'status' => $status, 'expires_at' => null]);
     return Domain::create(['service_id' => $service->id, 'user_id' => $user->id, 'server_id' => $server->id,
         'domain' => $name.'.com', 'sld' => $name, 'tld' => 'com', 'status' => 'active', 'provider_expires_at' => '2026-12-01',
-        'billing_managed' => true, 'authority_generation' => 1, 'confirmed_revision' => 1, 'price_mode' => 'custom', // 0.3 backfill: keep the native price
+        'billing_managed' => true, 'authority_generation' => 1, 'confirmed_revision' => 1, 'price_mode' => 'standard', // 0.3 backfill: keep the native price
         'renewal_policy' => array_replace(['enabled' => true], $policy)]);
 };
 atBilling('2026-11-09');
@@ -169,32 +132,13 @@ refusedBilling(fn () => $billing->invoice($bad->id, $user), 'Billing created an 
 
 $free = $make('free-unapproved', 0);
 refusedBilling(fn () => $billing->invoice($free->id, $user), 'Free domain created a funded zero invoice.');
-refusedBilling(fn () => $billing->sponsor($free->id), 'Free domain received implicit standing sponsorship.');
-$sponsorship = ['enabled' => true, 'standing' => true, 'approved_by' => $staff->id, 'reason' => 'Isolated sponsorship test',
-    'limit_minor' => 1200, 'currency' => 'USD', 'term' => 1];
-$free->update(['sponsorship' => $sponsorship]);
-checkBilling($billing->sponsor($free->id) === null, 'Sponsorship spent without complete fresh quote evidence.');
-$quote = ['state' => 'validated', 'complete' => true, 'domain' => $free->domain, 'action' => 'renew', 'term' => 1,
-    'base_expires_at' => '2026-12-01', 'amount' => '10.00', 'currency' => 'USD', 'grace_eligible' => true,
-    'observed_at' => now()->toIso8601String(), 'source' => 'isolated-fixture'];
-$free->update(['observation' => ['renewal_quote' => $quote]]);
+checkBilling($billing->bill($free->id) === 'review', 'An ordinary zero-price service received implicit free renewal.');
+$free->update(['price_mode' => 'complimentary']);
 $beforeInvoices = Invoice::count();
-$sponsored = $billing->sponsor($free->id);
-checkBilling($sponsored?->funding_basis === 'sponsored' && $sponsored->state === 'queued' && $sponsored->invoice_id === null,
-    'Approved fixture sponsorship failed admission.');
-checkBilling(Invoice::count() === $beforeInvoices && $sponsored->policy['sponsorship'] === $sponsorship,
-    'Sponsorship fabricated invoice/payment or lost approval evidence.');
-checkBilling($operations->funded($sponsored), 'Specific admin funding permission did not authorize sponsorship.');
-checkBilling($billing->sponsor($free->id)->id === $sponsored->id, 'Sponsorship rerun created another obligation.');
-$overCap = $make('free-overcap', 0);
-$overCap->update(['sponsorship' => $sponsorship, 'observation' => ['renewal_quote' => array_replace($quote,
-    ['domain' => $overCap->domain, 'amount' => '12.01'])]]);
-checkBilling($billing->sponsor($overCap->id) === null, 'Sponsorship admitted a quote over its exact approved cap.');
-$missingTime = $make('free-missing-time', 0);
-$missingQuote = array_replace($quote, ['domain' => $missingTime->domain]);
-unset($missingQuote['observed_at']);
-$missingTime->update(['sponsorship' => $sponsorship, 'observation' => ['renewal_quote' => $missingQuote]]);
-checkBilling($billing->sponsor($missingTime->id) === null, 'Sponsorship treated a missing observation time as fresh.');
+$complimentary = $billing->complimentary($free->id, $staff);
+checkBilling($complimentary->funding_basis === 'complimentary' && $complimentary->state === 'queued' && $complimentary->invoice_id === null && $complimentary->amount === '0.00', 'Complimentary renewal fabricated client funding.');
+checkBilling(Invoice::count() === $beforeInvoices && $operations->funded($complimentary), 'Complimentary renewal created debt or lost current authority.');
+checkBilling($billing->complimentary($free->id)->id === $complimentary->id, 'Complimentary rerun duplicated a cycle.');
 
 // Native linked initial registration can advance its date during payment. The
 // supported Eloquent Updating hook removes that date before the native SQL.
@@ -206,9 +150,9 @@ $initialInvoice->items()->create(['reference_type' => Service::class, 'reference
 ExtensionHelper::addPayment($initialInvoice, 'Stripe', 15, transactionId: 'initial-linked-proof');
 checkBilling($initial->fresh()->service->expires_at === null && $initial->fresh()->service->status === 'active',
     'Updating hook did not persist null after native initial payment.');
-$ordinary = $make('unmanaged'); $ordinary->update(['billing_managed' => false]);
-$ordinary->service->update(['expires_at' => '2030-01-01']);
-checkBilling($ordinary->fresh()->service->expires_at->format('Y-m-d') === '2030-01-01', 'Managed date hook changed an unmarked service.');
+$unassigned = $make('unassigned'); $ordinary = $unassigned->service; $unassigned->delete();
+$ordinary->update(['expires_at' => '2030-01-01']);
+checkBilling($ordinary->fresh()->expires_at->format('Y-m-d') === '2030-01-01', 'Managed date hook changed an unmarked service.');
 
 // End-period cancellation changes only explicit native cancellation lifecycle.
 // No invoice or uncertain registrar history is overwritten by a scheduler.
@@ -274,12 +218,9 @@ $leapInvoice = $billing->invoice($leap->id, $user);
 $leapOperation = Operation::where('invoice_id', $leapInvoice->id)->firstOrFail();
 checkBilling($leapOperation->expected_expires_at->format('Y-m-d') === '2029-02-28'
     && $leapOperation->base_expires_at->format('Y-m-d') === '2028-02-29', 'Leap-day paid renewal overflowed into March.');
-$leapFree = $make('leap-day-sponsored', 0);
-$leapFree->update(['provider_expires_at' => '2028-02-29', 'sponsorship' => $sponsorship,
-    'observation' => ['renewal_quote' => array_replace($quote, ['domain' => $leapFree->domain,
-        'base_expires_at' => '2028-02-29', 'observed_at' => now()->toIso8601String(), 'grace_eligible' => false])]]);
-checkBilling($billing->sponsor($leapFree->id)->expected_expires_at->format('Y-m-d') === '2029-02-28',
-    'Leap-day sponsored renewal overflowed into March.');
+$leapFree = $make('leap-day-complimentary', 0);
+$leapFree->update(['provider_expires_at' => '2028-02-29', 'price_mode' => 'complimentary']);
+checkBilling($billing->complimentary($leapFree->id, $staff)->expected_expires_at->format('Y-m-d') === '2029-02-28', 'Leap-day complimentary renewal overflowed.');
 
 // Native inclusive tax supplies a rounded net obligation, frozen against later tariff/tax changes.
 atBilling('2026-11-10');
@@ -287,7 +228,7 @@ config(['settings.tax_enabled' => true, 'settings.tax_type' => 'inclusive']);
 $tax = App\Models\TaxRate::create(['name' => 'Synthetic inclusive tax', 'country' => 'all', 'rate' => '7.25']);
 Illuminate\Support\Once::flush();
 $taxed = $make('tax-inclusive');
-$taxed->service->update(['price' => '19.99']);
+Paymenter\Extensions\Servers\Enom\Models\Tld::where('server_id',$server->id)->where('tld','com')->update(['renew_price'=>'19.99']);
 $taxInvoice = $billing->invoice($taxed->id, $user);
 $taxOperation = Operation::where('invoice_id', $taxInvoice->id)->firstOrFail();
 checkBilling($taxOperation->policy['original_net_minor'] === 1864 && $taxOperation->policy['retail_minor'] === 1999
@@ -300,24 +241,6 @@ checkBilling($billing->invoice($taxed->id, $user)->id === $taxInvoice->id
     'Later tax or tariff changes rewrote the original issued invoice/net budget.');
 config(['settings.tax_enabled' => false]);
 Illuminate\Support\Once::flush();
-
-// A zero-price domain with no actionable standing approval needs no quote reads.
-$quoteReads = 0;
-$quoteGuards = 0;
-$observer = new Paymenter\Extensions\Servers\Enom\Services\DomainObservation(
-    new Paymenter\Extensions\Servers\Enom\Api\EnomApi(new Paymenter\Extensions\Servers\Enom\Api\RegistrarClient('synthetic', 'synthetic',
-        function () use (&$quoteReads): string { $quoteReads++; return '<invalid'; }, null, true)),
-    function () use (&$quoteGuards): array { $quoteGuards++; return ['uid' => 'synthetic', 'token' => 'synthetic', 'reads_enabled' => true, 'observations_enabled' => true]; });
-$app->instance(Paymenter\Extensions\Servers\Enom\Services\DomainObservation::class, $observer);
-foreach ([null, array_replace($sponsorship, ['enabled' => false]), array_replace($sponsorship, ['standing' => false]),
-    array_replace($sponsorship, ['limit_minor' => 0]), array_replace($sponsorship, ['approved_by' => $other->id])] as $i => $approval) {
-    $unapproved = $make('free-no-actionable-approval-'.$i, 0);
-    $unapproved->update(['provider_domain_id' => '456', 'sponsorship' => $approval]);
-    checkBilling($billing->bill($unapproved->id) === 'sponsorship_review', 'Unapproved zero-price domain did not receive local sponsorship review.');
-}
-checkBilling($quoteReads === 0 && $quoteGuards === 0, 'Unapproved zero-price domains wasted registrar quote reads.');
-checkBilling($billing->bill($free->id) === 'sponsored' && $quoteReads === 0 && $quoteGuards === 0,
-    'Existing sponsored cycle refreshed its quote or blocked itself during scheduled billing.');
 
 // Resuming before expiry replaces a clean retired debt once and preserves its history.
 $resume = $make('resume-renewal');
@@ -426,20 +349,16 @@ foreach (['owner', 'server', 'currency', 'account', 'quantity', 'native_date'] a
 }
 
 
-// The issue window limits scheduling. Explicit manual invoices/sponsorship may be early.
+// The issue window limits scheduling. Explicit staff and client requests may be early.
 atBilling('2026-10-01');$early=$make('explicit-before-issue-window');
 checkBilling($billing->bill($early->id)==='not_due'&&$early->operations()->count()===0,'Scheduler ignored E-21 issue window.');
 $earlyInvoice=$billing->invoice($early->id,$user);
 checkBilling($earlyInvoice->due_at->format('Y-m-d')==='2026-11-24'&&$early->operations()->count()===1,
     'Explicit early manual invoice changed E-7 or incorrectly required the scheduler issue date.');
-$earlyFree=$make('explicit-early-sponsorship',0);$earlyFree->update(['sponsorship'=>$sponsorship,'observation'=>['renewal_quote'=>array_replace($quote,
-    ['domain'=>$earlyFree->domain,'observed_at'=>now()->toIso8601String()])]]);
-$earlyFinancial=hash('sha256',serialize(array_map(fn($table)=>DB::table($table)->get()->all(),['invoices','invoice_items','invoice_transactions','credits'])));
-checkBilling($billing->bill($earlyFree->id)==='not_due'&&$earlyFree->operations()->count()===0,'Scheduled sponsorship ignored issue window.');
-$earlySponsored=$billing->sponsor($earlyFree->id,$staff);
-checkBilling($earlySponsored?->state==='queued'&&$earlySponsored->funding_basis==='sponsored'&&$earlySponsored->invoice_id===null
-    &&$earlyFinancial===hash('sha256',serialize(array_map(fn($table)=>DB::table($table)->get()->all(),['invoices','invoice_items','invoice_transactions','credits']))),
-    'Explicit early staff sponsorship was blocked by calendar or fabricated financial activity.');
+$earlyFree = $make('explicit-early-complimentary', 0); $earlyFree->update(['price_mode' => 'complimentary']);
+checkBilling($billing->bill($earlyFree->id) === 'not_due' && $earlyFree->operations()->count() === 0, 'Scheduled complimentary renewal ignored issue window.');
+$earlyComplimentary = $billing->complimentary($earlyFree->id, $staff);
+checkBilling($earlyComplimentary->state === 'queued' && $earlyComplimentary->invoice_id === null, 'Explicit early complimentary renewal was refused or created client debt.');
 // 0.3: every new order is billing-managed, so the enrolment switch is gone. Saving native defaults still sends nothing:
 // registrar writes stay off, the environment defaults to test and credentials are stored encrypted.
 $serverConfig = collect($extension->getConfig());
@@ -494,7 +413,8 @@ checkBilling($candidate->operations()->count()===1&&$retired->fresh()->getRawOri
     'Late replacement rewrote retired history or added another operation.');
 // Staff fact disposition cannot be bypassed by toggling ordinary future policy back on.
 atBilling('2026-11-10');foreach([15,0] as $price){$candidate=$make('staff-disposition-'.$price,$price,policy:['staff_disposition_hold'=>true,'enabled'=>true]);
-    $before=$allBillingRows();refusedBilling(fn()=>$price===0?$billing->sponsor($candidate->id,$staff):$billing->invoice($candidate->id,$user),'Staff disposition hold allowed new renewal spending.');
+    if ($price === 0) { $candidate->update(['price_mode' => 'complimentary']); }
+    $before=$allBillingRows();refusedBilling(fn()=>$price===0?$billing->complimentary($candidate->id,$staff):$billing->invoice($candidate->id,$user),'Staff disposition hold allowed new renewal spending.');
     checkBilling($before===$allBillingRows(),'Staff disposition refusal changed an invoice or funding history.');}
 // A persistent disposition hold fences expired debt retirement and native cancellation.
 foreach(['expired','drift'] as $case){

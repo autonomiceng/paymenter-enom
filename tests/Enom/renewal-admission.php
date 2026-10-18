@@ -1,46 +1,8 @@
 <?php
-require_once dirname(__DIR__).'/paymenter-test-app.php';
-
-// Real stock Laravel/models, synthetic environment, in-memory SQLite, injected fake provider.
-// Never load an installed app or any .env. Run: php tests/Enom/renewal-admission.php
-$repo = dirname(__DIR__, 2);
-$successful = false;
-$testRoot = null;
-paymenterTestShutdown($testRoot, $successful);
-$release = paymenterTestApp();
-if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
-$testRoot = $repo.'/.scratch/enom-renewal-admission-test-'.bin2hex(random_bytes(5));
-mkdir($testRoot, 0700, true);
-foreach (['bootstrap/cache', 'storage/framework/cache', 'storage/framework/sessions', 'storage/framework/views', 'storage/logs'] as $path) { mkdir($testRoot.'/'.$path, 0700, true); }
-foreach (['config', 'database', 'routes', 'vendor', 'themes', 'resources', 'public'] as $path) { symlink($release.'/'.$path, $testRoot.'/'.$path); }
-mkdir($testRoot.'/app', 0700);
-foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($release.'/app', FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file) {
-    $target = $testRoot.'/app/'.substr($file->getPathname(), strlen($release.'/app/'));
-    if ($file->isDir()) { mkdir($target, 0700, true); } else { copy($file->getPathname(), $target); }
-}
-copy($release.'/bootstrap/app.php', $testRoot.'/bootstrap/app.php');
-copy($release.'/bootstrap/providers.php', $testRoot.'/bootstrap/providers.php');
-copy($release.'/composer.json', $testRoot.'/composer.json');
-$extensionRoot = $testRoot.'/extensions/Servers/Enom';
-mkdir($extensionRoot, 0700, true);
-foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($repo.'/Enom', FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file) {
-    $target = $extensionRoot.'/'.substr($file->getPathname(), strlen($repo.'/Enom/'));
-    if ($file->isDir()) { mkdir($target, 0700, true); } else { copy($file->getPathname(), $target); }
-}
-foreach (['APP_ENV' => 'testing', 'APP_KEY' => 'base64:'.base64_encode(str_repeat('t', 32)), 'APP_URL' => 'http://enom-tests.invalid',
-    'DB_CONNECTION' => 'sqlite', 'DB_DATABASE' => ':memory:', 'CACHE_STORE' => 'array', 'QUEUE_CONNECTION' => 'database',
-    'SESSION_DRIVER' => 'array', 'MAIL_MAILER' => 'array', 'APP_TELEMETRY_ENABLED' => 'false'] as $key => $value) {
-    putenv($key.'='.$value); $_ENV[$key] = $_SERVER[$key] = $value;
-}
-$loader = require $release.'/vendor/autoload.php';
-$loader->addPsr4('Paymenter\\Extensions\\Servers\\Enom\\', $extensionRoot.'/', true);
-$app = require $testRoot.'/bootstrap/app.php';
-$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-config(['audit.enabled' => false, 'settings.mail_disabled' => true, 'settings.default_currency' => 'USD', 'settings.tax_enabled' => false, 'settings.theme' => 'default']);
-if (config('database.default') !== 'sqlite' || config('database.connections.sqlite.database') !== ':memory:') { throw new RuntimeException('Test database isolation failed.'); }
-Illuminate\Support\Facades\Artisan::call('migrate', ['--force' => true]);
-$extension = new Paymenter\Extensions\Servers\Enom\Enom;
-$extension->installed();
+$enomBootExtension = false;
+$enomCreateCurrency = false;
+require dirname(__DIR__).'/enom-native-app.php';
+require_once dirname(__DIR__).'/enom-cart-order.php';
 use App\Helpers\ExtensionHelper;
 use App\Models\Invoice;
 use App\Models\Service;
@@ -68,6 +30,7 @@ $role = App\Models\Role::create(['name' => 'Synthetic Enom staff', 'permissions'
 $staff = App\Models\User::create(['email' => 'billing-staff@example.invalid', 'password' => bcrypt('synthetic'), 'role_id' => $role->id]);
 App\Models\Currency::create(['code' => 'USD', 'name' => 'US Dollar', 'format' => '1,000.00', 'prefix' => '$']);
 $server = App\Models\Server::create(['name' => 'Synthetic billing', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
+enomTestTld(['server_id'=>$server->id,'tld'=>'com','renew_price'=>'15.00']);
 $server->settings()->create(['key' => 'billing_enabled', 'value' => true, 'type' => 'boolean']);
 $server->settings()->create(['key' => 'operations_enabled', 'value' => true, 'type' => 'boolean']);
 $category = App\Models\Category::create(['name' => 'Domain billing test', 'slug' => 'domain-billing-test']);
@@ -95,25 +58,22 @@ $billing = new DomainBilling($operations);
 $app->instance(DomainOperations::class, $operations);
 $app->instance(DomainBilling::class, $billing);
 Event::listen(App\Events\Invoice\Paid::class, fn ($event) => $operations->acceptPaidInvoice($event->invoice));
+$server->settings()->create(['key' => 'complimentary_cost_cap', 'value' => '12.00']);
 $counter = 0;
 $make = function (string $kind = 'paid', string $expiry = '2026-12-01', string $settlement = '15.00') use (&$counter, $user, $staff, $server, $product, $plan, $billing): Operation {
     atAdmission('2026-11-10');
     $counter++;
     $service = Service::create(['user_id' => $user->id, 'product_id' => $product->id, 'plan_id' => $plan->id,
-        'price' => $kind === 'sponsored' ? '0.00' : '15.00', 'quantity' => 1,
+        'price' => $kind === 'complimentary' ? '0.00' : '15.00', 'quantity' => 1,
         'currency_code' => 'USD', 'status' => 'active', 'expires_at' => null]);
     $domain = Domain::create(['service_id' => $service->id, 'user_id' => $user->id, 'server_id' => $server->id,
         'domain' => 'admission-'.$counter.'.com', 'sld' => 'admission-'.$counter, 'tld' => 'com',
         'provider_domain_id' => '456', 'status' => 'active', 'provider_expires_at' => $expiry,
-        'billing_managed' => true, 'authority_generation' => 1, 'confirmed_revision' => 1, 'price_mode' => 'custom', // 0.3 backfill: keep the native price
+        'billing_managed' => true, 'authority_generation' => 1, 'confirmed_revision' => 1, 'price_mode' => 'standard',
         'renewal_policy' => ['enabled' => true]]);
-    if ($kind === 'sponsored') {
-        $domain->update(['sponsorship' => ['enabled' => true, 'standing' => true, 'approved_by' => $staff->id,
-            'reason' => 'Isolated admission test', 'limit_minor' => 1200, 'currency' => 'USD', 'term' => 1],
-            'observation' => ['renewal_quote' => ['state' => 'validated', 'complete' => true, 'domain' => $domain->domain,
-                'action' => 'renew', 'term' => 1, 'base_expires_at' => $expiry, 'amount' => '10.00', 'currency' => 'USD',
-                'grace_eligible' => false, 'observed_at' => now()->toIso8601String(), 'source' => 'isolated-fixture']]]);
-        return $billing->sponsor($domain->id);
+    if ($kind === 'complimentary') {
+        $domain->update(['price_mode' => 'complimentary']);
+        return $billing->complimentary($domain->id, $staff);
     }
     $invoice = $billing->invoice($domain->id, $user);
     if ($settlement !== '0.00') {
@@ -180,7 +140,7 @@ $paid = $make();
 [$result, $calls] = $read($paid);
 checkAdmission($result['allowed'] && $result['command'] === 'Extend' && $result['quote']['complete']
     && $result['quote']['amount'] === '10.00' && $result['provider_domain_id'] === '456', 'Full settled ordinary renewal failed fresh admission.');
-checkAdmission($result['account_fingerprint'] === hash('sha256', 'sandbox:offline-account'), 'Account fingerprint disagrees with observer namespace.');
+checkAdmission($result['account_fingerprint'] === hash('sha256', 'test:offline-account'), 'Account fingerprint disagrees with observer namespace.');
 checkAdmission($calls === ['GetDomainInfo', 'GetExtendInfo', 'Check', 'GetRenew', 'GetBalance'], 'Ordinary admission changed its bounded read path.');
 [$result] = $read($paid, ['unknown_price' => true]);
 checkAdmission($result['allowed'] && !$result['quote']['complete'] && $result['command'] === 'Extend', 'Unknown pre-expiry ordinary cost was fabricated or blocked.');
@@ -251,19 +211,19 @@ checkAdmission(!$result['allowed'] && $result['code'] === 'automatic_spend_pause
     'Cost incident pause allowed ordinary paid pre-expiry renewal.');
 $paid->domain->update(['renewal_policy' => ['enabled' => true]]);
 
-$sponsored = $make('sponsored');
-[$result] = $read($sponsored);
-checkAdmission($result['allowed'] && $result['command'] === 'Extend' && $sponsored->invoice_id === null, 'Individually approved zero-retail sponsorship failed admission.');
+$complimentary = $make('complimentary');
+[$result] = $read($complimentary);
+checkAdmission($result['allowed'] && $result['command'] === 'Extend' && $complimentary->invoice_id === null, 'Individually approved zero-retail complimentary pricing failed admission.');
 foreach ([['price' => '12.01'], ['unknown_price' => true], ['currency' => 'garbage'], ['balance' => '9.99']] as $options) {
-    [$result] = $read($sponsored, $options);
-    checkAdmission(!$result['allowed'], 'Unfunded/unknown sponsored cost admitted.');
+    [$result] = $read($complimentary, $options);
+    checkAdmission(!$result['allowed'], 'Unfunded/unknown complimentary cost admitted.');
 }
 atAdmission('2026-12-09');
-[$result] = $read($sponsored);
-checkAdmission($result['allowed'] && $result['command'] === 'UpdateExpiredDomains', 'Approved sponsored grace renewal failed.');
-$sponsored->domain->update(['sponsorship' => null]);
-[$result, $calls] = $read($sponsored);
-checkAdmission(!$result['allowed'] && $calls === [], 'Revoked sponsorship retained registrar spending authority.');
+[$result] = $read($complimentary);
+checkAdmission($result['allowed'] && $result['command'] === 'UpdateExpiredDomains', 'Approved complimentary grace renewal failed.');
+$complimentary->domain->update(['price_mode' => 'standard']);
+[$result, $calls] = $read($complimentary);
+checkAdmission(!$result['allowed'] && $calls === [], 'Revoked complimentary pricing retained registrar spending authority.');
 
 foreach ([['confirmed_revision' => 2], ['authority_generation' => 2], ['provider_domain_id' => null], ['status' => 'redemption']] as $change) {
     $candidate = $make();
@@ -346,7 +306,7 @@ $makeYears = function (int $years, string $settlement = '') use (&$counter, $use
         'currency_code' => 'USD', 'status' => 'active', 'expires_at' => null]);
     $domain = Domain::create(['service_id' => $service->id, 'user_id' => $user->id, 'server_id' => $server->id,
         'domain' => 'admission-'.$counter.'.com', 'sld' => 'admission-'.$counter, 'tld' => 'com', 'provider_domain_id' => '456', 'status' => 'active',
-        'provider_expires_at' => '2026-12-01', 'billing_managed' => true, 'authority_generation' => 1, 'confirmed_revision' => 1, 'price_mode' => 'custom',
+        'provider_expires_at' => '2026-12-01', 'billing_managed' => true, 'authority_generation' => 1, 'confirmed_revision' => 1, 'price_mode' => 'standard',
         'renewal_policy' => ['enabled' => true]]);
     $invoice = $billing->invoice($domain->id, $user, null, $years);
     ExtensionHelper::addPayment($invoice, 'Stripe', $settlement ?: number_format(15 * $years, 2, '.', ''), transactionId: 'admission-years-'.$counter);
