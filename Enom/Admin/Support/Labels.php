@@ -259,14 +259,6 @@ final class Labels
     }
 
     /** Renewal funding comes only from this domain's staff setting. */
-    public static function clientComplimentary(?User $user): bool
-    {
-        if (!$user) { return false; }
-        return self::$clientGrant[(int) $user->id] ??= Pricing::clientComplimentary($user);
-    }
-
-    public static function forgetClient(int $userId): void { unset(self::$clientGrant[$userId]); }
-
     public static function whoPays(Domain $domain): array
     {
         $free = Pricing::isComplimentary($domain);

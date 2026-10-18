@@ -177,13 +177,6 @@ class DomainResource extends Resource
         };
     }
 
-    public static function complimentaryClientIds(): array
-    {
-        return User::query()->whereHas('properties', fn (Builder $query) => $query->where('key', Pricing::CLIENT_PROPERTY))
-            ->get()->filter(fn (User $user) => Labels::clientComplimentary($user))
-            ->map(fn (User $user) => (int) $user->id)->values()->all();
-    }
-
     public static function getGloballySearchableAttributes(): array
     {
         return ['domain', 'client.email', 'client.first_name', 'client.last_name'];

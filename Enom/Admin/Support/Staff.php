@@ -13,7 +13,6 @@ use Throwable;
 /** Permission checks, service lookup and notifications shared by the Enom admin screens. */
 final class Staff
 {
-    public const STAFF_SERVICE = 'Paymenter\\Extensions\\Servers\\Enom\\Services\\StaffDomains';
     public const MANAGE = 'admin.enom.manage';
     public const FUND = 'admin.enom.fund';
     public const COSTS = 'admin.enom.costs';
@@ -48,18 +47,6 @@ final class Staff
      * Run a staff action and report the result as a Filament notification.
      * Validation and refusal messages from the services are written for staff and shown as-is.
      */
-    public static function service(?string $method = null): ?object
-    {
-        if (!class_exists(self::STAFF_SERVICE)) { return null; }
-        if ($method !== null && !method_exists(self::STAFF_SERVICE, $method)) { return null; }
-        return app(self::STAFF_SERVICE);
-    }
-
-    public static function supports(string $method): bool
-    {
-        return class_exists(self::STAFF_SERVICE) && method_exists(self::STAFF_SERVICE, $method);
-    }
-
     public static function attempt(callable $work, string $success, string $failure = 'That did not work. Try again, or check the Enom setup page.'): bool
     {
         try {

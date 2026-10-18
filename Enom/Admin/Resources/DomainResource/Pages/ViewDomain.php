@@ -676,41 +676,6 @@ class ViewDomain extends ViewRecord
             });
     }
 
-    private function clientComplimentaryAction(): Action
-    {
-        return Action::make('clientComplimentary')
-            ->label(fn (Domain $record) => $this->facts($record)['client_complimentary'] ? 'Remove client complimentary' : 'Make client complimentary')
-            ->icon('heroicon-o-gift')
-            ->visible(fn (Domain $record) => $this->facts($record)['client'] !== null && Staff::can(Staff::FUND))
-            ->schema(fn (Domain $record) => $this->facts($record)['client_complimentary'] ? [] : [
-                TextInput::make('max_domains')
-                    ->label('Most complimentary domains')
-                    ->helperText('Leave blank for no limit.')
-                    ->numeric()
-                    ->integer()
-                    ->minValue(1)
-                    ->maxValue(10000),
-            ])
-            ->requiresConfirmation(fn (Domain $record) => $this->facts($record)['client_complimentary'])
-            ->modalHeading(fn (Domain $record) => ($this->facts($record)['client_complimentary'] ? 'Remove complimentary status from ' : 'Make complimentary: ').$this->facts($record)['client']?->name)
-            ->modalDescription(fn (Domain $record) => $this->facts($record)['client_complimentary']
-                ? 'Their domains that follow the client default go back to the standard price from the next renewal.'
-                : 'Their domains that follow the client default renew free. Enom charges your account.')
-            ->modalSubmitActionLabel(fn (Domain $record) => $this->facts($record)['client_complimentary'] ? 'Remove' : 'Make complimentary')
-            ->action(function (Domain $record, array $data) {
-                $staff = Staff::require(Staff::FUND);
-                $client = User::find($record->user_id);
-                $service = Staff::service('setClientComplimentary');
-                if (!$client || !$service) { Notification::make()->title('This is not available yet.')->danger()->send(); return; }
-                $on = !$this->facts($record)['client_complimentary'];
-                $max = $on && is_numeric($data['max_domains'] ?? null) ? (int) $data['max_domains'] : null;
-                if (Staff::attempt(fn () => $service->setClientComplimentary($staff, $client, $on, $max),
-                    $on ? $client->name.' is now complimentary.' : $client->name.' is no longer complimentary.')) {
-                    $this->refreshFacts($record);
-                }
-            });
-    }
-
     private static function safeUrl(callable $build): ?string
     {
         try { return $build(); } catch (Throwable) { return null; }

@@ -16,11 +16,4 @@ class HelpController extends Controller
         return view('enom::help.customer');
     }
 
-
-    public function admin(Request $request, ?string $topic = null)
-    {
-        abort_unless($request->user()?->hasPermission('admin.enom.manage'), 403);
-
-        return redirect('/admin/enom-setup');
-    }
 }

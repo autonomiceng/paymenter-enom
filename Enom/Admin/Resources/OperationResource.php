@@ -214,47 +214,6 @@ class OperationResource extends Resource
         try { return (bool) $service->canRefundHeld($record, Staff::user()); } catch (Throwable) { return false; }
     }
 
-    private static function refunds(string $method): ?object
-    {
-        if ($service = Staff::service($method)) { return $service; }
-        $class = 'Paymenter\\Extensions\\Servers\\Enom\\Services\\Refunds';
-        return class_exists($class) && method_exists($class, $method) ? app($class) : null;
-    }
-
-    private static function fundAction(): Action
-    {
-        return Action::make('fund')
-            ->label('Fund this request')
-            ->icon('heroicon-o-banknotes')
-            ->color('warning')
-            ->size('sm')
-            ->visible(fn (Operation $record) => app(DomainOperations::class)->canFund($record, Staff::user()))
-            ->schema([
-                Textarea::make('reason')
-                    ->label('Reason')
-                    ->helperText('Saved with the request and shown in its history.')
-                    ->required()
-                    ->minLength(5)
-                    ->maxLength(500)
-                    ->mutateStateForValidationUsing(fn (?string $state) => trim((string) $state))
-                    ->dehydrateStateUsing(fn (?string $state) => trim((string) $state))
-                    ->rows(2),
-            ])
-            ->modalIcon('heroicon-o-banknotes')
-            ->modalIconColor('warning')
-            ->modalHeading('Fund this request yourself?')
-            ->modalDescription(fn (Operation $record) => 'Your Enom account pays for this '.strtolower(Labels::action($record->action))
-                .' of '.$record->domain->domain.' ('.$record->amount.' '.$record->currency.'). The client is not invoiced. '
-                .'Use this only when you have agreed to cover the cost.')
-            ->modalSubmitActionLabel('Fund and queue')
-            ->modalWidth('lg')
-            ->action(function (Operation $record, array $data) {
-                $staff = Staff::require(Staff::FUND);
-                Staff::attempt(fn () => app(DomainOperations::class)->approveFunding((int) $record->id, $staff, (string) ($data['reason'] ?? '')),
-                    'Request funded and queued.');
-            });
-    }
-
     private static function refundAction(): Action
     {
         return Action::make('refund')

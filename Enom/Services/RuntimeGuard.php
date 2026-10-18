@@ -8,10 +8,6 @@ use RuntimeException;
 /** Reads an Enom server's configuration and decides whether registrar requests may run. */
 class RuntimeGuard
 {
-    public const ENDPOINTS = [
-        'test' => 'https://resellertest.enom.com/interface.asp',
-        'live' => 'https://reseller.enom.com/interface.asp',
-    ];
     public const ENVIRONMENTS = ['test', 'live'];
 
     public const BINDING = 'enom_account_binding';
@@ -95,17 +91,6 @@ class RuntimeGuard
      * Reads (search, status, prices) need credentials only.
      * Writes (registrations, renewals, changes) also need "Process orders and changes".
      */
-    private static function legacyDisabled(array $config): bool
-    {
-        return !array_key_exists('environment', $config) && array_key_exists('sandbox', $config)
-            && !filter_var($config['sandbox'], FILTER_VALIDATE_BOOLEAN);
-    }
-
-    public static function endpoint(string $environment): string
-    {
-        return self::ENDPOINTS[$environment] ?? throw new RuntimeException('Unknown Enom environment.');
-    }
-
     public static function assertProvider(int $serverId, bool $readOnly = false): array
     {
         $config = self::configuration($serverId);
@@ -146,15 +131,6 @@ class RuntimeGuard
     }
 
     /** @return list<string> */
-    public static function leadDays(int $serverId): int
-    {
-        $lead = Server::findOrFail($serverId)->settings()->where('key', 'lead_days')->first()?->value ?? 30;
-        if (filter_var($lead, FILTER_VALIDATE_INT) === false || (int) $lead < 1 || (int) $lead > 90) {
-            throw new RuntimeException('Registrar billing lead must be between 1 and 90 days.');
-        }
-        return (int) $lead;
-    }
-
     public static function defaultNameservers(int $serverId): array
     {
         $value = Server::find($serverId)?->settings->firstWhere('key', 'default_nameservers')?->value;

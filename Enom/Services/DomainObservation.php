@@ -69,67 +69,6 @@ final class DomainObservation
         } finally { $lock->release(); }
     }
 
-    public function observeRenewalQuote(int $domainId): string
-    {
-        $domain = Domain::find($domainId);
-        if (!$domain || !$this->binding($domain) || !$domain->provider_expires_at) { return 'ineligible'; }
-        try { $configuration = $this->configuration((int) $domain->server_id); }
-        catch (\Throwable) { $this->recordFailure($domainId, 'guard_refused'); return 'guard_refused'; }
-        $account = RuntimeGuard::accountFingerprint($configuration);
-        $lock = Cache::lock('enom:observe:account:'.$account, 180);
-        if (!$lock->get()) { return 'busy'; }
-        try {
-            $capture = DB::transaction(function () use ($domainId, $account) {
-                $domain = Domain::lockForUpdate()->find($domainId);
-                if (!$domain || !($binding = $this->binding($domain)) || !$domain->provider_expires_at) { return null; }
-                $observation = $domain->observation ?? [];
-                $sequence = (int) ($observation['sequence'] ?? 0) + 1;
-                $started = now()->toIso8601String();
-                $domain->update(['observation' => array_replace($observation, ['version' => 1, 'sequence' => $sequence,
-                    'account_fingerprint' => $account, 'quote_attempted_at' => $started, 'quote_status' => 'running'])]);
-                return ['binding' => $binding, 'sequence' => $sequence, 'started_at' => $started, 'account' => $account];
-            });
-            if (!$capture) { return 'ineligible'; }
-            $budget = 'enom:observe:requests:'.$account;
-            try { $limit = $this->accountLimit($account, $configuration); }
-            catch (\Throwable) { return $this->applyQuote($domainId, $capture, null, 'configuration_invalid'); }
-            // Reserve room for the maximum four commands, including expired inventory.
-            if (RateLimiter::remaining($budget, $limit) < 4) { return $this->applyQuote($domainId, $capture, null, 'rate_limited'); }
-            $serverId = $capture['binding']['server_id'];
-            $api = $this->api ?? $this->client((int) $serverId, $configuration, fn () => $this->assertAccount($serverId, $account));
-            if (!$api->isReadOnly()) { return $this->applyQuote($domainId, $capture, null, 'read_only_required'); }
-            try {
-                $evidence = $api->renewalEvidence($capture['binding']['domain'], function (string $kind, $info) use ($serverId, $account, $budget, $capture, $configuration) {
-                    $this->assertAccount($serverId, $account);
-                    if ($kind !== 'info' && !$this->authenticated($info, $capture['binding'], $configuration['uid'])) {
-                        throw new \RuntimeException('Registrar identity is unconfirmed.');
-                    }
-                    RateLimiter::hit($budget, 60);
-                }, new \DateTimeImmutable($capture['started_at']));
-            } catch (\Throwable) { return $this->applyQuote($domainId, $capture, null, 'identity_or_guard_unconfirmed'); }
-            if (!$this->authenticated($evidence['info'], $capture['binding'], $configuration['uid'])) {
-                return $this->applyQuote($domainId, $capture, null, 'identity_unconfirmed');
-            }
-            $base = $capture['binding']['confirmed_expiry'];
-            if ($evidence['info']->confirmedExpiry()?->format('Y-m-d') !== $base) {
-                return $this->applyQuote($domainId, $capture, null, 'expiry_drift');
-            }
-            $quoteBinding = $capture['binding'] + ['term' => 1, 'base_expires_at' => $base,
-                'observed_at' => $capture['started_at']];
-            // A newly registered fixture can lack an anchor, but an anchored registration
-            // can never replace it with the ID from a daily or pricing observation.
-            if (!$quoteBinding['provider_domain_id']) {
-                $quoteBinding['provider_domain_id'] = EnomApi::normalize('info', $evidence['info'])['domain_name_id'];
-            }
-            $quote = RegistrarMoney::renewalQuote($evidence['extend'], $quoteBinding, $evidence['check'], $evidence['expired'], $evidence['info']);
-            $quote += ['provider_domain_id' => $quoteBinding['provider_domain_id'], 'server_id' => $serverId,
-                'service_id' => $capture['binding']['service_id'], 'user_id' => $capture['binding']['user_id'],
-                'account_fingerprint' => $account, 'authority_generation' => $capture['binding']['authority_generation'],
-                'confirmed_revision' => $capture['binding']['confirmed_revision']];
-            return $this->applyQuote($domainId, $capture, $quote, $quote['complete'] ? null : 'quote_unconfirmed');
-        } finally { $lock->release(); }
-    }
-
     private function accountLimit(string $account, array $configuration): int
     {
         $configured = RuntimeGuard::observerRequestsPerMinute($configuration);
@@ -267,27 +206,6 @@ final class DomainObservation
         });
     }
 
-
-    private function applyQuote(int $domainId, array $capture, ?array $quote, ?string $error): string
-    {
-        return DB::transaction(function () use ($domainId, $capture, $quote, $error) {
-            $domain = Domain::lockForUpdate()->find($domainId);
-            if (!$domain || $this->binding($domain) !== $capture['binding']
-                || (int) (($domain->observation ?? [])['sequence'] ?? 0) !== $capture['sequence']) { return 'stale'; }
-            try { $this->assertAccount((int) $domain->server_id, $capture['account']); }
-            catch (\Throwable) { return 'stale'; }
-            $observation = $domain->observation ?? [];
-            $observation['quote_status'] = $error ? 'stale' : 'fresh';
-            $observation['quote_error'] = $error;
-            $observation['quote_completed_at'] = now()->toIso8601String();
-            if ($quote && $quote['complete']) {
-                $observation['renewal_quote'] = $quote;
-                $observation['quote_succeeded_at'] = now()->toIso8601String();
-            }
-            $domain->update(['observation' => $observation]);
-            return $error ?? 'quoted';
-        });
-    }
 
     private function recordFailure(int $domainId, string $error): void
     {

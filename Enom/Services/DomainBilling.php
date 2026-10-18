@@ -242,56 +242,6 @@ final class DomainBilling
      * Queue this cycle's renewal at the reseller's cost. One renewal per expiry cycle,
      * whatever paid for it. Staff may pass themselves as the actor; the daily run passes null.
      */
-    public function sponsor(int $domainId, ?User $actor = null): ?Operation
-    {
-        // Read the owner before the transaction: a plain read inside it would fix an older snapshot.
-        $ownerId = Domain::whereKey($domainId)->value('user_id');
-        return DB::transaction(function () use ($domainId, $actor, $ownerId) {
-            // Client first, like every other writer (orders, pricing, dispatch), to keep one lock order.
-            User::whereKey($ownerId)->lockForUpdate()->first();
-            $domain = Domain::lockForUpdate()->findOrFail($domainId);
-            $service = Service::lockForUpdate()->findOrFail($domain->service_id);
-            $domain->setRelation('service', $service);
-            $this->assertBinding($domain, $service);
-            if (DomainOperations::writesPaused($domain)) { throw new RuntimeException('Domain renewal requires staff review.'); }
-            if (!$this->registrarEnabled($domain)) { throw new RuntimeException('Registrar fulfillment is disabled.'); }
-            $calendar = $this->calendar($domain);
-            $key = 'sponsored:'.$domain->id.':'.$calendar['expiry'];
-            if ($existing = Operation::where('operation_key', $key)->first()) { return $existing; }
-            $this->assertEligible($domain, $service);
-            $policy = $this->policy($domain);
-            $sponsorship = $domain->sponsorship;
-            $staff = is_array($sponsorship) ? User::find($sponsorship['approved_by'] ?? null) : null;
-            if (!$this->sponsorshipApproved($domain, $service, $policy, $actor)) {
-                throw new RuntimeException('Domain sponsorship requires individual approval.');
-            }
-            // Observation evidence must explicitly establish complete current cost.
-            // Base-TLD pricing alone cannot pass this gate.
-            $quote = $domain->observation['renewal_quote'] ?? [];
-            if (!is_string($quote['observed_at'] ?? null) || $quote['observed_at'] === '') { return null; }
-            try { $at = CarbonImmutable::parse($quote['observed_at'] ?? ''); }
-            catch (\Throwable) { return null; }
-            $quoteAmount = RegistrarMoney::decimal($quote['amount'] ?? null);
-            if (!in_array($quote['state'] ?? null, ['quoted', 'confirmed', 'validated'], true) || ($quote['complete'] ?? null) !== true
-                || !$quoteAmount || $at->isFuture() || $at->lt(now()->subMinutes(15))
-                || ($quote['domain'] ?? null) !== $domain->domain || ($quote['action'] ?? null) !== 'renew'
-                || ($quote['term'] ?? null) !== $policy['term'] || ($quote['currency'] ?? null) !== $service->currency_code
-                || ($quote['base_expires_at'] ?? null) !== $calendar['expiry']
-                || $this->minor($quoteAmount) > $sponsorship['limit_minor']
-                || ($domain->provider_expires_at->isPast() && ($quote['grace_eligible'] ?? null) !== true)) { return null; }
-            $operation = Operation::create(['domain_id' => $domain->id, 'service_id' => $service->id,
-                'operation_key' => $key, 'action' => 'renew', 'term' => $policy['term'], 'funding_basis' => 'sponsored',
-                'state' => 'queued', 'amount' => '0.00', 'currency' => $service->currency_code,
-                'base_expires_at' => $calendar['expiry'], 'expected_expires_at' => $domain->provider_expires_at->addYearNoOverflow()->format('Y-m-d'),
-                'authorized_by' => $actor?->id ?? $staff->id, 'funding_reason' => $sponsorship['reason'],
-                'policy' => $this->lockedPolicy($domain, $service, $policy, $calendar) + ['sponsorship' => $sponsorship,
-                    'sponsorship_cycle' => $calendar['expiry'], 'single_cycle_authorized' => $actor !== null],
-                'cost' => ['quote' => $quote], 'payload' => []]);
-            ExecuteOperation::dispatch($operation->id)->afterCommit();
-            return $operation;
-        });
-    }
-
     public function complimentary(int $domainId, ?User $actor = null, int $years = 1): ?Operation
     {
         // Read the owner before the transaction: a plain read inside it would fix an older snapshot.
@@ -434,21 +384,6 @@ final class DomainBilling
             $this->operations->retireUnpaidRenewals($domain);
             return $drift ? 'review' : 'grace_review';
         });
-    }
-
-    private function sponsorshipApproved(Domain $domain, Service $service, array $policy, ?User $actor = null): bool
-    {
-        $approval = $domain->sponsorship;
-        $staff = is_array($approval) ? User::find($approval['approved_by'] ?? null) : null;
-        return $policy['enabled'] && empty($policy['automatic_spend_paused']) && $this->minor($service->price) === 0 && is_array($approval)
-            && ($approval['enabled'] ?? null) === true
-            && ($actor ? $actor->hasPermission('admin.enom.fund') : ($approval['standing'] ?? null) === true)
-            && (($approval['standing'] ?? null) === true || ($approval['base_expires_at'] ?? null) === $domain->provider_expires_at?->format('Y-m-d'))
-            && $staff?->hasPermission('admin.enom.fund') && is_string($approval['reason'] ?? null)
-            && trim($approval['reason']) !== '' && strlen($approval['reason']) <= 500
-            && is_int($approval['limit_minor'] ?? null) && $approval['limit_minor'] > 0
-            && ($approval['term'] ?? null) === $policy['term']
-            && ($approval['currency'] ?? null) === $service->currency_code;
     }
 
     private function finishCancellation(int $domainId): string
