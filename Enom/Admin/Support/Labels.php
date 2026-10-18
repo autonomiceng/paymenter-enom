@@ -17,7 +17,7 @@ use Throwable;
 final class Labels
 {
     /** Requests staff should look at. `disposed` keeps the domain paused until staff act on it. */
-    public const ATTENTION_STATES = ['uncertain', 'held', 'pending', 'disposed'];
+    public const ATTENTION_STATES = ['awaiting_code', 'uncertain', 'held', 'pending', 'disposed'];
 
     public const STATE_GROUPS = [
         'attention' => self::ATTENTION_STATES,
@@ -52,7 +52,7 @@ final class Labels
     public static function domainStatusOptions(): array
     {
         $options = [];
-        foreach (['active', 'registration_pending', 'transfer_pending', 'expired', 'grace', 'redemption', 'needs_review', 'registration_rejected', 'transfer_rejected'] as $status) {
+        foreach (['active', 'registration_pending', 'transfer_pending', 'expired', 'grace', 'redemption', 'needs_review', 'registration_rejected', 'transfer_rejected', 'cancelled'] as $status) {
             $options[$status] = self::domainStatus($status);
         }
         return $options;
@@ -62,6 +62,7 @@ final class Labels
     {
         return match ($state) {
             'awaiting_payment' => 'Waiting for payment',
+            'awaiting_code' => 'Needs transfer code',
             'queued' => 'Queued',
             'running' => 'Sending',
             'pending' => 'In progress at Enom',
@@ -78,7 +79,7 @@ final class Labels
     {
         return match ($state) {
             'succeeded' => 'success',
-            'awaiting_payment', 'held' => 'warning',
+            'awaiting_payment', 'awaiting_code', 'held' => 'warning',
             'queued', 'running', 'pending' => 'info',
             'uncertain', 'rejected' => 'danger',
             default => 'gray',
@@ -86,10 +87,18 @@ final class Labels
     }
 
     /** One sentence: what the state means for staff and what to do next. */
-    public static function stateHint(?string $state): string
+    public static function stateHint(?string $state, ?\Paymenter\Extensions\Servers\Enom\Models\Operation $operation = null): string
     {
+        if ($operation?->safe_code === 'contact_details_required' && $state === 'held') {
+            return 'Needs account details. Ask the customer to save their account details, then use updated account details on the domain page.';
+        }
+        if ($operation?->action === 'nameservers' && str_starts_with($operation->operation_key, 'initial-nameservers:')
+            && in_array($state, ['held', 'rejected', 'uncertain'], true)) {
+            return 'Registration succeeded; the nameserver update needs review. Never resend an uncertain request.';
+        }
         return match ($state) {
             'awaiting_payment' => 'Starts when the invoice is paid.',
+            'awaiting_code' => 'Waiting for the customer transfer code. Refunds to credit after 30 days.',
             'queued' => 'Sends on the next run.',
             'running' => 'Sending to Enom now.',
             'pending' => 'Enom is still working on it.',
@@ -106,7 +115,7 @@ final class Labels
     public static function stateOptions(): array
     {
         $options = [];
-        foreach (['awaiting_payment', 'queued', 'running', 'pending', 'uncertain', 'held', 'succeeded', 'rejected', 'disposed'] as $state) {
+        foreach (['awaiting_payment', 'awaiting_code', 'queued', 'running', 'pending', 'uncertain', 'held', 'succeeded', 'rejected', 'disposed'] as $state) {
             $options[$state] = self::state($state);
         }
         return $options;
@@ -177,7 +186,6 @@ final class Labels
         return match ($basis) {
             'paid_invoice' => 'Client invoice',
             'complimentary' => 'Complimentary',
-            'sponsored', 'operator_funded' => 'Legacy',
             'non_billable_management' => 'No charge',
             null, '' => '—',
             default => DomainPresentation::funding($basis),
@@ -189,7 +197,6 @@ final class Labels
         return match ($basis) {
             'paid_invoice' => 'success',
             'complimentary' => 'primary',
-            'sponsored', 'operator_funded' => 'warning',
             default => 'gray',
         };
     }
@@ -251,9 +258,7 @@ final class Labels
         return self::day($latest);
     }
 
-    /** @var array<int, bool> per-request cache of client grants */
-    private static array $clientGrant = [];
-
+    /** Renewal funding comes only from this domain's staff setting. */
     public static function clientComplimentary(?User $user): bool
     {
         if (!$user) { return false; }
@@ -262,29 +267,14 @@ final class Labels
 
     public static function forgetClient(int $userId): void { unset(self::$clientGrant[$userId]); }
 
-    /**
-     * Who pays for a domain's next renewal: [mode, label, source].
-     * Mirrors Pricing::mode() without a query per row for domains with their own setting.
-     *
-     * @return array{mode: string, label: string, source: string}
-     */
     public static function whoPays(Domain $domain): array
     {
-        $own = $domain->price_mode;
-        if ($own === 'complimentary') { return ['mode' => 'complimentary', 'label' => 'Complimentary', 'source' => 'domain']; }
-        if ($own === 'custom') {
-            $price = self::money($domain->service?->price, $domain->service?->currency_code);
-            return ['mode' => 'custom', 'label' => $price ? 'Custom '.$price : 'Custom', 'source' => 'domain'];
-        }
-        $client = $domain->relationLoaded('client') ? $domain->getRelation('client') : User::find($domain->user_id);
-        if ($own !== 'standard' && self::clientComplimentary($client)) {
-            return ['mode' => 'complimentary', 'label' => 'Complimentary', 'source' => 'client'];
-        }
-        return ['mode' => 'standard', 'label' => 'Standard', 'source' => $own === 'standard' ? 'domain' : 'client'];
+        $free = Pricing::isComplimentary($domain);
+        return ['mode' => $free ? 'complimentary' : 'standard', 'label' => $free ? 'Complimentary' : 'Standard', 'source' => 'domain'];
     }
 
     public static function whoPaysColor(string $mode): string
     {
-        return match ($mode) { 'complimentary' => 'primary', 'custom' => 'info', default => 'gray' };
+        return match ($mode) { 'complimentary' => 'primary', default => 'gray' };
     }
 }

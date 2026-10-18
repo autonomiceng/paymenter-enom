@@ -13,13 +13,12 @@ use Throwable;
 /** Permission checks, service lookup and notifications shared by the Enom admin screens. */
 final class Staff
 {
+    public const STAFF_SERVICE = 'Paymenter\\Extensions\\Servers\\Enom\\Services\\StaffDomains';
     public const MANAGE = 'admin.enom.manage';
     public const FUND = 'admin.enom.fund';
     public const COSTS = 'admin.enom.costs';
     /** Paymenter's own invoice permission, needed to give account credit back. */
     public const INVOICES = 'admin.invoices.update';
-
-    public const STAFF_SERVICE = 'Paymenter\\Extensions\\Servers\\Enom\\Services\\StaffDomains';
 
     public static function user(): ?User
     {
@@ -45,7 +44,10 @@ final class Staff
         return self::user();
     }
 
-    /** StaffDomains is the staff write path (design §4). Null until it exists or when a method is missing. */
+    /**
+     * Run a staff action and report the result as a Filament notification.
+     * Validation and refusal messages from the services are written for staff and shown as-is.
+     */
     public static function service(?string $method = null): ?object
     {
         if (!class_exists(self::STAFF_SERVICE)) { return null; }
@@ -58,14 +60,11 @@ final class Staff
         return class_exists(self::STAFF_SERVICE) && method_exists(self::STAFF_SERVICE, $method);
     }
 
-    /**
-     * Run a staff action and report the result as a Filament notification.
-     * Validation and refusal messages from the services are written for staff and shown as-is.
-     */
     public static function attempt(callable $work, string $success, string $failure = 'That did not work. Try again, or check the Enom setup page.'): bool
     {
         try {
             $result = $work();
+            if ($result instanceof Notification) { $result->send(); return true; }
             $message = is_string($result) && $result !== '' ? $result : $success;
             Notification::make()->title($message)->success()->send();
             return true;

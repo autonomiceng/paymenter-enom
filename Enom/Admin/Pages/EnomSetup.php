@@ -141,11 +141,9 @@ class EnomSetup extends Page
 
     private static function reminderCount(): ?int
     {
-        $service = Staff::service('reminderStats');
-        if (!$service) { return null; }
+        $service = app(\Paymenter\Extensions\Servers\Enom\Services\StaffDomains::class);
         try { $stats = $service->reminderStats(); } catch (Throwable $exception) { report($exception); return null; }
-        $count = is_array($stats) ? ($stats['sent_30_days'] ?? $stats['sent_last_30_days'] ?? $stats['last_30_days'] ?? $stats['sent'] ?? $stats['count'] ?? null) : $stats;
-        return is_numeric($count) ? (int) $count : null;
+        return $stats;
     }
 
     /** @return list<string> HTML links to the native editor, or plain names without the permission. */
@@ -185,6 +183,13 @@ class EnomSetup extends Page
         return Section::make($server->name)
             ->description($server->enabled ? null : 'This server is turned off in Paymenter.')
             ->afterHeader([
+                TldResource::defaultRuleAction($server),
+                Action::make('syncCosts'.$id)->label('Sync costs now')->color('gray')->visible(fn () => Staff::can(Staff::COSTS))
+                    ->requiresConfirmation()->modalHeading('Sync costs from Enom')->modalDescription(TldResource::SYNC_DESCRIPTION)->modalSubmitActionLabel('Sync costs')
+                    ->action(function () use ($id) {
+                        Staff::require(Staff::COSTS);
+                        TldResource::syncCosts($id);
+                    }),
                 Action::make('test'.$id)
                     ->label('Test connection')
                     ->icon('heroicon-o-signal')
@@ -264,8 +269,7 @@ class EnomSetup extends Page
     public function testConnection(int $serverId): void
     {
         Staff::require();
-        $service = Staff::service('testConnection');
-        if (!$service) { Notification::make()->title('Connection testing is not available yet.')->danger()->send(); return; }
+        $service = app(\Paymenter\Extensions\Servers\Enom\Services\StaffDomains::class);
         try {
             $result = $service->testConnection($serverId);
         } catch (Throwable $exception) {

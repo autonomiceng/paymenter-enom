@@ -75,24 +75,21 @@ class StaffDomains
     /** Reminder emails recorded in the last 30 days. */
     public function reminderStats(): int { return Reminders::stats(30); }
 
-    /** Who pays: inherit (client default), standard, custom (with price) or complimentary. */
-    public function setPricing(User $staff, int $domainId, string $mode, ?string $price = null): Domain
+    /** Set renewal funding for this domain only. */
+    public function setPricing(User $staff, int $domainId, string $mode): Domain
     {
         $this->authorize($staff);
         $ownerId = Domain::whereKey($domainId)->value('user_id');
-        return DB::transaction(function () use ($staff, $domainId, $mode, $price, $ownerId) {
-            // Decide under the client lock so a concurrent grant can't change the effective result.
-            User::whereKey($ownerId)->lockForUpdate()->first();
+        return DB::transaction(function () use ($staff, $domainId, $mode, $ownerId) {
+            User::whereKey($ownerId)->lockForUpdate()->firstOrFail();
             $domain = Domain::lockForUpdate()->findOrFail($domainId);
-            // Judge by the effective result: "follow client default" can make a domain complimentary too.
-            $before = Pricing::mode($domain);
-            $after = $mode === 'inherit' ? (Pricing::clientComplimentary(User::find($domain->user_id)) ? 'complimentary' : 'standard') : $mode;
-            if ($before === 'complimentary' || $after === 'complimentary') { $this->authorize($staff, 'admin.enom.fund'); }
-            Pricing::setDomainMode($domain, $mode, $price);
+            if (Pricing::isComplimentary($domain) || $mode === 'complimentary') { $this->authorize($staff, 'admin.enom.fund'); }
+            Pricing::setDomainMode($domain, $mode);
             return $domain->fresh();
         });
     }
 
+    /** Reads the account balance. Never changes anything. */
     public function setClientComplimentary(User $staff, User $client, bool $on, ?int $maxDomains = null): void
     {
         $this->authorize($staff, 'admin.enom.fund');
@@ -100,7 +97,6 @@ class StaffDomains
         Pricing::setClientComplimentary($client, $on, $staff, $maxDomains);
     }
 
-    /** Reads the account balance. Never changes anything. */
     public function testConnection(int $serverId): array
     {
         $status = RuntimeGuard::status($serverId);
@@ -109,14 +105,14 @@ class StaffDomains
             $result = $api->balance();
             if ($result->status !== 'success') {
                 report(new \RuntimeException('Enom rejected the connection test.'));
-                return $status + ['ok' => false, 'message' => \Paymenter\Extensions\Servers\Enom\Admin\Support\Staff::clean('Enom did not accept the request. Check the account ID, API token and IP allowlist.')];
+                return $status + ['ok' => false, 'message' => 'Enom did not accept the request. Check the account ID, API token and IP allowlist.'];
             }
             $balance = $result->value('availablebalance') ?? $result->value('balance');
             return $status + ['ok' => true, 'message' => 'Connected to Enom.',
                 'balance' => is_string($balance) ? RegistrarMoney::decimal(str_replace(',', '', trim($balance))) : null];
         } catch (Throwable $error) {
             report($error);
-            return $status + ['ok' => false, 'message' => \Paymenter\Extensions\Servers\Enom\Admin\Support\Staff::clean('Could not reach Enom. Check the account settings and try again.')];
+            return $status + ['ok' => false, 'message' => 'Could not reach Enom. Check the account settings and try again.'];
         }
     }
 

@@ -48,33 +48,34 @@ class ListTlds extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
+            ...Server::where('extension', 'Enom')->orderBy('id')->get()->map(fn (Server $server) => TldResource::defaultRuleAction($server))->all(),
             Action::make('sync')
-                ->label('Sync costs')
+                ->label('Sync costs now')->visible(fn () => Staff::can(Staff::COSTS))
                 ->icon('heroicon-o-arrow-path')
                 ->color('gray')
                 ->disabled(fn () => self::servers() === [])
                 ->schema(self::serverField())
                 ->requiresConfirmation(count(self::servers()) <= 1)
                 ->modalHeading('Sync costs from Enom')
-                ->modalDescription('Reads current Enom costs. Markup prices follow; fixed prices stay as they are.')
+                ->modalDescription(TldResource::SYNC_DESCRIPTION)
                 ->modalSubmitActionLabel('Sync costs')
                 ->action(function (array $data) {
-                    Staff::require();
+                    Staff::require(Staff::COSTS);
                     $server = self::serverId($data);
                     if ($server === null) { \Filament\Notifications\Notification::make()->title('Choose a server.')->danger()->send(); return; }
-                    Staff::attempt(fn () => 'Costs synced for '.app(Catalogue::class)->syncCosts($server).' TLDs.', 'Costs synced.');
+                    TldResource::syncCosts($server);
                 }),
             Action::make('import')
-                ->label('Import TLDs from Enom')
+                ->label('Import TLDs from Enom')->visible(fn () => Staff::can(Staff::COSTS))
                 ->icon('heroicon-o-arrow-down-tray')
                 ->disabled(fn () => self::servers() === [])
                 ->schema(self::serverField())
                 ->requiresConfirmation(count(self::servers()) <= 1)
                 ->modalHeading('Import TLDs from Enom')
-                ->modalDescription('Adds every TLD your Enom account offers, not for sale, with a 30% markup. Existing prices are kept.')
+                ->modalDescription('Adds every TLD your account offers, not for sale, using the default pricing rule. Existing rules are kept.')
                 ->modalSubmitActionLabel('Import')
                 ->action(function (array $data) {
-                    Staff::require();
+                    Staff::require(Staff::COSTS);
                     $server = self::serverId($data);
                     if ($server === null) { \Filament\Notifications\Notification::make()->title('Choose a server.')->danger()->send(); return; }
                     Staff::attempt(function () use ($server) {

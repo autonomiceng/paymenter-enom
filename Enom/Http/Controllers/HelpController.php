@@ -5,7 +5,7 @@ namespace Paymenter\Extensions\Servers\Enom\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 
-/** Customer help page and the old staff help address. */
+/** Customer help page. */
 class HelpController extends Controller
 {
     /** One short customer help page. */
@@ -16,7 +16,7 @@ class HelpController extends Controller
         return view('enom::help.customer');
     }
 
-    /** Staff guidance now lives on the Enom setup page in the admin panel. */
+
     public function admin(Request $request, ?string $topic = null)
     {
         abort_unless($request->user()?->hasPermission('admin.enom.manage'), 403);

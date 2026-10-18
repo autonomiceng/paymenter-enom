@@ -12,6 +12,7 @@ require dirname(__DIR__).'/enom-client-fixture.php';
 use App\Models\Invoice;
 use Paymenter\Extensions\Servers\Enom\Models\Operation;
 use Paymenter\Extensions\Servers\Enom\Models\Tld;
+require_once dirname(__DIR__).'/enom-cart-order.php';
 use Paymenter\Extensions\Servers\Enom\Services\Pricing;
 use Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard;
 
@@ -62,7 +63,7 @@ verify(str_contains(text($empty), 'Find your domain name') && enomDocument($empt
 accessible($empty, 'Empty list');
 $search = ok('/domains/register?name=hello', $owner);
 accessible($search, 'Search');
-verify(str_contains(text($search), 'Test mode: Orders and changes use Enom\'s test environment.'), 'Test environment banner missing on search.');
+verify(str_contains(text($search), 'Test mode: Orders and changes use the registrar\'s test system. Nothing is registered for real.'), 'Test environment banner missing on search.');
 $pages['search'] = $search;
 $transfer = ok('/domains/transfer', $owner);
 verify(str_contains(text($transfer), 'Transfer prices') && str_contains(text($transfer), '.com $13.00') && !str_contains(text($transfer), '.org'), 'Transfer page does not list enabled endings with transfer prices.');
@@ -70,18 +71,9 @@ accessible($transfer, 'Transfer');
 verify(str_contains(text(ok('/domains/help', $owner)), 'domain'), 'Help page is empty.');
 
 // ---------------------------------------------------------------- pending registration awaiting payment
-$fields = enomFormFields($search, '/domains/quote');
-$quoteResponse = enomHttp($owner, 'POST', '/domains/quote', $fields);
-$intentPath = enomRedirectPath($quoteResponse);
-verify($quoteResponse->getStatusCode() === 302 && is_string($intentPath) && preg_match('#^/domains/order/[a-f0-9]{48}$#D', $intentPath) === 1, 'Quote did not redirect to its order form.');
-$order = ok($intentPath, $owner);
-accessible($order, 'Order');
-verify(enomDocument($order)->query('//textarea[@data-enom-nameservers][@name="nameservers"]')->length === 1 && enomDocument($order)->query('//*[@data-enom-reveal="#enom-ns-custom"]')->length === 1, 'Order page lacks the custom nameserver field.');
-$pages['order'] = $order;
-$orderResponse = enomHttp($owner, 'POST', '/domains/order', enomFormFields($order, '/domains/order'));
-verify($orderResponse->getStatusCode() === 302 && preg_match('#^/invoices/[0-9]+$#D', enomRedirectPath($orderResponse) ?? '') === 1, 'Order did not redirect to its invoice.');
-$pending = Paymenter\Extensions\Servers\Enom\Models\Domain::where('domain', 'hello.com')->sole();
-$invoice = Invoice::where('user_id', $owner->id)->sole();
+$initial = enomCartOrder($owner, 'hello.com');
+$pending = $initial['domain'];
+$invoice = $initial['invoice'];
 $pendingPage = ok('/domains/'.$pending->id, $owner);
 verify(str_contains(text($pendingPage), 'Pay the invoice to register hello.com') && enomDocument($pendingPage)->query('//a[@href="http://enom-tests.invalid/invoices/'.$invoice->id.'"][contains(@class, "enom-btn--primary")]')->length === 1, 'Pending registration does not lead to its invoice.');
 verify(enomDocument($pendingPage)->query('//*[@data-enom-tabs]')->length === 0 && !str_contains($pendingPage, '/manage/'), 'Pending registration shows management tabs or forms.');
@@ -122,12 +114,6 @@ Pricing::setDomainMode($gift, 'complimentary');
 $giftPage = ok('/domains/'.$gift->id, $owner);
 verify(str_contains(text($giftPage), 'Renewal price Complimentary') && str_contains(text($giftPage), 'Renews at no cost.') && !str_contains($giftPage, '/domains/'.$gift->id.'/renew"'), 'Complimentary domain page shows a paid renewal.');
 verify(str_contains($giftPage, '/domains/'.$gift->id.'/privacy/purchase'), 'Complimentary domain hides the paid ID Protect purchase.');
-$vip = client('vip@example.com', ['first_name' => 'Complimentary']);
-grantComplimentary($vip);
-$vipSearch = ok('/domains/register?name=gift', $vip);
-verify(str_contains(text($vipSearch), 'Domains are complimentary on your account.') && !str_contains(text($vipSearch), '$12.00'), 'Complimentary client search shows prices.');
-verify(str_contains(text(ok('/domains/transfer', $vip)), 'Transfers are complimentary on your account.'), 'Complimentary client transfer page shows prices.');
-
 // ---------------------------------------------------------------- registrant-only contacts, differing contacts
 $solo = clientDomain($owner, ['domain' => 'solo-contact.com'], ['contact_roles' => ['registrant']]);
 $soloPage = ok('/domains/'.$solo->id, $owner);
@@ -147,14 +133,14 @@ verify(str_contains($servicePage, 'http://enom-tests.invalid/domains/'.$active->
 Illuminate\Support\Facades\Auth::setUser($owner);
 $block = $extension->getView($active->service)->render();
 verify(str_contains(text($block), 'active-site.com Active Expires Dec 1, 2026 Auto-renew on') && str_contains($block, 'href="http://enom-tests.invalid/domains/'.$active->id.'"'), 'Service block lacks status, expiry or the domain link.');
-Illuminate\Support\Facades\Auth::setUser($vip);
+Illuminate\Support\Facades\Auth::setUser(client('other-view@example.com'));
 try { $extension->getView($active->service); verify(false, 'Another client rendered this service block.'); }
 catch (Illuminate\Database\Eloquent\ModelNotFoundException|Symfony\Component\HttpKernel\Exception\HttpException) { verify(true, ''); }
 $app['auth']->forgetGuards();
 
 // ---------------------------------------------------------------- test and live banners
 $liveCheck = fn (string $html) => str_contains(text($html), 'Test mode:');
-verify($liveCheck(ok('/domains', $owner)) && $liveCheck(ok('/domains/'.$active->id, $owner)) && $liveCheck($order), 'Test banner missing in the test environment.');
+verify($liveCheck(ok('/domains', $owner)) && $liveCheck(ok('/domains/'.$active->id, $owner)) && $liveCheck($search), 'Test banner missing in the test environment.');
 serverSetting('environment', 'live');
 RuntimeGuard::confirmLive($server->id);
 verify(!$liveCheck(ok('/domains', $owner)) && !$liveCheck(ok('/domains/'.$active->id, $owner)) && !$liveCheck(ok('/domains/register?name=hello', $owner)) && !$liveCheck(ok('/domains/transfer', $owner)), 'Test banner shown for a live server.');
@@ -175,12 +161,8 @@ serverSetting('dns_tools', '1');
 $hostilePage = ok('/domains/'.$hostile->id, $owner);
 $hostileList = ok('/domains?q='.rawurlencode('<script>alert(9)</script>'), $owner);
 $hostileAll = ok('/domains', $owner);
-$hostileQuote = enomHttp($owner, 'POST', '/domains/quote', ['domain' => 'fresh-order.com'] + $fields);
-verify($hostileQuote->getStatusCode() !== 419, 'An open search form key expired while other pages were opened.');
-verify($hostileQuote->getStatusCode() === 302 && preg_match('#^/domains/order/[a-f0-9]{48}$#D', enomRedirectPath($hostileQuote) ?? '') === 1, 'Quote did not redirect to its order form.');
-$hostileOrder = ok(enomRedirectPath($hostileQuote), $owner);
 serverSetting('dns_tools', '0');
-foreach (['domain page' => $hostilePage, 'list search' => $hostileList, 'list' => $hostileAll, 'order prefill' => $hostileOrder] as $name => $html) {
+foreach (['domain page' => $hostilePage, 'list search' => $hostileList, 'list' => $hostileAll] as $name => $html) {
     // Raw markup only; escaped text such as &lt;img src=x onerror=…&gt; is expected. Attributes are checked on the DOM below.
     verify(!preg_match('/<script>alert\(|<img src=x|"onmouseover="/i', $html), 'Unescaped hostile text on the '.$name.'.');
     $dom = enomDocument($html);
@@ -193,10 +175,10 @@ verify(enomFormFields($hostilePage, '/domains/'.$hostile->id.'/manage/contacts')
 
 if ($emit) {
     // Pages for the jsdom checks. A search with 13 enabled endings renders the 12-ending cap.
-    for ($i = 1; $i <= 11; $i++) { Tld::create(['server_id' => $server->id, 'tld' => 'e'.$i, 'enabled' => true, 'pricing_mode' => 'fixed', 'register_price' => '20.00', 'renew_price' => '21.00', 'transfer_price' => '20.00', 'sort_order' => 10 + $i]); }
+    for ($i = 1; $i <= 11; $i++) { enomTestTld(['server_id' => $server->id, 'tld' => 'e'.$i, 'enabled' => true, 'pricing_mode' => 'fixed', 'register_price' => '20.00', 'renew_price' => '21.00', 'transfer_price' => '20.00', 'sort_order' => 10 + $i]); }
     $pages['search'] = ok('/domains/register?name=hello', $owner);
     fwrite(STDOUT, json_encode($pages, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
 } else {
-    echo 'Client views: '.$checks.' passed; '.$views.' views compiled; known runtime bugs: '.($knownBugs ? implode(', ', $knownBugs) : 'none').'; real routes, SQLite in memory.'.PHP_EOL;
+    echo 'Client views: '.$checks.' passed; '.$views.' views compiled; real routes, SQLite in memory.'.PHP_EOL;
 }
 $successful = true;

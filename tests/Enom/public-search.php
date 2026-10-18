@@ -13,7 +13,7 @@ use Paymenter\Extensions\Servers\Enom\Services\Pricing;
 
 $owner = client('public.owner@example.com');
 $free = client('public.free@example.com');
-Pricing::setClientComplimentary($free, true, null, null);
+
 $held = clientDomain($owner, ['domain' => 'held-name.com']);
 /** Visible text, scripts and styles removed. */
 function visible(string $html): string { return preg_replace('/\s+/', ' ', html_entity_decode(strip_tags(str_replace('<', ' <', preg_replace('#<(style|script|svg)\b.*?</\1>#si', '', $html))))); }
@@ -33,20 +33,10 @@ verify(str_contains($text, 'Find a domain') && str_contains($text, '.com $12.00/
     'Guest search lacks the endings, pre-tax prices or the tax note.');
 costFree($search->getContent(), 'Guest search shows Enom costs');
 $xpath = enomDocument($search->getContent());
-// Guests choose a term here, then sign in; the form is a GET back to this page with go=1, never a quote POST.
-verify($xpath->query('//form[@action="'.route('enom.domains.quote').'"]')->length === 0 && $xpath->query('//input[@name="_request_key"]')->length === 0, 'Guest search carries quote forms or form keys.');
-$buyForm = $xpath->query('//form[@data-when="available"]')->item(0);
-$buy = [];
-foreach ($xpath->query('.//input[@name]', $buyForm) as $input) { $buy[$input->getAttribute('name')] = $input->getAttribute('value'); }
-$buy['years'] = $xpath->query('.//select[@name="years"]/option', $buyForm)->item(0)?->getAttribute('value');
-verify(strtoupper($buyForm->getAttribute('method')) === 'GET' && parse_url($buyForm->getAttribute('action'), PHP_URL_PATH) === '/domains/register', 'Guest register form is not a GET back to the search.');
-verify(($buy['go'] ?? null) === '1' && ($buy['name'] ?? null) === 'fresh-idea' && ($buy['tld'] ?? null) === 'com' && ($buy['years'] ?? null) === '1', 'Guest register form does not return to the search with its choice: '.json_encode($buy));
-$resume = enomHttp(null, 'GET', '/domains/register?name=fresh-idea&tld=com&years=3&go=1');
-verify($resume->getStatusCode() === 302 && enomRedirectPath($resume) === '/login', 'Guest Register did not ask to sign in.');
-// After signing in the same choice opens with the chosen term preselected.
-$back = enomHttp($owner, 'GET', '/domains/register?name=fresh-idea&tld=com&years=3&go=1');
-$backXpath = enomDocument($back->getContent());
-verify($back->getStatusCode() === 200 && $backXpath->query('//select[@name="years"]/option[@selected and @value="3"]')->length >= 1, 'Signed-in return lost the chosen term.');
+// Search links to native checkout with a priced plan and full domain prefill.
+$link = $xpath->query('//a[@data-slot="register"]')->item(0);
+verify($link !== null && str_contains($link->getAttribute('href'), 'config%5Bdomain%5D=fresh-idea.com') && str_contains($link->getAttribute('href'), 'plan='), 'Native checkout link lacks name or plan.');
+verify($xpath->query('//input[@name="_request_key"]')->length===0,'Search retains an order form key.');
 $pricing = enomHttp(null, 'GET', '/domains/pricing');
 verify($pricing->getStatusCode() === 200, 'Guest could not open the price list.');
 $priceText = visible($pricing->getContent());
@@ -67,8 +57,8 @@ enomHttp(null, 'GET', '/domains/register'); // Session and XSRF cookie.
 verify($guestCheck('fresh-idea.com', ['token' => false])->getStatusCode() === 419, 'Guest check accepted a request without a CSRF token.');
 $answer = $guestCheck('fresh-idea.com');
 $data = json_decode($answer->getContent(), true);
-verify($answer->getStatusCode() === 200 && $data['status'] === 'available' && $data['complimentary'] === false && $data['price'] === '$12.00'
-    && $data['renew_price'] === '$14.00' && $data['terms']['3'] === '$40.00' && !isset($data['url']), 'Guest availability answer differs: '.$answer->getContent());
+verify($answer->getStatusCode() === 200 && $data['status'] === 'available' && $data['price'] === '$12.00'
+    && $data['renew_price'] === '$14.00' && $data['terms']['3'] === '$36.00' && !isset($data['url']), 'Guest availability answer differs: '.$answer->getContent());
 costFree($answer->getContent(), 'Guest check shows Enom costs');
 // A name held in the portal is just taken for a guest (and another client); its owner sees it as theirs.
 $heldAnswer = json_decode($guestCheck('held-name.com')->getContent(), true);
@@ -77,7 +67,7 @@ verify(json_decode(enomHttp($owner, 'POST', '/domains/check', ['domain' => 'held
 $otherHeld = json_decode(enomHttp($free, 'POST', '/domains/check', ['domain' => 'held-name.com'], ['json' => true])->getContent(), true);
 verify($otherHeld['status'] === 'taken' && !isset($otherHeld['url']), 'Another client learned the owner URL.');
 // Complimentary clients see complimentary prices; guests never do.
-verify(json_decode(enomHttp($free, 'POST', '/domains/check', ['domain' => 'gift-idea.com'], ['json' => true])->getContent(), true)['price'] === 'Complimentary', 'Complimentary client saw prices.');
+verify(json_decode(enomHttp($free, 'POST', '/domains/check', ['domain' => 'gift-idea.com'], ['json' => true])->getContent(), true)['price'] === '$12.00', 'Complimentary client saw prices.');
 verify(json_decode($guestCheck('gift-idea.com')->getContent(), true)['price'] === '$12.00', 'Guest saw complimentary pricing.');
 
 // ---------------------------------------------------------------- per-IP limit with short cached answers
@@ -98,20 +88,21 @@ verify($limited->getStatusCode() === 429 && (int) $limited->headers->get('Retry-
 verify($guestCheck('other-address.com', ['ip' => '198.51.100.21', 'jar' => 'other-ip'])->getStatusCode() === 200, 'One address\'s limit blocked another.');
 verify(enomHttp($owner, 'POST', '/domains/check', ['domain' => 'signed-in.com'], ['json' => true])->getStatusCode() === 200, 'The guest limit blocked a signed-in client.');
 // The guest cache never answers a signed-in client (who may be complimentary or own the name).
-verify(json_decode(enomHttp($free, 'POST', '/domains/check', ['domain' => 'limit-1.com'], ['json' => true])->getContent(), true)['price'] === 'Complimentary', 'A cached guest answer was served to a client.');
+verify(json_decode(enomHttp($free, 'POST', '/domains/check', ['domain' => 'limit-1.com'], ['json' => true])->getContent(), true)['price'] === '$12.00', 'A cached guest answer was served to a client.');
 // After a minute the address may search again.
 Carbon\Carbon::setTestNow(now()->addSeconds(61)); Carbon\CarbonImmutable::setTestNow(Carbon\Carbon::now());
 verify($guestCheck('after-minute.com', ['ip' => '198.51.100.20', 'jar' => 'limited'])->getStatusCode() === 200, 'Guest limit did not reset after a minute.');
 
 // ---------------------------------------------------------------- ordering still needs an account
 $before = clientRows();
-foreach ([['POST', '/domains/quote', ['domain' => 'fresh-idea.com', 'action' => 'register', 'years' => 2]], ['POST', '/domains/order', []], ['GET', '/domains/transfer', []], ['GET', '/domains', []],
-    ['GET', '/domains/order/'.str_repeat('a', 48), []]] as [$method, $uri, $payload]) {
-    $response = enomHttp(null, $method, $uri, $payload);
-    verify($response->getStatusCode() === 302 && enomRedirectPath($response) === '/login', 'Guest reached '.$method.' '.$uri.': '.$response->getStatusCode());
+foreach ([['GET','/domains/transfer'],['GET','/domains']] as [$method,$uri]) {
+    verify(enomRedirectPath(enomHttp(null,$method,$uri))==='/login','Private domain page did not require login.');
+}
+foreach ([['POST','/domains/quote'],['POST','/domains/order'],['GET','/domains/order/'.str_repeat('a',48)]] as [$method,$uri]) {
+    verify(enomHttp(null,$method,$uri)->getStatusCode()===404,'Removed guest order endpoint remains available.');
 }
 verify(clientRows() == $before, 'Guest requests wrote business rows.');
 verify(!array_filter($providerCommands, fn ($command) => $command[0] !== 'Check'), 'Public pages sent a provider command other than Check.');
 
-echo 'Public search: '.$checks.' passed; known runtime bugs: '.($knownBugs ? implode(', ', $knownBugs) : 'none').'; real routes and sessions, injected Check only.'.PHP_EOL;
+echo 'Public search: '.$checks.' passed; real routes and sessions, injected Check only.'.PHP_EOL;
 $successful = true;

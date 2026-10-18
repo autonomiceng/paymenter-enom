@@ -53,12 +53,10 @@ final class DomainFacts
         $nextInvoice = null;
         if ($pays['mode'] !== 'complimentary' && $service && !$service->cancellation) {
             $nextInvoice = $customer['calendar']['issue_at'] ?? null;
-            if (!$nextInvoice && !$domain->billing_managed) { $nextInvoice = $service->expires_at; }
         }
 
         return [
             'client' => $client,
-            'client_complimentary' => Labels::clientComplimentary($client),
             'service' => $service,
             'environment' => RuntimeGuard::isTest($serverId) ? 'test' : 'live',
             'default_nameservers' => RuntimeGuard::defaultNameservers($serverId),
@@ -153,25 +151,14 @@ final class DomainFacts
 
     /**
      * Years a staff "Renew now" can add: 1–10, and never past 10 years from today (registry rule).
-     * Prefers StaffDomains::renewalYears, then DomainOrders::renewalOptions, then the same rule computed here.
+     * StaffDomains supplies the current registry-limited terms.
      * @return array{years: list<int>, price_per_year: ?string, multi: bool}
      */
     private static function renewalOptions(Domain $domain, ?User $client): array
     {
-        $multi = self::quiet(fn () => method_exists(Staff::STAFF_SERVICE, 'renewNow')
-            && (new \ReflectionMethod(Staff::STAFF_SERVICE, 'renewNow'))->getNumberOfParameters() >= 3) === true;
-        $options = $client && method_exists(DomainOrders::class, 'renewalOptions')
-            ? self::quiet(fn () => app(DomainOrders::class)->renewalOptions($client, (int) $domain->id)) : null;
-        // Staff terms come first: client options cap domains outside Paymenter billing at one year.
-        $staffYears = Staff::supports('renewalYears') ? self::quiet(fn () => Staff::service('renewalYears')->renewalYears((int) $domain->id)) : null;
-        $source = is_array($staffYears) ? $staffYears : ($options['years'] ?? null);
-        $years = is_array($source) ? array_values(array_filter($source, fn ($year) => is_int($year) && $year >= 1 && $year <= 10)) : null;
-        if ($years === null) {
-            $expires = Labels::day($domain->provider_expires_at);
-            $limit = CarbonImmutable::today()->addYears(10);
-            $years = array_values(array_filter(range(1, 10), fn (int $year) => !$expires || $expires->addYears($year)->lte($limit)));
-        }
-        if (!$multi) { $years = in_array(1, $years, true) ? [1] : []; }
+        $options = $client ? self::quiet(fn () => app(DomainOrders::class)->renewalOptions($client, (int) $domain->id)) : null;
+        $years = self::quiet(fn () => app(\Paymenter\Extensions\Servers\Enom\Services\StaffDomains::class)->renewalYears((int) $domain->id)) ?? [];
+        $multi = true;
         $price = $options['price_per_year'] ?? null;
         return ['years' => $years, 'price_per_year' => is_numeric($price) ? (string) $price : null, 'multi' => $multi];
     }

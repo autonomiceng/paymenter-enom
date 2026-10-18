@@ -41,6 +41,12 @@ SUITES = {
     ],
     'ui': [
         'cart-checkout-ui.php',
+        'catalogue-admin.php',
+        'client-controller.php',
+        'client-views.php',
+        'admin-staff.php',
+        'public-search.php',
+        'client-script.cjs',
     ],
 }
 

@@ -112,7 +112,7 @@ class DomainResource extends Resource
                     ->visibleFrom('md')
                     ->state(fn (Domain $record) => Labels::whoPays($record)['label'])
                     ->badge()
-                    ->color(fn (Domain $record) => $record->price_mode === 'custom' && (float) ($record->service?->price ?? 0) <= 0 ? 'warning' : Labels::whoPaysColor(Labels::whoPays($record)['mode']))
+                    ->color(fn (Domain $record) => Labels::whoPaysColor(Labels::whoPays($record)['mode']))
                     ->description(fn (Domain $record) => (($pays = Labels::whoPays($record))['mode'] === 'complimentary' && $pays['source'] === 'client') ? 'From client' : null),
                 TextColumn::make('last_synced_at')
                     ->label('Last checked')
@@ -148,10 +148,7 @@ class DomainResource extends Resource
                 Filter::make('complimentary')
                     ->label('Complimentary')
                     ->toggle()
-                    ->query(fn (Builder $query) => $query->where(fn (Builder $inner) => $inner
-                        ->where('price_mode', 'complimentary')
-                        ->orWhere(fn (Builder $default) => $default->whereNull('price_mode')
-                            ->whereIn('user_id', self::complimentaryClientIds())))),
+                    ->query(fn (Builder $query) => $query->where('price_mode', 'complimentary')),
                 Filter::make('renewal_off')
                     ->label('Renewal off')
                     ->toggle()
@@ -162,7 +159,7 @@ class DomainResource extends Resource
             ->defaultPaginationPageOption(25)
             ->persistFiltersInSession()
             ->emptyStateHeading('No domains yet')
-            ->emptyStateDescription('Domains appear here when clients order them or staff add them.');
+            ->emptyStateDescription('Domains appear here when clients order them.');
     }
 
     /** "Awaiting payment" and similar detail for registrations and transfers that have not finished. */
@@ -180,7 +177,6 @@ class DomainResource extends Resource
         };
     }
 
-    /** @return list<int> clients who hold a complimentary grant */
     public static function complimentaryClientIds(): array
     {
         return User::query()->whereHas('properties', fn (Builder $query) => $query->where('key', Pricing::CLIENT_PROPERTY))

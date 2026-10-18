@@ -70,7 +70,7 @@ class ViewDomain extends ViewRecord
                 ->action(function () {
                     $staff = Staff::require();
                     $domain = $this->getRecord();
-                    if (Staff::attempt(fn () => Staff::service('refresh')?->refresh($staff, (int) $domain->id) ?? throw new \RuntimeException('Refreshing is not available yet.'), 'Updated from Enom.')) {
+                    if (Staff::attempt(fn () => app(\Paymenter\Extensions\Servers\Enom\Services\StaffDomains::class)->refresh($staff, (int) $domain->id), 'Updated from Enom.')) {
                         $this->refreshFacts($domain);
                     }
                 }),
@@ -122,8 +122,7 @@ class ViewDomain extends ViewRecord
                 $domain = $this->getRecord();
                 $complimentary = $this->facts()['pays']['mode'] === 'complimentary';
                 $staff = Staff::require(...($complimentary ? [Staff::FUND] : []));
-                $service = Staff::service('renewNow');
-                if (!$service) { Notification::make()->title('Renewing from the admin is not available yet.')->danger()->send(); return; }
+                $service = app(\Paymenter\Extensions\Servers\Enom\Services\StaffDomains::class);
                 $years = (int) ($data['years'] ?? 1);
                 if (!in_array($years, $this->facts()['renewal']['years'], true)) {
                     Notification::make()->title('Choose a term of up to 10 years from today.')->danger()->send();
@@ -256,7 +255,7 @@ class ViewDomain extends ViewRecord
         $lines = [];
         foreach ($facts['attention'] as $operation) {
             $said = Labels::providerMessage($operation);
-            $lines[] = Labels::action($operation->action).' #'.$operation->id.' is '.strtolower(Labels::state($operation->state)).'. '.Labels::stateHint($operation->state)
+            $lines[] = Labels::action($operation->action).' #'.$operation->id.': '.strtolower(Labels::state($operation->state)).'. '.Labels::stateHint($operation->state)
                 .($said ? ' Enom said: '.$said.(str_ends_with($said, '.') ? '' : '.') : '');
         }
         if (!$lines && $facts['paused']) { $lines[] = 'Changes and renewal billing are paused after a staff review.'; }
@@ -271,7 +270,6 @@ class ViewDomain extends ViewRecord
                 $this->changeWhoPaysAction(),
                 ActionGroup::make([
                     $this->renewalToggleAction(),
-                    $this->clientComplimentaryAction(),
                 ])->label('More')->icon('heroicon-m-ellipsis-vertical')->color('gray')->dropdownWidth(\Filament\Support\Enums\Width::ExtraSmall),
             ])
             ->columns(2)
@@ -282,7 +280,7 @@ class ViewDomain extends ViewRecord
                     ->badge()
                     ->color(fn (Domain $record) => $this->zeroCustom($record) ? 'warning' : Labels::whoPaysColor($this->facts($record)['pays']['mode']))
                     ->belowContent(fn (Domain $record) => $this->zeroCustom($record) ? 'A $0 price is held for review. Choose who pays.' : ($this->facts($record)['pays']['source'] === 'client'
-                        ? ($this->facts($record)['pays']['mode'] === 'complimentary' ? 'From the client\'s complimentary status' : 'Client default')
+                        ? 'Standard renewal price'
                         : 'Set for this domain')),
                 TextEntry::make('renewal_price')
                     ->label('Renewal price')
@@ -317,7 +315,7 @@ class ViewDomain extends ViewRecord
 
     private function zeroCustom(Domain $record): bool
     {
-        return $record->price_mode === 'custom' && (float) ($record->service?->price ?? 0) <= 0;
+        return false;
     }
 
     private static function invoiceTotal(Invoice $invoice): ?string
@@ -424,8 +422,7 @@ class ViewDomain extends ViewRecord
     private function queueChange(Domain $record, string $action, array $payload, string $success): void
     {
         $staff = Staff::require();
-        $service = Staff::service('requestChange');
-        if (!$service) { Notification::make()->title('Changes from the admin are not available yet.')->danger()->send(); return; }
+        $service = app(\Paymenter\Extensions\Servers\Enom\Services\StaffDomains::class);
         if (Staff::attempt(fn () => $service->requestChange($staff, (int) $record->id, $action, $payload + ['confirmed' => true]) ? $success : null, $success)) {
             $this->refreshFacts($record);
         }
@@ -620,8 +617,7 @@ class ViewDomain extends ViewRecord
             ->size('sm')
             ->visible(fn (Domain $record) => Staff::can(Staff::MANAGE) && ($record->price_mode !== 'complimentary' || Staff::can(Staff::FUND)))
             ->fillForm(fn (Domain $record) => [
-                'mode' => in_array($record->price_mode, ['standard', 'custom', 'complimentary'], true) ? $record->price_mode : 'inherit',
-                'price' => $record->service?->price !== null ? number_format((float) $record->service->price, 2, '.', '') : null,
+                'mode' => in_array($record->price_mode, ['standard', 'complimentary'], true) ? $record->price_mode : 'standard',
             ])
             ->schema(fn (Domain $record) => [
                 Radio::make('mode')
@@ -629,26 +625,14 @@ class ViewDomain extends ViewRecord
                     ->required()
                     ->live()
                     ->options([
-                        'inherit' => 'Follow client default',
                         'standard' => 'Standard price',
-                        'custom' => 'Custom price',
                         'complimentary' => 'Complimentary',
                     ])
                     ->descriptions([
-                        'inherit' => Labels::clientComplimentary($this->facts($record)['client']) ? 'This client is complimentary, so the domain is free.' : 'Standard price, unless the client is made complimentary.',
                         'standard' => ($price = $this->standardPrice($record)) ? $price.' a year, from TLDs & pricing.' : 'From TLDs & pricing.',
-                        'custom' => 'A fixed yearly price for this domain.',
-                        'complimentary' => Staff::can(Staff::FUND) ? 'The client pays nothing. Enom charges your account.' : 'Needs the "Give complimentary domains" permission.',
+                        'complimentary' => Staff::can(Staff::FUND) ? 'The client pays nothing. Enom charges your account.' : 'Needs the "Fund domain renewals" permission.',
                     ])
                     ->disableOptionWhen(fn (string $value) => $value === 'complimentary' && !Staff::can(Staff::FUND)),
-                TextInput::make('price')
-                    ->label('Yearly price')
-                    ->prefix('$')
-                    ->numeric()
-                    ->minValue(0.01)
-                    ->maxValue(100000)
-                    ->required(fn (Get $get) => $get('mode') === 'custom')
-                    ->visible(fn (Get $get) => $get('mode') === 'custom'),
             ])
             ->modalHeading('Who pays for this domain')
             ->modalDescription('Applies from the next renewal. Invoices already issued keep their amount.')
@@ -658,10 +642,8 @@ class ViewDomain extends ViewRecord
                 $mode = (string) ($data['mode'] ?? '');
                 $needsFund = $mode === 'complimentary' || $record->price_mode === 'complimentary';
                 $staff = Staff::require(...($needsFund ? [Staff::FUND] : []));
-                $service = Staff::service('setPricing');
-                if (!$service) { Notification::make()->title('Changing who pays is not available yet.')->danger()->send(); return; }
-                $price = $mode === 'custom' && is_numeric($data['price'] ?? null) ? number_format((float) $data['price'], 2, '.', '') : null;
-                if (Staff::attempt(fn () => $service->setPricing($staff, (int) $record->id, $mode, $price), 'Saved. The next renewal uses this.')) {
+                $service = app(\Paymenter\Extensions\Servers\Enom\Services\StaffDomains::class);
+                if (Staff::attempt(fn () => $service->setPricing($staff, (int) $record->id, $mode), 'Saved. The next renewal uses this.')) {
                     $this->refreshFacts($record);
                 }
             });
@@ -679,7 +661,7 @@ class ViewDomain extends ViewRecord
             ->label(fn (Domain $record) => $this->facts($record)['renews'] ? 'Turn renewal off' : 'Turn renewal on')
             ->icon(fn (Domain $record) => $this->facts($record)['renews'] ? 'heroicon-o-pause-circle' : 'heroicon-o-play-circle')
             ->color(fn (Domain $record) => $this->facts($record)['renews'] ? 'danger' : 'gray')
-            ->visible(fn (Domain $record) => $record->service_id !== null && $this->registered($record) && Staff::supports('setRenewal'))
+            ->visible(fn (Domain $record) => $record->service_id !== null && $this->registered($record))
             ->requiresConfirmation()
             ->modalHeading(fn (Domain $record) => $this->facts($record)['renews'] ? 'Turn renewal off?' : 'Turn renewal on?')
             ->modalDescription(fn (Domain $record) => $this->facts($record)['renews']
@@ -688,7 +670,7 @@ class ViewDomain extends ViewRecord
             ->action(function (Domain $record) {
                 $staff = Staff::require();
                 $on = !$this->facts($record)['renews'];
-                if (Staff::attempt(fn () => Staff::service('setRenewal')->setRenewal($staff, (int) $record->id, $on), $on ? 'Renewal turned on.' : 'Renewal turned off.')) {
+                if (Staff::attempt(fn () => app(\Paymenter\Extensions\Servers\Enom\Services\StaffDomains::class)->setRenewal($staff, (int) $record->id, $on), $on ? 'Renewal turned on.' : 'Renewal turned off.')) {
                     $this->refreshFacts($record);
                 }
             });

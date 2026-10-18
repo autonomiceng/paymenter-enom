@@ -95,13 +95,13 @@ class OperationResource extends Resource
                     ->color(fn (?string $state, Operation $record) => self::refunded($record) ? 'gray' : Labels::stateColor($state))
                     ->tooltip(fn (Operation $record) => self::refunded($record)
                         ? ($record->safe_code === 'refunded_by_staff' && is_string($record->funding_reason) ? $record->funding_reason : 'The client\'s payment was added to their account credit.')
-                        : Labels::stateHint($record->state))
+                        : Labels::stateHint($record->state, $record))
                     ->extraHeaderAttributes(['style' => 'min-width: 10rem'])
                     ->description(fn (Operation $record) => implode(' ', array_filter([
                         ($refund = Labels::refundText($record)) ? $refund.'.' : null,
                         ($said = Labels::providerMessage($record)) !== null
                             ? 'Enom said: '.$said
-                            : (in_array($record->state, [...Labels::ATTENTION_STATES, 'awaiting_payment'], true) ? Labels::stateHint($record->state) : null),
+                            : (in_array($record->state, [...Labels::ATTENTION_STATES, 'awaiting_payment'], true) ? Labels::stateHint($record->state, $record) : null),
                     ])) ?: null)
                     ->wrap(),
                 TextColumn::make('funding_basis')
@@ -121,6 +121,20 @@ class OperationResource extends Resource
                     ->formatStateUsing(fn ($state) => '#'.$state)
                     ->url(fn (Operation $record) => $record->invoice_id && Staff::can('admin.invoices.update') ? self::invoiceUrl((int) $record->invoice_id) : null)
                     ->color('primary')
+                    ->placeholder('—')
+                    ->toggleable(),
+                TextColumn::make('transfer_paid_at')
+                    ->label('Transfer paid')
+                    ->getStateUsing(fn (Operation $record) => $record->action === 'transfer'
+                        ? \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::deadline($record)?->subDays(30) : null)
+                    ->dateTime('M j, Y, H:i T')
+                    ->placeholder('—')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('transfer_code_deadline')
+                    ->label('Code deadline')
+                    ->getStateUsing(fn (Operation $record) => $record->action === 'transfer'
+                        ? \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::deadline($record) : null)
+                    ->dateTime('M j, Y, H:i T')
                     ->placeholder('—')
                     ->toggleable(),
                 TextColumn::make('created_at')
@@ -156,7 +170,7 @@ class OperationResource extends Resource
                         ->mapWithKeys(fn ($action) => [$action => Labels::action($action)])->all()),
                 SelectFilter::make('funding_basis')
                     ->label('Who pays')
-                    ->options(['paid_invoice' => 'Client invoice', 'complimentary' => 'Complimentary', 'sponsored' => 'Legacy', 'non_billable_management' => 'No charge']),
+                    ->options(['paid_invoice' => 'Client invoice', 'complimentary' => 'Complimentary', 'non_billable_management' => 'No charge']),
                 Filter::make('refunded')
                     ->label('Refunded as credit')
                     ->toggle()
@@ -168,7 +182,6 @@ class OperationResource extends Resource
                 self::resumeContactsAction(),
                 self::readResultAction(),
                 self::recordOutcomeAction(),
-                self::fundAction(),
                 self::refundAction(),
             ])
             ->defaultSort('id', 'desc')
@@ -196,12 +209,11 @@ class OperationResource extends Resource
     private static function refundable(Operation $record): bool
     {
         if ($record->state !== 'held' || $record->funding_basis !== 'paid_invoice'
-            || !self::refunds('refundHeld') || !Staff::can(Staff::MANAGE, Staff::INVOICES)) { return false; }
-        if (!($service = self::refunds('canRefundHeld'))) { return true; }
+            || !Staff::can(Staff::MANAGE, Staff::INVOICES)) { return false; }
+        $service = app(\Paymenter\Extensions\Servers\Enom\Services\Refunds::class);
         try { return (bool) $service->canRefundHeld($record, Staff::user()); } catch (Throwable) { return false; }
     }
 
-    /** StaffDomains is the staff write path; the Refunds service answers when StaffDomains does not delegate yet. */
     private static function refunds(string $method): ?object
     {
         if ($service = Staff::service($method)) { return $service; }
@@ -270,8 +282,7 @@ class OperationResource extends Resource
             ->modalWidth('lg')
             ->action(function (Operation $record, array $data) {
                 $staff = Staff::require(Staff::INVOICES);
-                $service = self::refunds('refundHeld');
-                if (!$service) { \Filament\Notifications\Notification::make()->title('Refunds are not available yet.')->danger()->send(); return; }
+                $service = app(\Paymenter\Extensions\Servers\Enom\Services\StaffDomains::class);
                 $reason = trim(preg_replace('/\s+/', ' ', (string) ($data['reason'] ?? '')));
                 Staff::attempt(function () use ($service, $staff, $record, $reason) {
                     $result = $service->refundHeld($staff, (int) $record->id, $reason);
@@ -370,7 +381,7 @@ class OperationResource extends Resource
             ->modalSubmitActionLabel('Resume')
             ->modalWidth('lg')
             ->action(function (Operation $record, array $data) {
-                $funded = in_array($record->funding_basis, ['sponsored', 'complimentary'], true);
+                $funded = $record->funding_basis === 'complimentary';
                 $staff = Staff::require(...($funded ? [Staff::FUND] : []));
                 $reason = trim(preg_replace('/\s+/', ' ', (string) ($data['reason'] ?? '')));
                 Staff::attempt(fn () => app(DomainOperations::class)->readmitHeld((int) $record->id, $staff, $reason), 'Request resumed. It will be sent on the next run.');
