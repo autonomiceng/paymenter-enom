@@ -24,7 +24,7 @@ final class RegistrarClient
         'setreglock', 'synchauthinfo', 'getwppsinfo', 'purchaseservices', 'renewservices',
         'enableservices', 'disableservices', 'getrenew', 'setrenew', 'gethosts', 'sethosts',
         'getdomainsrvhosts', 'setdomainsrvhosts', 'getdnssec', 'adddnssec', 'deletednssec',
-        'getexpireddomains', 'updateexpireddomains', 'gettldlist', 'pe_getdomainpricing', 'pe_getresellerprice',
+        'getexpireddomains', 'updateexpireddomains', 'gettldlist', 'pe_getdomainpricing', 'pe_getproductprice', 'pe_getresellerprice',
         'tp_resendemail', 'checknsstatus', 'registernameserver', 'updatenameserver', 'deletenameserver',
     ];
     private const WRITES = [
@@ -41,7 +41,7 @@ final class RegistrarClient
         'tp_getorderdetail', 'tp_getdetailsbydomain', 'tp_getordersbydomain', 'tp_gettldinfo',
         'getcontacts', 'getdns', 'getreglock', 'getwppsinfo', 'getrenew', 'gethosts',
         'getdomainsrvhosts', 'getdnssec', 'getexpireddomains', 'gettldlist', 'pe_getdomainpricing',
-        'pe_getresellerprice', 'checknsstatus',
+        'pe_getresellerprice', 'pe_getproductprice', 'checknsstatus',
     ];
 
     public function __construct(private string $uid, private string $token, private $transport = null, private $guard = null, private bool $readOnly = false, private string $environment = 'test')

@@ -36,15 +36,15 @@ $loader = require $release.'/vendor/autoload.php';
 $loader->addPsr4('Paymenter\\Extensions\\Servers\\Enom\\', $extensionRoot.'/', true);
 $app = require $testRoot.'/bootstrap/app.php';
 $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-config(['audit.enabled' => false, 'settings.mail_disabled' => true, 'settings.default_currency' => 'USD', 'settings.tax_enabled' => false,
+config(['hashing.bcrypt.rounds' => 4, 'audit.enabled' => false, 'settings.mail_disabled' => true, 'settings.default_currency' => 'USD', 'settings.tax_enabled' => false,
     'settings.theme' => 'default', 'app.version' => 'development']);
 if (config('database.default') !== 'sqlite' || config('database.connections.sqlite.database') !== ':memory:') { throw new RuntimeException('Test database isolation failed.'); }
 Illuminate\Support\Facades\Http::preventStrayRequests();
 Illuminate\Support\Facades\Artisan::call('migrate', ['--force' => true]);
 $extension = new Paymenter\Extensions\Servers\Enom\Enom;
 $extension->installed();
-$extension->boot();
-App\Models\Currency::create(['code' => 'USD', 'name' => 'US Dollar', 'format' => '1,000.00', 'prefix' => '$']);
+if ($enomBootExtension ?? true) { $extension->boot(); }
+if ($enomCreateCurrency ?? true) { App\Models\Currency::create(['code' => 'USD', 'name' => 'US Dollar', 'format' => '1,000.00', 'prefix' => '$']); }
 $checks = 0;
 function verify(bool $condition, string $message): void {
     global $checks;

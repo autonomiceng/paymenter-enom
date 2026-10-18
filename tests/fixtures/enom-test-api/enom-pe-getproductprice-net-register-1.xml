@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<interface-response>
+<productprice><productenabled>True</productenabled><price>15.55</price></productprice>
+<Command>PE_GETPRODUCTPRICE</Command><ErrCount>0</ErrCount><Done>true</Done>
+</interface-response>

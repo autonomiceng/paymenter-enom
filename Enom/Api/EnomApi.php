@@ -46,6 +46,22 @@ final class EnomApi
 
     public function tldList(): RegistrarResult { return $this->client->execute('GetTLDList'); }
     public function domainPricing(): RegistrarResult { return $this->client->execute('PE_GetDomainPricing', ['Years' => 1]); }
+    public function productPrice(string $tld, string $action, int $years = 1): RegistrarResult
+    {
+        $tld = strtolower($tld);
+        if (!preg_match('/^[a-z0-9]+(?:\.[a-z0-9]+)*$/D', $tld)) { throw new \InvalidArgumentException('Invalid domain ending.'); }
+        $type = match ($action) { 'register' => 10, 'renew' => 16, 'transfer' => 19,
+            default => throw new \InvalidArgumentException('Unknown price action.') };
+        $result = $this->client->execute('PE_GetProductPrice', ['TLD' => $tld, 'ProductType' => $type, 'Years' => $this->term($years)]);
+        if ($result->status !== 'success') { return $result; }
+        $enabled = $result->value('productprice.productenabled');
+        $price = $result->value('productprice.price');
+        if (!is_string($enabled) || !in_array(strtolower($enabled), ['true', '1'], true)
+            || !is_string($price) || !preg_match('/^[0-9]{1,8}(?:\.[0-9]{1,4})?$/D', $price)) {
+            return new RegistrarResult('unknown', 'product_price_unavailable');
+        }
+        return $result;
+    }
     public function tldExtendedAttributes(string $tld): RegistrarResult { return $this->client->execute('GetExtAttributes', ['TLD' => strtolower($tld)]); }
     public function tldInfo(string $tld): RegistrarResult { return $this->client->execute('GetTLDDetails', ['TLD' => strtolower($tld)]); }
     /** Child nameservers (glue). The host must sit under a domain in this account. */

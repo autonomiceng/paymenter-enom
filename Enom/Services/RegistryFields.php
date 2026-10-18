@@ -92,12 +92,7 @@ final class RegistryFields
             $value = $input[$field['name']] ?? null;
             $values[$field['name']] = is_string($value) ? trim($value) : '';
         }
-        $needed = [];
-        foreach ($schema as $field) {
-            foreach ($field['options'] as $option) {
-                if ($values[$field['name']] === $option['value']) { array_push($needed, ...$option['requires']); }
-            }
-        }
+        $needed = self::needed($schema, $values);
         $errors = [];
         $clean = [];
         foreach ($schema as $field) {
@@ -121,6 +116,24 @@ final class RegistryFields
         }
         if ($errors) { throw new InputValidationException($errors); }
         return $clean;
+    }
+
+    /** Active dependencies are resolved from the complete config, ignoring unused children. */
+    public static function needed(array $schema, array $values): array
+    {
+        $needed = [];
+        do {
+            $previous = $needed;
+            foreach ($schema as $field) {
+                if ($field['child'] && !in_array($field['name'], $needed, true)) { continue; }
+                foreach ($field['options'] as $option) {
+                    if (($values[$field['name']] ?? null) === $option['value']) {
+                        $needed = array_values(array_unique([...$needed, ...$option['requires']]));
+                    }
+                }
+            }
+        } while ($previous !== $needed);
+        return $needed;
     }
 
     private static function text(mixed $value): string

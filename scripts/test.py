@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PHP_TEST = ROOT/'scripts/php-test'
 SUITES = {
     'provider': ['provider-contracts.php', 'registrar-money.php', 'contact-read-regressions.php', 'ui-input-contracts.php',
-                 'catalogue-contracts.php', 'registrar-client.php'],
+                 'catalogue-contracts.php', 'registrar-client.php', 'pricing-rules.php'],
     'native': ['billing-integration.php', 'domain-billing.php', 'domain-administration.php', 'managed-renewal-execution.php',
                'renewal-admission.php', 'renewal-lifecycle-proof.php', 'observation-integration.php', 'reconciliation-rejection.php',
                'reconciliation-registration.php', 'capability-readbacks.php', 'provider-disposition.php', 'native-date-missing-schema.php',

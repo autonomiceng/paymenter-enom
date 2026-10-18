@@ -64,6 +64,35 @@ $single = new RegistrarResult('success', null, ['pricestructure' => ['product' =
 check(Catalogue::costs($single) === ['com' => ['register' => '8.96', 'renew' => null, 'transfer' => null]], 'Singleton product, half-up cents or invalid amounts mishandled: '.json_encode(Catalogue::costs($single)));
 check(Catalogue::costs(new RegistrarResult('success', null, ['pricestructure' => ['product' => [['tld' => 'bad tld', 'resellerpricereg' => '1', 'registerenabled' => 'True'], 'junk']]])) === [], 'Malformed products produced costs.');
 
+// PE_GetProductPrice uses the requested term's per-year price, including non-bracket terms.
+foreach ([1 => '15.55', 2 => '8.95', 3 => '8.9500'] as $years => $expected) {
+    $sent = [];
+    $api = new EnomApi(new RegistrarClient('offline_uid', 'offline_token', function ($command, $params) use (&$sent, $years) {
+        $sent[] = [$command, $params];
+        return fixture('enom-pe-getproductprice-net-register-'.$years.'.xml');
+    }, null, true));
+    $result = $api->productPrice('NET', 'register', $years);
+    check($result->status === 'success' && $result->value('productprice.price') === $expected, 'Exact-term per-year price differs.');
+    check($sent === [['PE_GetProductPrice', ['TLD' => 'net', 'ProductType' => 10, 'Years' => $years]]], 'Requested term was substituted.');
+}
+foreach (['disabled', 'wrong-shape', 'malformed-price', 'missing-price'] as $case) {
+    $api = new EnomApi(new RegistrarClient('offline_uid', 'offline_token', fn () => fixture('enom-pe-getproductprice-'.$case.'.xml'), null, true));
+    check($api->productPrice('net', 'register', 2)->code === 'product_price_unavailable', 'Unsafe product price accepted: '.$case);
+}
+foreach (['renew' => 16, 'transfer' => 19] as $action => $type) {
+    $sent = [];
+    $api = new EnomApi(new RegistrarClient('offline_uid', 'offline_token', function ($command, $params) use (&$sent) {
+        $sent[] = [$command, $params]; return fixture('enom-pe-getproductprice-net-register-2.xml');
+    }, null, true));
+    $api->productPrice('net', $action);
+    check($sent === [['PE_GetProductPrice', ['TLD' => 'net', 'ProductType' => $type, 'Years' => 1]]], 'Wrong product type.');
+}
+foreach ([['net', 'register', 0], ['net', 'register', 11], ['net', 'privacy', 1], ['bad ending', 'register', 1]] as [$ending, $action, $years]) {
+    try { $api->productPrice($ending, $action, $years); check(false, 'Invalid product-price request accepted.'); }
+    catch (InvalidArgumentException) { check(true, 'Invalid request refused.'); }
+}
+
+
 // GetExtAttributes: .us has required nexus and purpose attributes plus a country child; .com has none.
 $us = parsed('GetExtAttributes', fixture('enom-getextattributes-us.xml'), ['TLD' => 'us']);
 check($us->status === 'success' && Catalogue::requiresExtraDetails($us), '.us nexus attribute was not detected as required.');
