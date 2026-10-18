@@ -128,5 +128,35 @@ $notice = collect(session('filament.notifications'))->last();
 $review = collect($notice['actions'])->first();
 verify($review['url'] === TldResource::getUrl('index', ['tableFilters' => ['below_cost' => ['isActive' => true]]]), 'Several renewal losses do not open the below-cost filter.');
 
+// Failed delivery for one message/user must not stop publication or the remaining staff notices.
+$nextCoster = $staffUser('Nextcoster', ['admin.enom.manage', 'admin.enom.costs']);
+$alertServer = App\Models\Server::create(['name' => 'Alert failures', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
+$alertEnding = Tld::create(['server_id' => $alertServer->id, 'tld' => 'alerttest', 'enabled' => true, 'min_years' => 1, 'max_years' => 1,
+    'register_enabled' => true, 'renew_enabled' => true, 'transfer_enabled' => false, 'use_default_rule' => false, 'pricing_mode' => 'fixed',
+    'fixed_register' => '1.00', 'fixed_renew' => '1.00', 'fixed_transfer' => '1.00', 'cost_register_terms' => [1 => '10.0000'], 'cost_renew' => '10.0000']);
+$failedNotice = $failedEmail = false;
+$reportedAlerts = [];
+app(Illuminate\Contracts\Debug\ExceptionHandler::class)->reportable(function (RuntimeException $error) use (&$reportedAlerts) { $reportedAlerts[] = $error->getMessage(); return false; });
+App\Models\Notification::creating(function ($notice) use ($coster, &$failedNotice) {
+    if (!$failedNotice && (int) $notice->user_id === (int) $coster->id && str_contains($notice->title, '.alerttest')) {
+        $failedNotice = true;
+        throw new RuntimeException('Injected pricing notice failure');
+    }
+});
+App\Models\EmailLog::creating(function ($email) use ($coster, &$failedEmail) {
+    if (!$failedEmail && $email->to === $coster->email && str_contains($email->subject, '.alerttest')) {
+        $failedEmail = true;
+        throw new RuntimeException('Injected pricing email failure');
+    }
+});
+$catalogue->publish($alertEnding);
+verify($failedNotice && $failedEmail && in_array('Injected pricing notice failure', $reportedAlerts, true)
+    && in_array('Injected pricing email failure', $reportedAlerts, true), 'Pricing delivery failures escaped or were not reported.');
+verify(App\Models\Notification::where('user_id', $coster->id)->where('title', 'like', '%.alerttest%')->count() === 1
+    && App\Models\Notification::where('user_id', $nextCoster->id)->where('title', 'like', '%.alerttest%')->count() === 2
+    && App\Models\EmailLog::where('to', $nextCoster->email)->where('subject', 'like', '%.alerttest%')->count() === 2, 'Failed pricing delivery stopped another message or user.');
+verify($alertEnding->fresh()->registrationTotal(1) === null && $alertEnding->fresh()->price('renew') === '1.00'
+    && $catalogue->productFor($alertEnding, 'register')->plans()->sole()->prices()->count() === 0, 'Pricing alert failure interrupted publication.');
+
 echo 'Catalogue admin: '.$checks.' checks passed; native Filament forms and permissions.'.PHP_EOL;
 $successful = true;

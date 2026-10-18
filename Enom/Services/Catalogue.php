@@ -73,15 +73,21 @@ class Catalogue
     public function sync(int $serverId): array
     {
         $api = $this->operations->apiForServer($serverId, true);
-        $summary = ['tlds' => 0, 'changed' => [], 'missing' => [], 'held' => [], 'renewals_below_cost' => []];
+        $summary = ['tlds' => 0, 'changed' => [], 'missing' => [], 'held' => [], 'renewals_below_cost' => [], 'failed' => []];
         foreach (Tld::where('server_id', $serverId)->orderBy('id')->get() as $tld) {
-            $terms = [];
-            // Provider reads finish before taking any catalogue row lock.
-            for ($years = max(1, (int) $tld->min_years); $years <= min(10, (int) $tld->max_years); $years++) {
-                $terms[$years] = self::productCost($api->productPrice($tld->tld, 'register', $years));
+            try {
+                $terms = [];
+                // Provider reads finish before taking any catalogue row lock.
+                for ($years = max(1, (int) $tld->min_years); $years <= min(10, (int) $tld->max_years); $years++) {
+                    $terms[$years] = self::productCost($api->productPrice($tld->tld, 'register', $years));
+                }
+                $renew = self::productCost($api->productPrice($tld->tld, 'renew'));
+                $transfer = app(TransferOrders::class)->allowed($tld) ? self::productCost($api->productPrice($tld->tld, 'transfer')) : null;
+            } catch (Throwable $exception) {
+                report($exception);
+                $summary['failed'][] = '.'.$tld->tld;
+                continue;
             }
-            $renew = self::productCost($api->productPrice($tld->tld, 'renew'));
-            $transfer = app(TransferOrders::class)->allowed($tld) ? self::productCost($api->productPrice($tld->tld, 'transfer')) : null;
             $before = [$tld->cost_register_terms ?? [], $tld->cost_renew, $tld->cost_transfer];
             $this->publishChanges($tld, ['cost_register_terms' => $terms, 'cost_renew' => $renew,
                 'cost_transfer' => $transfer, 'costs_synced_at' => now()]);
@@ -114,7 +120,9 @@ class Catalogue
         if ($renewals) { $body[] = 'Renewals below cost (still billed): '.$list($renewals).'.'; }
         if (!$summary['held'] && !$renewals) { $body[] = 'Nothing on sale is below cost.'; }
         if ($summary['missing']) { $body[] = 'No Enom price for some terms of '.$list($summary['missing']).'. Those terms aren’t offered until a sync gets a price.'; }
-        return ['Costs synced for '.$count((int) $summary['tlds'], 'TLD', 'TLDs').'.', implode(' ', $body), (bool) ($summary['held'] || $renewals || $summary['missing'])];
+        $failed = $summary['failed'] ?? [];
+        if ($failed) { $body[] = "Couldn't read Enom prices for ".$list($failed).'; kept the last known costs.'; }
+        return ['Costs synced for '.$count((int) $summary['tlds'], 'TLD', 'TLDs').'.', implode(' ', $body), (bool) ($summary['held'] || $renewals || $summary['missing'] || $failed)];
     }
 
     private static function costKey(array $costs): string
@@ -126,7 +134,11 @@ class Catalogue
 
     private static function productCost(RegistrarResult $result): ?string
     {
-        return $result->status === 'success' ? PricingRule::wholesale($result->value('productprice.price')) : null;
+        if ($result->code === 'product_price_unavailable') { return null; }
+        if ($result->status !== 'success' || ($cost = PricingRule::wholesale($result->value('productprice.price'))) === null) {
+            throw new RuntimeException('Could not read prices from Enom.');
+        }
+        return $cost;
     }
 
     public function rule(Tld $tld): array
@@ -381,8 +393,10 @@ class Catalogue
         foreach (User::whereHas('role')->get() as $user) {
             if (!$user->hasPermission('admin.enom.manage') || !$user->hasPermission('admin.enom.costs')) { continue; }
             foreach ($messages as [$title, $body]) {
-                \App\Models\Notification::create(['user_id' => $user->id, 'title' => $title, 'body' => $body, 'url' => $url, 'show_in_app' => true, 'show_as_push' => true]);
-                NotificationHelper::sendSystemEmailNotification($title, $body.($url ? '<p><a href="'.e($url).'">Review pricing</a></p>' : ''), email: $user->email);
+                try {
+                    \App\Models\Notification::create(['user_id' => $user->id, 'title' => $title, 'body' => $body, 'url' => $url, 'show_in_app' => true, 'show_as_push' => true]);
+                    NotificationHelper::sendSystemEmailNotification($title, $body.($url ? '<p><a href="'.e($url).'">Review pricing</a></p>' : ''), email: $user->email);
+                } catch (Throwable $exception) { report($exception); }
             }
         }
     }

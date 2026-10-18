@@ -21,9 +21,10 @@ $commands = [];
 $missingTerms = [];
 $costOverride = [];
 $failAll = false;
+$failedReads = [];
 $detailsOverride = null;
 $attributesOverride = null;
-$transport = function (string $command, array $params) use (&$commands, &$missingTerms, &$costOverride, &$failAll, &$detailsOverride, &$attributesOverride): string {
+$transport = function (string $command, array $params) use (&$commands, &$missingTerms, &$costOverride, &$failAll, &$failedReads, &$detailsOverride, &$attributesOverride): string {
     verify(DB::transactionLevel() === 0, 'Provider read ran while holding catalogue locks.');
     $commands[] = [$command, $params];
     if ($command === 'GetTLDList') { return file_get_contents(dirname(__DIR__).'/fixtures/enom-test-api/enom-gettldlist.xml'); }
@@ -35,6 +36,11 @@ $transport = function (string $command, array $params) use (&$commands, &$missin
     if ($command === 'GetExtAttributes') { return file_get_contents(dirname(__DIR__).'/fixtures/enom-test-api/enom-getextattributes-'.($params['TLD'] === 'us' ? 'us' : 'com').'.xml'); }
     if ($command !== 'PE_GetProductPrice') { throw new RuntimeException('Unexpected command.'); }
     $key = $params['TLD'].':'.$params['ProductType'].':'.$params['Years'];
+    if (isset($failedReads[$key])) {
+        if ($failedReads[$key] === 'transport') { throw new RuntimeException('Injected transport failure'); }
+        if ($failedReads[$key] === 'malformed') { return '<invalid'; }
+        return '<interface-response><Command>'.$command.'</Command><ErrCount>1</ErrCount><errors><Err1>Authentication failed</Err1></errors><Done>true</Done></interface-response>';
+    }
     if ($failAll || in_array($key, $missingTerms, true)) { return enomXml($command, '<productprice><productenabled>False</productenabled></productprice>'); }
     $cost = $costOverride[$key] ?? ($params['TLD'] === 'net' && $params['ProductType'] === 10 && $params['Years'] === 1 ? '15.55' : '8.95');
     return enomXml($command, '<productprice><productenabled>True</productenabled><price>'.$cost.'</price></productprice>');
@@ -82,13 +88,13 @@ $catalogue->publish($net);
 verify([$catalogue->productFor($net, 'register')->id, $catalogue->productFor($net, 'transfer')->id, $product->plans()->pluck('id')->all()] === $identities, 'Publication replaced IDs.');
 verify($catalogue->billingPlan($product)->billing_period === 1, 'Service billing identity is not annual.');
 
-// Failed term reads remove only that term and keep a purchasable default.
+// Unavailable term prices remove only that term and keep a purchasable default.
 $missingTerms = ['net:10:1', 'net:10:3'];
 $catalogue->syncCosts($server->id);
 $net->refresh();
-verify($net->registrationTotal(1) === null && $net->registrationTotal(3) === null && $net->registrationTotal(2) === '17.90', 'Failed sync retained stale sale prices.');
+verify($net->registrationTotal(1) === null && $net->registrationTotal(3) === null && $net->registrationTotal(2) === '17.90', 'Unavailable terms retained stale sale prices.');
 verify($net->terms() === [2, 4, 5, 6, 7, 8, 9, 10] && $product->plans()->first()->id === $plan->id, 'Unavailable plan remained the native default.');
-verify($product->plans()->where('billing_period', 3)->sole()->prices()->count() === 0, 'Failed term still has a price row.');
+verify($product->plans()->where('billing_period', 3)->sole()->prices()->count() === 0, 'Unavailable term still has a price row.');
 
 // Below-cost registration terms are removed independently at four-place precision.
 $missingTerms = [];
@@ -99,6 +105,25 @@ $catalogue->syncCosts($server->id);
 $net->refresh();
 verify($net->register_enabled && ($net->sale_holds['register'] ?? '') === 'Price is below cost. Not offered: 7 years.' && !in_array(7, $net->terms(), true) && $net->registrationTotal(2) === '32.00', 'Below-cost term affected available registration terms.');
 verify($product->plans()->where('billing_period', 7)->sole()->prices()->count() === 0 && $net->price('transfer') === '18.00', 'Registration hold affected transfer or retained the below-cost term.');
+// A failed read in any action preserves the entire ending, including its existing margin hold.
+$otherEnding = Tld::create(['server_id' => $server->id, 'tld' => 'org', 'min_years' => 1, 'max_years' => 1]);
+$catalogue->syncCosts($server->id);
+$beforeEnding = (array) DB::table('enom_tlds')->where('id', $net->id)->sole();
+$beforeSales = tableRows(['products', 'plans', 'prices']);
+$costOverride['net:10:2'] = '70.00';
+foreach (['net:10:3', 'net:16:1', 'net:19:1'] as $key) {
+    foreach (['auth', 'malformed', 'transport'] as $failure) {
+        $failedReads = [$key => $failure];
+        $failedSummary = $catalogue->sync($server->id);
+        verify($failedSummary['failed'] === ['.net'] && $failedSummary['tlds'] === 1 && $failedSummary['changed'] === [], 'Failed ending stopped the remaining sync or was counted as published.');
+        verify((array) DB::table('enom_tlds')->where('id', $net->id)->sole() === $beforeEnding && tableRows(['products', 'plans', 'prices']) === $beforeSales, 'Transient price failure changed known costs, holds, timestamps or native prices.');
+        [$title, $body, $warn] = Catalogue::syncMessage($failedSummary);
+        verify($warn && str_contains($body, "Couldn't read Enom prices for .net; kept the last known costs."), 'Price read failure did not warn staff about retained costs.');
+    }
+}
+$failedReads = [];
+unset($costOverride['net:10:2']);
+$otherEnding->delete();
 $net->register_enabled = false;
 $catalogue->publish($net);
 $costOverride = [];
@@ -219,11 +244,13 @@ verify(Tld::where('server_id', $importServer->id)->where('enabled', true)->count
     && Product::where('server_id', $importServer->id)->count() === 0, 'Import enabled sales or created placeholder products.');
 verify($catalogue->import($importServer->id)['added'] === 0 && Tld::where('server_id', $importServer->id)->count() === 9, 'Import duplicated ending identities.');
 
-// A completely failed price read removes stale sales and can recover without enabling disabled actions.
+// Explicitly unavailable prices remove stale sales and can recover without enabling disabled actions.
 $failAll = true;
 $catalogue->syncCosts($server->id);
 verify(!$net->fresh()->orderable() && $net->fresh()->cost('register', 2) === null && $net->fresh()->cost('renew') === null
-    && $product->plans()->get()->sum(fn ($p) => $p->prices()->count()) === 0, 'Complete price failure retained stale sale data.');
+    && ($net->fresh()->sale_holds['register'] ?? null) === 'No current price is available.'
+    && ($net->fresh()->sale_holds['transfer'] ?? null) === 'No current price is available.'
+    && $product->plans()->get()->sum(fn ($p) => $p->prices()->count()) === 0, 'Unavailable prices retained stale sale data or lost their holds.');
 $failAll = false;
 $catalogue->syncCosts($server->id);
 verify($net->fresh()->orderable('register') && !$net->fresh()->transfer_enabled, 'Cost recovery changed an explicitly disabled action.');
