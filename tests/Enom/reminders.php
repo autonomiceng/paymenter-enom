@@ -106,6 +106,14 @@ verify($reminders->remind($autoThirty) && str_contains(latestNote()->body, 'It w
 // Managed paid domain without an invoice yet: tells the client when the invoice will arrive.
 $managed = expiring(30, true, ['billing_managed' => true, 'renewal_policy' => ['enabled' => true]]);
 verify($reminders->remind($managed) && str_contains(latestNote()->body, 'Your renewal invoice will arrive on '.now()->addDays(9)->format('F j, Y')), 'Invoice-arrival wording differs: '.latestNote()->body);
+// An unmanaged renewal still gets the pre-expiry reminder, without a managed invoice date.
+$unmanaged = expiring(30, true, ['billing_managed' => false]);
+$beforeUnmanaged = noteCount();
+verify($reminders->remind($unmanaged) && noteCount() === $beforeUnmanaged + 1
+    && latestNote()->title === $unmanaged->domain.' expires in 30 days'
+    && str_contains(latestNote()->body, 'Your renewal invoice will arrive before it expires')
+    && sent($unmanaged) === [$unmanaged->provider_expires_at->toDateString() => [30]]
+    && !$reminders->remind($unmanaged->fresh()), 'Unmanaged pre-expiry reminder behavior differs.');
 // An open renewal invoice: pay it by its due date (and the 7-day reminder goes out, unlike for automatic renewals).
 $billed = expiring(7, true);
 $invoice = Invoice::create(['user_id' => $owner->id, 'currency_code' => 'USD', 'status' => Invoice::STATUS_PENDING, 'due_at' => now()->addDays(3)]);

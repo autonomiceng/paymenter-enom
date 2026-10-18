@@ -39,7 +39,11 @@ class DomainOrders
         });
         $premium = ($check['is_premium'] ?? null) !== false || ($check['is_platinum'] ?? null) !== false || ($check['is_eap'] ?? null) !== false;
         $terms = self::termsFor($tld, $check);
-        $precheck = !empty($check['available']) || !app(TransferOrders::class)->allowed($tld) ? [] : app(TransferOrders::class)->precheck($tld, $resolved['domain']);
+        $precheck = [];
+        if (empty($check['available']) && app(TransferOrders::class)->allowed($tld)) {
+            try { $precheck = app(TransferOrders::class)->precheck($tld, $resolved['domain']); }
+            catch (InputValidationException $e) { report($e); }
+        }
         $transferable = !$existing && !$premium && empty($check['available']) && !empty($check['transferable']) && $tld->orderable('transfer') && app(TransferOrders::class)->allowed($tld) && ($precheck['allowed'] ?? false);
         $notRegistered = ($precheck['code'] ?? null) === 'transfer_not_registered';
         $price = fn (?string $amount) => $user ? Pricing::taxed($user, $amount, 'USD') : $amount;

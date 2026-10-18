@@ -133,8 +133,9 @@ class DomainAdministration
             }
         }
         // A transfer cancelled for a missing code reads differently from one the registrar refused.
-        foreach ($refused ? Operation::query()->whereIn('domain_id', $refused)->where('action', 'transfer')
-            ->orderByDesc('id')->toBase()->get(['domain_id', 'safe_code'])->unique('domain_id') : [] as $request) {
+        foreach ($refused ? Operation::query()->whereIn('id', Operation::query()->selectRaw('MAX(id)')
+            ->whereIn('domain_id', $refused)->where('action', 'transfer')->groupBy('domain_id'))
+            ->toBase()->get(['domain_id', 'safe_code']) : [] as $request) {
             if ($request->safe_code === 'transfer_code_timeout') { $result[(int) $request->domain_id]['safe_code'] = $request->safe_code; }
         }
         if (!$pending) { return $result; }

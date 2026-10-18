@@ -15,7 +15,7 @@ PHP_TEST = ROOT/'scripts/php-test'
 SUITES = {
     'provider': ['provider-contracts.php', 'registrar-money.php', 'contact-read-regressions.php', 'ui-input-contracts.php',
                  'catalogue-contracts.php', 'registrar-client.php', 'pricing-rules.php', 'transfer-rdap.php'],
-    'native': ['billing-integration.php', 'domain-billing.php', 'managed-renewal-execution.php',
+    'native': ['native-order-regressions.php', 'billing-integration.php', 'domain-billing.php', 'managed-renewal-execution.php',
                'renewal-admission.php', 'renewal-lifecycle-proof.php', 'observation-integration.php', 'reconciliation-rejection.php',
                'reconciliation-registration.php', 'automatic-refresh.php', 'capability-readbacks.php', 'provider-disposition.php', 'native-date-missing-schema.php',
                'request-gates.php', 'catalogue-integration.php', 'runtime-guard.php', 'management-actions.php',

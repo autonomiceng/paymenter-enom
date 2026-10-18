@@ -171,10 +171,14 @@ class Enom extends Server
         });
         Service::updating(fn (Service $service) => app(DomainBilling::class)->preserveNativeDate($service));
         Service::updated(function (Service $service) {
-            if ($service->wasChanged('status') && $service->status === Service::STATUS_CANCELLED) { app(DomainOperations::class)->retireCancelledInitials(); }
+            if ($service->wasChanged('status') && $service->status === Service::STATUS_CANCELLED) {
+                try { app(DomainOperations::class)->retireCancelledInitials(); } catch (Throwable $e) { report($e); }
+            }
         });
         Event::listen(\App\Events\Invoice\Updated::class, function ($event) {
-            if ($event->invoice->status === \App\Models\Invoice::STATUS_CANCELLED) { app(DomainOperations::class)->retireCancelledInitials(); }
+            if ($event->invoice->status === \App\Models\Invoice::STATUS_CANCELLED) {
+                try { app(DomainOperations::class)->retireCancelledInitials(); } catch (Throwable $e) { report($e); }
+            }
         });
         self::encryptCredentialsOnSave();
         Event::listen('permissions', fn () => ['admin.enom.manage' => 'Manage domains',
