@@ -122,7 +122,7 @@ final class RegistrationSetup
             if (!empty($policy['contact_hold_notified_at'])) { return; }
             $notice = new NotificationTemplate(['in_app_title' => '{{ $domain }} needs account details',
                 'in_app_body' => 'The account contact details need attention: {{ $fields }}. The order is on hold until the customer uses updated account details.']);
-            foreach (User::whereNotNull('role_id')->get() as $staff) {
+            foreach (User::whereHas('role')->get() as $staff) {
                 if ($staff->hasPermission('admin.enom.manage')) {
                     NotificationHelper::sendInAppNotification($notice, ['domain' => $domain->domain, 'fields' => implode(', ', $fields)], $staff);
                 }

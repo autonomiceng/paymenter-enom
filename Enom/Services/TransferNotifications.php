@@ -7,6 +7,7 @@ use App\Models\NotificationTemplate;
 use App\Models\Service;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
+use Paymenter\Extensions\Servers\Enom\Http\Controllers\DomainController;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Models\Operation;
 
@@ -38,7 +39,7 @@ final class TransferNotifications
                 // Only public display data reaches templates or queued mail; never the request payload.
                 NotificationHelper::sendNotification('enom_transfer_code_'.$kind, [
                     'domain' => $domain->domain, 'deadline' => $deadline->utc()->format('M j, Y, g:i A').' UTC',
-                    'amount' => '$'.number_format((float) $current->amount, 2, '.', ','),
+                    'amount' => DomainController::money($current->amount, $current->currency ?: 'USD'),
                     'domain_url' => route('enom.domains.show', $domain->id).'#transfer-code',
                 ], $user);
                 $policy[$marker] = now()->utc()->toIso8601String();

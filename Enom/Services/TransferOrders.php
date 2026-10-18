@@ -39,7 +39,8 @@ class TransferOrders
                 || $event->invoice->getRawOriginal('status') === Invoice::STATUS_PAID) { return; }
             $at = CarbonImmutable::now('UTC');
             foreach (Operation::where('invoice_id', $event->invoice->id)->where('action', 'transfer')->get() as $operation) {
-                app(self::class)->recordPayment($operation, $at);
+                try { app(self::class)->recordPayment($operation, $at); }
+                catch (Throwable $exception) { report($exception); }
             }
         });
         Schedule::call(fn () => app(self::class)->expireMissingCodes())->name('enom-transfer-code-expiry')->daily()->withoutOverlapping();
@@ -86,7 +87,7 @@ class TransferOrders
         if (!self::supported($tld) || $admission && !$this->allowed($tld)) { return ['allowed' => false, 'code' => 'transfer_ending_unsupported', 'warning' => null, 'expires_at' => null]; }
         $suffix = '.'.strtolower(ltrim((string) $tld->tld, '.'));
         $label = str_ends_with($domain, $suffix) ? substr($domain, 0, -strlen($suffix)) : '';
-        if (!preg_match('/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])\z/D', $label) || str_starts_with($label, 'xn--')) {
+        if (!preg_match('/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/D', $label) || str_starts_with($label, 'xn--')) {
             return ['allowed' => false, 'code' => 'transfer_name_invalid', 'warning' => null, 'expires_at' => null];
         }
         $days = [];
@@ -123,7 +124,7 @@ class TransferOrders
                 $at = $transition ?? $this->recoverPaidAt($current);
                 if (!$at) {
                     if (!isset($policy['payment_time_alerted_at'])) {
-                        foreach (User::with('role')->get() as $staff) {
+                        foreach (User::whereHas('role')->get() as $staff) {
                             if ($staff->hasPermission('admin.enom.manage')) {
                                 Notification::create(['user_id' => $staff->id, 'title' => 'Transfer payment needs review',
                                     'body' => 'The payment date for '.$domain->domain.' could not be verified. The transfer is on hold.',

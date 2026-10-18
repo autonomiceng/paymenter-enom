@@ -21,6 +21,8 @@ use Paymenter\Extensions\Servers\Enom\Services\Rdap;
 use Paymenter\Extensions\Servers\Enom\Services\Refunds;
 use Paymenter\Extensions\Servers\Enom\Services\TransferOrders;
 
+App\Models\Currency::whereKey('USD')->update(['format' => '1.000,00', 'prefix' => 'US$ ', 'suffix' => ' USD']);
+
 // Core invoice-created mail is unrelated here; the native flag avoids repeated shutdown mail in one test process.
 Invoice::creating(function (Invoice $invoice) { $invoice->send_create_email = false; });
 Carbon::setTestNow('2026-10-17 12:00:00'); CarbonImmutable::setTestNow(Carbon::now());
@@ -69,6 +71,7 @@ $transfers->paymentAccepted($operation);
 $lockSql = implode("\n", $lockQueries);
 verify(preg_match('/from "users".*from "enom_domains".*from "enom_operations"/s', $lockSql) === 1, 'Payment locks do not follow user, domain, operation order.');
 verify($operation->fresh()->state === 'awaiting_code' && $operation->fresh()->policy['paid_at'] === '2026-10-17T12:00:00+00:00', 'Paid no-code transfer did not wait with payment timestamp.');
+verify(str_contains(App\Models\EmailLog::where('subject', 'Enter the transfer code for '.$operation->domain->domain)->sole()->body, 'US$ 13,00 USD'), 'Transfer email ignored the native currency format.');
 $firstPaid = $operation->fresh()->policy['paid_at'];
 Carbon::setTestNow('2026-10-18 12:00:00'); CarbonImmutable::setTestNow(Carbon::now());
 $transfers->paymentAccepted($operation);
@@ -135,7 +138,9 @@ $reviewRole = App\Models\Role::create(['name' => 'Transfer review', 'permissions
 $reviewer = User::create(['email' => 'review@example.invalid', 'password' => 'synthetic', 'role_id' => $reviewRole->id]);
 $ambiguous = transferFixture();
 DB::table('invoice_transactions')->where('invoice_id', $ambiguous->invoice_id)->update(['updated_at' => now()->subMinute()]);
+$lockQueries = [];
 $transfers->paymentAccepted($ambiguous);
+verify(collect($lockQueries)->contains(fn ($sql) => str_contains($sql, 'from "users"') && str_contains($sql, 'exists') && str_contains($sql, '"roles"')), 'Payment review loaded customers without a staff role.');
 verify($ambiguous->fresh()->safe_code === 'transfer_payment_time_unknown' && !isset($ambiguous->fresh()->policy['paid_at']), 'Ambiguous payment time reset to now.');
 $transfers->paymentAccepted($ambiguous);
 verify(App\Models\Notification::where('user_id', $reviewer->id)->count() === 1, 'Unknown payment time did not alert staff exactly once.');
@@ -152,6 +157,24 @@ $nativeMissing = transferFixture(false);
 App\Helpers\ExtensionHelper::addPayment($nativeMissing->invoice_id, null, amount: 13, transactionId: 'native-missing-code-payment');
 verify($nativeMissing->fresh()->state === 'awaiting_code' && isset($nativeMissing->fresh()->policy['paid_at']), 'Native payment queued a transfer without a code.');
 
+// A recordPayment failure must leave the native paid save intact and remain recoverable.
+$failedCallback = transferFixture(false);
+$failedInvoice = Invoice::findOrFail($failedCallback->invoice_id);
+App\Models\InvoiceTransaction::withoutEvents(fn () => $failedInvoice->transactions()->create(['amount' => '13.00', 'status' => InvoiceTransactionStatus::Succeeded, 'transaction_id' => 'callback-failure']));
+$throwOnPayment = true;
+Operation::updating(function (Operation $current) use ($failedCallback, &$throwOnPayment) {
+    if ($throwOnPayment && $current->id === $failedCallback->id) {
+        $throwOnPayment = false;
+        throw new RuntimeException('Injected transfer payment recording failure');
+    }
+});
+$reported = [];
+app(Illuminate\Contracts\Debug\ExceptionHandler::class)->reportable(function (RuntimeException $error) use (&$reported) { $reported[] = $error->getMessage(); return false; });
+DB::transaction(fn () => $failedInvoice->update(['status' => Invoice::STATUS_PAID]));
+verify($failedInvoice->fresh()->status === Invoice::STATUS_PAID && in_array('Injected transfer payment recording failure', $reported, true), 'Transfer callback failure aborted the native paid save or was not reported.');
+$transfers->paymentAccepted($failedCallback->fresh());
+verify(isset($failedCallback->fresh()->policy['paid_at']), 'Failed payment callback could not recover the original payment evidence.');
+
 // The allowlist is a setting intersected with supported code-based, one-year endings.
 foreach (['com' => true, 'net' => true, 'org' => true, 'io' => false, 'uk' => false, 'ca' => false, 'eu' => false, 'ai' => false, 'de' => false] as $ending => $allowed) {
     $tld = new Tld(['server_id' => $server->id, 'tld' => $ending]);
@@ -164,6 +187,7 @@ foreach (['com' => true, 'net' => false, 'io' => true, 'co.uk' => false, 'ca' =>
 $com = Tld::where('server_id', $server->id)->where('tld', 'com')->firstOrFail();
 verify(!$transfers->precheck($com, 'example.net')['allowed'] && !$transfers->precheck($com, 'sub.example.com')['allowed']
     && !$transfers->precheck($com, 'xn--example.com')['allowed'], 'Lookup accepted a mismatched or unsupported name.');
+verify($transfers->precheck($com, 'x.com')['allowed'], 'Single-character transfer label was rejected.');
 $server->settings()->create(['key' => 'transfer_creation_lock_days', 'value' => '366']);
 refuses(fn () => $transfers->precheck($com, 'example.com'), 'Transfer rules need attention', 'Invalid lock window was used.', [InputValidationException::class]);
 $server->settings()->where('key', 'transfer_creation_lock_days')->delete();
@@ -214,6 +238,11 @@ $request->setLaravelSession(app('session')->driver());
 app()->instance('request', $request);
 $html = view('enom::partials.transfer-code', ['domain' => $operation->domain])->render();
 verify(str_contains($html, 'auth code or EPP code') && str_contains($html, 'Nov 16, 2026, 12:00 PM UTC</time>') && str_contains($html, 'data-enom-time="zone"') && !str_contains($html, 'old('), 'Transfer form lacks an exact deadline or safely empty input.');
+$pastWithCode = transferFixture(true, '2026-09-17T12:00:00+00:00');
+$pastWithCode->update(['state' => 'held', 'payload' => ['epp' => 'PAST-DEADLINE-CODE']]);
+$heldHtml = view('enom::partials.transfer-code', ['domain' => $pastWithCode->domain])->render();
+verify(str_contains(html_entity_decode(strip_tags($heldHtml), ENT_QUOTES), "Your transfer is on hold. Contact support and we’ll sort it out.")
+    && !str_contains($heldHtml, 'id="transfer-code-input"') && !str_contains($heldHtml, 'account credit'), 'Paid transfer with a saved code and past deadline rendered an empty or misleading card.');
 // The UTC cutoff falls on the previous calendar day for a customer in Los Angeles.
 $boundary = transferFixture(true, '2026-10-17T00:30:00+00:00');
 app()->instance('request', $request);

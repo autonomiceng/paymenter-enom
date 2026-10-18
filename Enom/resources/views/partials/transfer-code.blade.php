@@ -49,6 +49,8 @@
         <p>We couldn’t confirm the payment date for this transfer. Contact support and we’ll sort it out.</p>
     @elseif (!$transferReceived)
         <p>The deadline for the transfer code has passed. We’ll cancel the transfer and add {{ $transferAmount }} to your account credit.</p>
+    @else
+        <p>Your transfer is on hold. Contact support and we’ll sort it out.</p>
     @endif
 </div>
 @endif
