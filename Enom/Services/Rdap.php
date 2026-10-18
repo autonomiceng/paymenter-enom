@@ -121,6 +121,12 @@ class Rdap
         return $data;
     }
 
+    private static function completedStatus(bool $ok, int $errno, int $status): ?int
+    {
+        // Some registry servers close the connection uncleanly after a close-delimited 404.
+        return $ok || ($errno === CURLE_RECV_ERROR && $status === 404) ? $status : null;
+    }
+
     private function send(string $url): array
     {
         $host = parse_url($url, PHP_URL_HOST);
@@ -147,8 +153,10 @@ class Rdap
                 return strlen($chunk);
             }]);
         try {
-            if (curl_exec($curl) === false) { throw new RuntimeException('Lookup response is unavailable.'); }
-            return ['status' => curl_getinfo($curl, CURLINFO_RESPONSE_CODE), 'body' => $body];
+            $ok = curl_exec($curl) !== false;
+            $status = self::completedStatus($ok, curl_errno($curl), curl_getinfo($curl, CURLINFO_RESPONSE_CODE));
+            if ($status === null) { throw new RuntimeException('Lookup response is unavailable.'); }
+            return ['status' => $status, 'body' => $body];
         } finally { curl_close($curl); }
     }
 }

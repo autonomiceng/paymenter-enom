@@ -4,6 +4,15 @@ use Paymenter\Extensions\Servers\Enom\Services\Rdap;
 
 $checks = 0;
 function verify(bool $ok, string $message): void { global $checks; if (!$ok) { throw new RuntimeException($message); } $checks++; }
+$completedStatus = new ReflectionMethod(Rdap::class, 'completedStatus');
+verify($completedStatus->invoke(null, false, CURLE_RECV_ERROR, 404) === 404, 'Unclean close lost the completed 404 status.');
+foreach ([0, 200, 404, 503] as $status) {
+    verify($completedStatus->invoke(null, true, CURLE_OK, $status) === $status, 'Successful transport changed its status: '.$status);
+}
+foreach ([[CURLE_RECV_ERROR, 200], [CURLE_RECV_ERROR, 0], [CURLE_RECV_ERROR, 503],
+    [CURLE_OPERATION_TIMEDOUT, 404], [CURLE_PARTIAL_FILE, 404], [CURLE_WRITE_ERROR, 404], [CURLE_OK, 404]] as [$errno, $status]) {
+    verify($completedStatus->invoke(null, false, $errno, $status) === null, 'Transport failure accepted: '.$errno.' / '.$status);
+}
 $now = new DateTimeImmutable('2026-10-17T12:00:00Z');
 $body = ['objectClassName' => 'domain', 'ldhName' => 'example.com', 'status' => ['active'], 'events' => [
     ['eventAction' => 'registration', 'eventDate' => '2020-01-01T00:00:00Z'],
