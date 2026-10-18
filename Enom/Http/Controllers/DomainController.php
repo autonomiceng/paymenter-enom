@@ -152,7 +152,7 @@ class DomainController extends Controller
         $endings = $this->endings();
         $rows = [];
         try {
-            $public = app(Catalogue::class)->publicPrices();
+            $public = app(Catalogue::class)->publicPrices($endings);
         } catch (Throwable $exception) {
             report($exception);
             $public = [];

@@ -327,6 +327,74 @@ $failAll = false;
 $catalogue->syncCosts($server->id);
 verify($net->fresh()->orderable('register') && !$net->fresh()->transfer_enabled, 'Cost recovery changed an explicitly disabled action.');
 
+// Public pricing loads each action once, independently of the number of registration terms.
+$enabledIds = Tld::where('enabled', true)->pluck('id')->all();
+DB::table('enom_tlds')->update(['enabled' => false]);
+$queryServer = Server::create(['name' => 'Pricing queries', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
+$queryServer->settings()->create(['key' => 'transfer_allowlist', 'value' => 'com,org,xyz', 'type' => 'string', 'encrypted' => false]);
+$queryTlds = [];
+foreach (['com', 'org', 'xyz'] as $ending) {
+    $queryTlds[$ending] = Tld::create(['server_id' => $queryServer->id, 'tld' => $ending, 'enabled' => true, 'min_years' => 1, 'max_years' => 10,
+        'register_enabled' => true, 'renew_enabled' => true, 'transfer_enabled' => true, 'use_default_rule' => false, 'pricing_mode' => 'fixed',
+        'fixed_register' => '20.00', 'fixed_renew' => '20.00', 'fixed_transfer' => '20.00',
+        'cost_register_terms' => array_fill(1, 10, '8.9500'), 'cost_renew' => '8.9500', 'cost_transfer' => '8.9500']);
+    $catalogue->publish($queryTlds[$ending]);
+}
+DB::table('enom_tlds')->where('server_id', $queryServer->id)->update(['max_years' => 1]);
+DB::enableQueryLog();
+DB::flushQueryLog();
+$oneTermPublic = $catalogue->publicPrices();
+$oneTermQueries = count(DB::getQueryLog());
+DB::disableQueryLog();
+DB::table('enom_tlds')->where('server_id', $queryServer->id)->update(['max_years' => 10]);
+DB::enableQueryLog();
+DB::flushQueryLog();
+$tenTermPublic = $catalogue->publicPrices();
+$tenTermQueries = count(DB::getQueryLog());
+DB::disableQueryLog();
+verify(array_column($oneTermPublic, 'tld') === ['com', 'org', 'xyz'] && array_column($tenTermPublic, 'tld') === ['com', 'org', 'xyz']
+    && array_column($oneTermPublic, 'max_years') === [1, 1, 1] && array_column($tenTermPublic, 'max_years') === [10, 10, 10]
+    && array_column($tenTermPublic, 'register') === ['20.00', '20.00', '20.00'] && array_column($tenTermPublic, 'transfer') === ['20.00', '20.00', '20.00'], 'Query fixture lost public sellers, terms or action prices.');
+verify($oneTermQueries > 0 && $oneTermQueries <= 56 && $tenTermQueries <= $oneTermQueries, 'Public pricing queries scale with registration terms: '.$oneTermQueries.' / '.$tenTermQueries);
+$pricingController = app(Paymenter\Extensions\Servers\Enom\Http\Controllers\DomainController::class);
+DB::enableQueryLog();
+DB::flushQueryLog();
+$pricingData = $pricingController->pricing(Illuminate\Http\Request::create('/domains/pricing'))->getData();
+$controllerQueries = count(DB::getQueryLog());
+DB::disableQueryLog();
+verify(array_column($pricingData['rows'], 'tld') === ['com', 'org', 'xyz'] && $controllerQueries <= $tenTermQueries + 4, 'Pricing controller reloaded the catalogue or changed filtering: '.$controllerQueries);
+$memo = $queryTlds['com']->fresh();
+$memo->terms();
+$memo->price('transfer');
+DB::enableQueryLog();
+DB::flushQueryLog();
+verify($memo->terms() === range(1, 10) && $memo->registrationTotal(2) === '40.00' && $memo->price('register') === '20.00'
+    && $memo->price('transfer') === '20.00' && DB::getQueryLog() === [], 'Repeated sale reads did not reuse the instance catalogue.');
+DB::disableQueryLog();
+$memoProduct = $catalogue->productFor($memo, 'register');
+$memoTransfer = $catalogue->productFor($memo, 'transfer');
+$memoProduct->plans()->where('billing_period', 2)->sole()->prices()->where('currency_code', 'USD')->update(['price' => '45.00']);
+$memoTransfer->plans()->sole()->prices()->where('currency_code', 'USD')->update(['price' => '25.00']);
+verify($memo->fresh()->registrationTotal(2) === '45.00' && $memo->fresh()->price('transfer') === '25.00', 'Fresh sale reads retained old action prices.');
+$memo->refresh();
+verify($memo->registrationTotal(2) === '45.00' && $memo->price('transfer') === '25.00', 'Refresh retained memoized action prices.');
+$memo->fill(['fixed_register' => '21.00', 'fixed_transfer' => '22.00']);
+$catalogue->publish($memo);
+verify($memo->registrationTotal(2) === '42.00' && $memo->price('transfer') === '22.00', 'Publication retained memoized action prices.');
+echo 'Public pricing queries: '.$oneTermQueries.' for one term, '.$tenTermQueries.' for ten terms; controller '.$controllerQueries.'; repeated instance reads 0.'.PHP_EOL;
+foreach (Product::where('server_id', $queryServer->id)->get() as $queryProduct) {
+    foreach ($queryProduct->plans()->get() as $queryPlan) {
+        $queryPlan->prices()->delete();
+        $queryPlan->delete();
+    }
+    $queryProduct->settings()->delete();
+    $queryProduct->delete();
+}
+Tld::where('server_id', $queryServer->id)->delete();
+$queryServer->settings()->delete();
+$queryServer->delete();
+DB::table('enom_tlds')->whereIn('id', $enabledIds)->update(['enabled' => true]);
+
 // SQLite records product-first acquisition and a single transaction for native and extension writes.
 $queries = [];
 DB::listen(function ($event) use (&$queries) { $queries[] = $event->sql; });

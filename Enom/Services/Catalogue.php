@@ -456,11 +456,15 @@ class Catalogue
 
     public function attributesFor(Tld $tld): array { return $tld->registry_fields ?? []; }
 
-    public function publicPrices(): array
+    /** An optional collection must already have passed orderable(). */
+    public function publicPrices(?Collection $endings = null): array
     {
-        return $this->orderable()->map(fn (Tld $tld) => ['tld' => $tld->tld, 'register' => $tld->price('register'), 'renew' => $tld->price('renew'),
-            'transfer' => $tld->price('transfer'), 'min_years' => $tld->terms() ? min($tld->terms()) : null,
-            'max_years' => $tld->terms() ? max($tld->terms()) : null])->all();
+        return ($endings ?? $this->orderable())->map(function (Tld $tld) {
+            $terms = $tld->terms();
+            return ['tld' => $tld->tld, 'register' => $tld->price('register'), 'renew' => $tld->price('renew'),
+                'transfer' => $tld->price('transfer'), 'min_years' => $terms ? min($terms) : null,
+                'max_years' => $terms ? max($terms) : null];
+        })->all();
     }
 
     /** @return list<string> */

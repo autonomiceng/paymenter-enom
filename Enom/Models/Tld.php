@@ -15,6 +15,8 @@ class Tld extends Model
     public const ACTIONS = ['register', 'renew', 'transfer'];
 
     private bool $saleReadFailed = false;
+    /** Mapped products and their recurring USD yearly prices, indexed by action then term. */
+    private array $saleCatalogue = [];
 
     protected $table = 'enom_tlds';
     protected $guarded = [];
@@ -31,6 +33,7 @@ class Tld extends Model
     public function refresh()
     {
         $this->saleReadFailed = false;
+        $this->saleCatalogue = [];
         return parent::refresh();
     }
 
@@ -84,9 +87,18 @@ class Tld extends Model
     {
         if (!$this->enabled || !$this->{$action.'_enabled'} || !$this->saleRenewalAvailable()) { return null; }
         try {
-            $product = app(Catalogue::class)->productFor($this, $action);
-            $price = $product?->plans()->where('type', 'recurring')->where('billing_unit', 'year')->where('billing_period', $years)
-                ->first()?->prices()->where('currency_code', 'USD')->first();
+            if (!array_key_exists($action, $this->saleCatalogue)) {
+                $product = app(Catalogue::class)->productFor($this, $action);
+                $prices = [];
+                $plans = $product?->plans()->where('type', 'recurring')->where('billing_unit', 'year')
+                    ->with(['prices' => fn ($query) => $query->where('currency_code', 'USD')])->get() ?? [];
+                foreach ($plans as $plan) {
+                    $period = (int) $plan->billing_period;
+                    if (!array_key_exists($period, $prices)) { $prices[$period] = $plan->prices->first(); }
+                }
+                $this->saleCatalogue[$action] = ['product' => $product, 'prices' => $prices];
+            }
+            $price = $this->saleCatalogue[$action]['prices'][$years] ?? null;
             if (!$price || PricingRule::units((string) $price->price, 2) <= 0 || PricingRule::units((string) $price->setup_fee, 2) !== 0) { return null; }
             return PricingRule::decimal(PricingRule::units((string) $price->price, 2));
         } catch (Throwable $exception) {
