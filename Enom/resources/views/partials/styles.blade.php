@@ -223,9 +223,11 @@
 .enom .enom-endings b { color: var(--e-fg); font-weight: 700; }
 
 .enom .enom-results { border: 1px solid var(--e-line); border-radius: .875rem; background: var(--e-panel); overflow: hidden; }
-.enom .enom-result { display: grid; grid-template-columns: minmax(0, 1fr) auto 9rem 9.5rem; align-items: center; gap: .5rem 1.25rem; padding: 1rem 1.25rem; }
+.enom .enom-result { display: grid; grid-template-columns: minmax(12rem, 1fr) max-content 12rem 9.5rem; align-items: center; gap: .5rem 1.25rem; padding: 1rem 1.25rem; }
 .enom .enom-result + .enom-result { border-top: 1px solid var(--e-line); }
-.enom .enom-result__name { font-size: 1.0625rem; font-weight: 700; letter-spacing: -.01em; }
+.enom .enom-result__name { min-width: 0; overflow-x: auto; overflow-wrap: normal; word-break: normal; font-size: 1.0625rem; font-weight: 700; letter-spacing: -.01em; }
+.enom .enom-result__note { grid-column: 1 / -1; max-width: 80ch; margin: 0; line-height: 1.5; }
+.enom .enom-result__note:empty { display: none; }
 .enom .enom-result__name .enom-tld { color: var(--e-accent); }
 .enom .enom-result.is-first { padding-block: 1.375rem; background: color-mix(in srgb, var(--e-bg) 40%, transparent); }
 .enom .enom-result.is-first .enom-result__name { font-size: 1.375rem; }
@@ -253,25 +255,23 @@
 .enom.enom-js .enom-result[data-state="taken"] [data-when~="taken"],
 .enom.enom-js .enom-result[data-state="yours"] [data-when~="yours"],
 .enom.enom-js .enom-result[data-state="error"] [data-when~="error"] { display: flex; }
-@media (max-width: 639px) {
+@media (max-width: 959px) {
     .enom .enom-result { grid-template-columns: minmax(0, 1fr) auto; }
     .enom .enom-result__name { grid-column: 1 / -1; }
     .enom .enom-result.is-first .enom-result__name { font-size: 1.1875rem; }
     .enom .enom-result__price { text-align: left; }
     .enom .enom-result__status { grid-column: 1; grid-row: 2; }
     .enom .enom-result__price { grid-column: 1; grid-row: 3; }
+    .enom .enom-result__note { grid-row: 4; }
     .enom .enom-result__price:empty { display: none; }
     .enom .enom-result__action { grid-column: 2; grid-row: 2 / span 2; align-self: center; min-width: 7.5rem; }
 }
 
 /* Term picker on search rows */
-.enom .enom-result { grid-template-columns: minmax(0, 1fr) auto 12rem 14rem; }
 .enom .enom-buy { display: flex; gap: .5rem; }
 .enom .enom-buy .enom-btn { flex: 1 1 auto; width: auto; }
 .enom select.enom-term { width: 7.25rem; flex: none; min-height: 2.5rem; padding-block: 0; font-size: .8125rem; font-weight: 600; }
 @media (max-width: 639px) {
-    .enom .enom-result { grid-template-columns: minmax(0, 1fr) auto; }
-    .enom .enom-result__action { min-width: 8.5rem; }
     .enom .enom-buy { flex-direction: column; gap: .375rem; }
     .enom .enom-buy select.enom-term { width: 100%; }
 }

@@ -245,11 +245,7 @@
             const transfer = row.querySelector('[data-slot="transfer"]');
             if (register && data.register_url) register.href = data.register_url;
             if (transfer && data.transfer_url) transfer.href = data.transfer_url;
-            if (data.warning) {
-                const warning = document.createElement('small');
-                warning.textContent = data.warning;
-                status.appendChild(warning);
-            }
+            row.querySelector('[data-slot="note"]').textContent = data.warning || data.transfer_reason || data.message || '';
             showPrice(row);
             if (state === 'in_cart' && data.url) row.querySelector('[data-slot="cart"]')?.setAttribute('href', data.url);
             if (state === 'yours' && data.url) row.querySelector('[data-slot="yours"]')?.setAttribute('href', data.url);
@@ -289,6 +285,7 @@
             const status = row.querySelector('[data-slot="status"]');
             status.innerHTML = '<span class="enom-checking">Checking</span>';
             row.querySelector('[data-slot="price"]').innerHTML = '';
+            row.querySelector('[data-slot="note"]').textContent = '';
             const note = row.querySelector('[data-slot="retry-note"]');
             if (note) note.textContent = '';
             try {

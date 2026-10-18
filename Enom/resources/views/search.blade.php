@@ -53,8 +53,8 @@
                 <h2 id="enom-results-heading" class="enom-sr">Results for {{ $sld }}</h2>
                 <ul class="enom-results" data-enom-results="{{ route('enom.domains.check') }}" @if ($years) data-years="{{ $years }}" @endif>
                     @foreach ($results as $index => $result)
-                                                <li class="enom-result {{ $index === 0 ? 'is-first' : '' }}" data-enom-result data-domain="{{ $result['domain'] }}" data-state="idle">
-                            <div class="enom-result__name"><span>{{ $result['sld'] }}</span><span class="enom-tld">.{{ $result['tld'] }}</span></div>
+                        <li class="enom-result {{ $index === 0 ? 'is-first' : '' }}" data-enom-result data-domain="{{ $result['domain'] }}" data-state="idle">
+                            <div class="enom-result__name"><span>{{ $result['sld'] }}</span><wbr><span class="enom-tld">.{{ $result['tld'] }}</span></div>
                             <div class="enom-result__status">
                                 <div data-slot="status" data-js-only></div>
                             </div>
@@ -69,6 +69,7 @@
                                     <span class="enom-small enom-muted" data-slot="retry-note"></span>
                                 </div>
                             </div>
+                            <p class="enom-result__note enom-small enom-muted" data-slot="note"></p>
                         </li>
                     @endforeach
                 </ul>

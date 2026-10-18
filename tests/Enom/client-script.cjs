@@ -122,6 +122,26 @@ const submit = (w, form, submitter) => form.requestSubmit(submitter || form.quer
         check(errors.length===0,'Native checkout links have no console errors'); w.close();
     }
 
+    {
+        const warning = 'w'.repeat(300);
+        let showWarning = true;
+        const fetch = async () => ({status: 200, json: async () => showWarning
+            ? {status: 'transferable', transfer_price: '$13.00', warning}
+            : {status: 'available', price: '$12.00'}});
+        const {w, d, errors} = mount(pages.search, {fetch}); await sleep(200);
+        const row = d.querySelector('[data-enom-result]');
+        const note = row.querySelector('[data-slot="note"]');
+        check(note.textContent === warning && note.parentElement === row, 'Long warning has its own row-wide note slot');
+        check(row.querySelector('[data-slot="status"]').textContent === 'Taken'
+            && !row.querySelector('[data-slot="status"] small'), 'Status holds only the badge, without the long warning');
+        showWarning = false;
+        row.querySelector('[data-enom-retry]').click();
+        check(note.textContent === '', 'Retry clears the old note while checking');
+        await sleep(60);
+        check(row.dataset.state === 'available' && note.textContent === '', 'Re-render without a warning leaves no stale note');
+        check(errors.length === 0, 'Long warning and retry have no script errors'); w.close();
+    }
+
     // ------------------------------------------------------------ confirmation dialog
     {
         const {w, d, errors, submits} = mount(pages.show);
