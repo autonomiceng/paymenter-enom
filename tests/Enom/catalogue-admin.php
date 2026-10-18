@@ -13,6 +13,7 @@ use Paymenter\Extensions\Servers\Enom\Admin\Resources\TldResource\Pages\ListTlds
 use Paymenter\Extensions\Servers\Enom\Models\Tld;
 use Paymenter\Extensions\Servers\Enom\Services\CatalogueRuntime;
 use Paymenter\Extensions\Servers\Enom\Services\PricingRule;
+use Paymenter\Extensions\Servers\Enom\Services\Pricing;
 
 $staffUser = function (string $name, array $permissions): User {
     $role = Role::create(['name' => $name, 'permissions' => $permissions]);
@@ -24,6 +25,138 @@ $coster = $staffUser('Coster', ['admin.enom.manage', 'admin.enom.costs']);
 $client = $staffUser('Client', []);
 enomAdminPanel();
 Auth::setUser($coster);
+// The converter also publishes new mapped products before moving existing services to an annual plan.
+$unmappedServer = App\Models\Server::create(['name' => 'Converted billing identity', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
+$unmapped = Tld::create(['server_id' => $unmappedServer->id, 'tld' => 'com', 'enabled' => true,
+    'register_enabled' => true, 'renew_enabled' => true, 'transfer_enabled' => true, 'use_default_rule' => false,
+    'pricing_mode' => 'markup_amount', 'markup' => '8.00', 'round_up' => 'none',
+    'fixed_register' => null, 'fixed_renew' => null, 'fixed_transfer' => null, 'cost_register_terms' => null,
+    'cost_renew' => null, 'cost_transfer' => null, 'renew_price' => '18.00', 'min_years' => 2, 'max_years' => 2]);
+$catalogue->publish($unmapped);
+$unmappedProduct = $catalogue->productFor($unmapped, 'register');
+try { $unmappedAnnual = $catalogue->billingPlan($unmappedProduct); }
+catch (Throwable) { verify(false, 'Converted publication did not create its annual billing identity.'); }
+verify($unmappedAnnual->billing_period === 1 && $unmappedAnnual->type === 'recurring' && $unmappedAnnual->billing_unit === 'year'
+    && $unmappedAnnual->prices()->count() === 0 && $unmappedProduct->plans()->count() === 2 && !$unmapped->fresh()->orderable(),
+    'Converted billing identity is missing or offers an unknown-cost term.');
+verify($catalogue->productFor($unmapped, 'transfer')->plans()->sole()->prices()->count() === 0,
+    'Converted transfer did not get an unpriced annual identity.');
+$catalogue->publish($unmapped->fresh());
+verify($catalogue->billingPlan($unmappedProduct)->id === $unmappedAnnual->id, 'Converted republication replaced its billing identity.');
+$unmapped->refresh()->update(['enabled' => false]);
+
+// Converter-shaped markup rows have no exact-term registration costs or fixed rules.
+// Existing native prices must survive every publication until a successful cost read.
+foreach (['markup_amount', 'markup_percent'] as $convertedMode) {
+    foreach ([[null, null], ['10.0000', null], [null, '10.0000'], ['10.0000', '10.0000']] as [$convertedRenewCost, $convertedTransferCost]) {
+        $convertedServer = App\Models\Server::create(['name' => 'Converted catalogue', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
+        $converted = Tld::create(['server_id' => $convertedServer->id, 'tld' => 'com', 'enabled' => true,
+            'register_enabled' => true, 'renew_enabled' => true, 'transfer_enabled' => true, 'use_default_rule' => false,
+            'pricing_mode' => $convertedMode, 'markup' => $convertedMode === 'markup_amount' ? '8.00' : '80.00', 'round_up' => 'none',
+            'fixed_register' => null, 'fixed_renew' => null, 'fixed_transfer' => null, 'cost_register_terms' => null,
+            'cost_renew' => $convertedRenewCost, 'cost_transfer' => $convertedTransferCost, 'renew_price' => '18.00',
+            'costs_synced_at' => now()->subDay(), 'min_years' => 1, 'max_years' => 2, 'registry_fields' => []]);
+        $convertedProducts = [];
+        foreach (['register' => [1 => '20.00', 2 => '40.00'], 'transfer' => [1 => '22.00']] as $action => $termPrices) {
+            $convertedProduct = App\Models\Product::create(['category_id' => $product->category_id, 'server_id' => $convertedServer->id,
+                'name' => 'Converted '.$action, 'slug' => 'converted-'.$converted->id.'-'.$action, 'hidden' => true, 'allow_quantity' => 'separated']);
+            foreach (['enom_catalogue' => '1', 'enom_tld_id' => (string) $converted->id, 'enom_action' => $action] as $key => $value) {
+                $convertedProduct->settings()->create(['key' => $key, 'value' => $value, 'type' => 'string', 'encrypted' => false]);
+            }
+            foreach ($termPrices as $years => $amount) {
+                $convertedPlan = $convertedProduct->plans()->create(['name' => $years.' years', 'type' => 'recurring', 'billing_unit' => 'year', 'billing_period' => $years]);
+                $convertedPlan->prices()->create(['currency_code' => 'USD', 'price' => $amount, 'setup_fee' => '0.00']);
+            }
+            $convertedProducts[$action] = $convertedProduct;
+        }
+        $convertedService = App\Models\Service::withoutEvents(fn () => App\Models\Service::create([
+            'user_id' => $client->id, 'product_id' => $convertedProducts['register']->id,
+            'plan_id' => $convertedProducts['register']->plans()->where('billing_period', 1)->sole()->id,
+            'price' => '18.00', 'quantity' => 1, 'currency_code' => 'USD', 'status' => 'active']));
+        $convertedDomain = Paymenter\Extensions\Servers\Enom\Models\Domain::create([
+            'service_id' => $convertedService->id, 'user_id' => $client->id, 'server_id' => $convertedServer->id,
+            'domain' => 'converted-'.$converted->id.'.com', 'sld' => 'converted-'.$converted->id, 'tld' => 'com',
+            'status' => 'active', 'provider_expires_at' => '2027-12-01', 'billing_managed' => true, 'price_mode' => 'standard']);
+        $nativePrices = fn ($action) => App\Models\Price::whereIn('plan_id', $convertedProducts[$action]->plans()->pluck('id'))->orderBy('id')->get()->toArray();
+        $convertedRegisterPrices = $nativePrices('register');
+        $convertedTransferPrices = $nativePrices('transfer');
+        $assertConvertedPrices = function (string $step) use ($converted, $convertedRenewCost, $convertedTransferCost, $nativePrices, $convertedRegisterPrices, $convertedTransferPrices) {
+            $current = $converted->fresh();
+            verify($nativePrices('register') === $convertedRegisterPrices, 'Converted registration prices were lost during '.$step.'.');
+            verify($convertedTransferCost === null ? $nativePrices('transfer') === $convertedTransferPrices : count($nativePrices('transfer')) === 1,
+                'Converted transfer prices were lost during '.$step.'.');
+            verify($current->renew_price !== null && ($convertedRenewCost !== null || $current->renew_price === '18.00'),
+                'Converted renewal price was lost during '.$step.'.');
+            verify(!$current->orderable('register') && $current->terms() === [] && $current->registrationTotal(1) === null,
+                'Converted registration with unknown costs remained on sale during '.$step.'.');
+            if ($convertedTransferCost === null) {
+                verify(!$current->orderable('transfer') && $current->price('transfer') === null, 'Converted transfer with unknown cost remained on sale during '.$step.'.');
+            }
+        };
+        $catalogue->publish($converted);
+        $assertConvertedPrices('publication');
+        foreach (Tld::ACTIONS as $action) {
+            TldResource::setAction($converted->fresh(), $action, false);
+            if ($action === 'register' || $action === 'transfer' && $convertedTransferCost === null) {
+                $assertConvertedPrices($action.' off');
+                refuses(fn () => TldResource::setAction($converted->fresh(), $action, true), 'No current price is available.', 'Unknown converted action was offered.');
+            } else {
+                if ($action === 'renew') {
+                    verify($converted->fresh()->renew_price !== null && Pricing::renewalPrice($convertedDomain->fresh()) === null,
+                        'Converted renewal disable erased its retained price or kept billing enabled.');
+                    verify(!str_contains($convertedProducts['register']->fresh()->description, 'It renews at'),
+                        'Disabled converted renewal remained quoted in product text.');
+                }
+                TldResource::setAction($converted->fresh(), $action, true);
+            }
+            $assertConvertedPrices($action.' on');
+            if ($action === 'renew' && $convertedRenewCost === null) {
+                verify(Pricing::renewalPrice($convertedDomain->fresh()) === '18.00', 'Converted domain renewal price was lost after off/on.');
+                Pricing::syncServicePrice($convertedDomain->fresh());
+                verify(number_format((float) $convertedService->fresh()->price, 2, '.', '') === '18.00'
+                    && str_contains($convertedProducts['register']->fresh()->description, 'It renews at $18.00/yr'),
+                    'Converted renewal service price or product text was not restored.');
+            }
+        }
+        TldResource::applyPricing($converted->fresh(), ['use_default_rule' => false, 'pricing_mode' => $convertedMode,
+            'markup' => $convertedMode === 'markup_amount' ? '9.00' : '90.00', 'round_up' => 'none']);
+        $assertConvertedPrices('rule change');
+        CatalogueRuntime::saveDefaultRule($convertedServer->id, array_replace(PricingRule::DEFAULT, ['mode' => 'markup_amount', 'markup' => '8.00']));
+        TldResource::applyPricing($converted->fresh(), ['use_default_rule' => true]);
+        CatalogueRuntime::saveDefaultRule($convertedServer->id, array_replace(PricingRule::DEFAULT, ['mode' => 'markup_amount', 'markup' => '9.00']));
+        $assertConvertedPrices('default rule change');
+        $converted->refresh()->fill(['enabled' => false]);
+        $catalogue->publish($converted);
+        $catalogue->enable($converted->fresh());
+        $assertConvertedPrices('enable');
+        foreach (['com:10:1', 'com:16:1', 'com:19:1'] as $failedKey) {
+            $failedReads = [$failedKey => 'transport'];
+            verify($catalogue->syncTld($converted->fresh()) === null, 'Converted failed price refresh was accepted.');
+            $assertConvertedPrices('failed price refresh');
+            $catalogue->publish($converted->fresh());
+            $assertConvertedPrices('publication after failed price refresh');
+        }
+        $failedReads = [];
+        verify($catalogue->syncTld($converted->fresh()) !== null && $converted->fresh()->orderable('register')
+            && $converted->fresh()->registrationTotal(2) === '35.90' && $converted->fresh()->price('transfer') === '17.95',
+            'Successful cost sync did not release converted sales at current prices.');
+        // Reading the newly required cost must keep corrupt sale data isolated to its ending.
+        Illuminate\Support\Facades\DB::table('enom_tlds')->where('id', $converted->id)->update(['cost_transfer' => 'malformed']);
+        try { $corruptCostPrice = $converted->fresh()->price('transfer'); }
+        catch (Throwable) { verify(false, 'Malformed transfer cost escaped the sale guard.'); }
+        verify($corruptCostPrice === null && $catalogue->resolve('example.ai')['tld']->id === $ai->id,
+            'Malformed transfer cost remained on sale or hid a valid ending.');
+        Illuminate\Support\Facades\DB::table('enom_tlds')->where('id', $converted->id)->update(['cost_transfer' => '8.9500']);
+        $missingTerms = ['com:10:1', 'com:19:1'];
+        $catalogue->syncTld($converted->fresh());
+        verify($convertedProducts['register']->plans()->where('billing_period', 1)->sole()->prices()->count() === 0
+            && $convertedProducts['transfer']->plans()->sole()->prices()->count() === 0 && $converted->fresh()->registrationTotal(2) === '35.90',
+            'Explicitly unavailable converted costs retained stale sale prices.');
+        $missingTerms = [];
+        $converted->refresh()->update(['enabled' => false]);
+    }
+}
+
 $net->refresh()->fill(['enabled' => true, 'register_enabled' => true, 'renew_enabled' => true]);
 $catalogue->publish($net);
 $net->cost_register_terms = array_replace($net->cost_register_terms, [2 => '71.4321']);

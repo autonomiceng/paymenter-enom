@@ -282,8 +282,8 @@ class Catalogue
             if ($action === 'transfer' && isset($holds[$action])) { $tld->transfer_enabled = false; }
             if (!$available && !isset($holds[$action])) { $holds[$action] = 'No current price is available.'; }
             if ($action === 'renew') {
-                // Keep billing existing domains when a fresh renewal cost is unavailable.
-                $tld->renew_price = $tld->renew_enabled ? ($available[1] ?? $tld->renew_price) : null;
+                // Retain the billing price across missing costs and action toggles; renew_enabled gates billing.
+                $tld->renew_price = $available[1] ?? $tld->renew_price;
             }
             else { $prices[$action] = $available; }
         }
@@ -293,7 +293,7 @@ class Catalogue
             $holds['transfer'] = TransferOrders::supported($tld) ? 'Not on the transfer list. Turn on Transfer to add it.' : 'Transfers are not supported for this ending.';
             $prices['transfer'] = [];
         }
-        if ($tld->renew_price === null) {
+        if (!$tld->renew_enabled || $tld->renew_price === null) {
             foreach (['register', 'transfer'] as $action) { $holds[$action] ??= 'An annual renewal price is required.'; $prices[$action] = []; }
         }
         $tld->sale_holds = $holds;
@@ -336,7 +336,8 @@ class Catalogue
     /** Customer text under the checkout heading; rewritten on every publish so the renewal price stays current. */
     private static function description(Tld $tld, string $action, array $years): string
     {
-        $renew = $tld->renew_price ? ' It renews at $'.$tld->renew_price.'/yr' : '';
+        $renewPrice = $tld->price('renew');
+        $renew = $renewPrice !== null ? ' It renews at $'.$renewPrice.'/yr' : '';
         if ($action === 'transfer') {
             return 'Move a .'.$tld->tld.' domain you own to us. The transfer adds 1 year to its expiry. After checkout, you’ll enter '
                 .'the transfer code from your current registrar. If the transfer is refused, you get the full amount back as account credit.'
@@ -375,6 +376,9 @@ class Catalogue
 
     private function publishPlans(Product $product, string $action, Tld $tld, array $prices): void
     {
+        // Before the first exact-term sync, unknown actions keep native prices but still need billing identities.
+        // Sale reads hold these prices; a successful sync supplies costs, including explicit unavailability.
+        $preservePrices = $tld->cost_register_terms === null && $tld->cost($action) === null;
         $years = $action === 'register' ? range(max(1, (int) $tld->min_years), min(10, max((int) $tld->min_years, (int) $tld->max_years))) : [1];
         $years = array_unique([1, ...$years]);
         foreach ($years as $term) {
@@ -383,11 +387,13 @@ class Catalogue
             $plan = $plans->first() ?? $product->plans()->create(['name' => $term.' year'.($term === 1 ? '' : 's'), 'type' => 'recurring', 'billing_unit' => 'year', 'billing_period' => $term]);
             $plan->fill(['type' => 'recurring', 'name' => $term === 1 && $action === 'register' && $tld->min_years > 1 ? 'Managed annual renewal' : $term.' year'.($term === 1 ? '' : 's'),
                 'sort' => isset($prices[$term]) ? $term : 100 + $term])->save();
+            if ($preservePrices) { continue; }
             if (isset($prices[$term])) {
                 $plan->prices()->where('currency_code', '!=', 'USD')->delete();
                 $plan->prices()->updateOrCreate(['currency_code' => 'USD'], ['price' => $prices[$term], 'setup_fee' => '0.00']);
             } else { $plan->prices()->delete(); }
         }
+        if ($preservePrices) { return; }
         // Keep historical identities but remove every price that is no longer offered.
         foreach ($product->plans()->get() as $plan) {
             if (!isset($prices[$plan->billing_period]) || $plan->type !== 'recurring' || $plan->billing_unit !== 'year') {

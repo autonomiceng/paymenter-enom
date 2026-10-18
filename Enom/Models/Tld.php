@@ -87,6 +87,7 @@ class Tld extends Model
     {
         if (!$this->enabled || !$this->{$action.'_enabled'} || !$this->saleRenewalAvailable()) { return null; }
         try {
+            if ($this->cost($action, $years) === null) { return null; }
             if (!array_key_exists($action, $this->saleCatalogue)) {
                 $product = app(Catalogue::class)->productFor($this, $action);
                 $prices = [];
