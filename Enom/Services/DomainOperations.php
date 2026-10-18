@@ -17,6 +17,7 @@ use Paymenter\Extensions\Servers\Enom\Api\RegistrarClient;
 use Paymenter\Extensions\Servers\Enom\Api\RegistrarResult;
 use Paymenter\Extensions\Servers\Enom\Jobs\ExecuteOperation;
 use Paymenter\Extensions\Servers\Enom\Jobs\ReconcileOperation;
+use Paymenter\Extensions\Servers\Enom\Jobs\RefreshDomain;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Models\Operation;
 use Paymenter\Extensions\Servers\Enom\Models\Tld;
@@ -772,11 +773,17 @@ class DomainOperations
             $service->status = Service::STATUS_ACTIVE;
             $service->expires_at = null;
             $service->save();
-            if (in_array($operation->action, ['register', 'transfer'], true)) {
-                \Paymenter\Extensions\Servers\Enom\Jobs\RefreshDomain::dispatch((int) $domain->id)->afterCommit()->delay(now()->addSeconds(20));
-            }
             $operation->confirmed_expires_at = $expiry->format('Y-m-d');
             $result = $this->finish($operation, 'succeeded', 'expiry_confirmed');
+            if ($result->state === 'succeeded' && in_array($result->action, ['register', 'transfer'], true)) {
+                DB::afterCommit(function () use ($result) {
+                    try { RefreshDomain::dispatch((int) $result->domain_id, (int) $result->id); }
+                    catch (Throwable) {
+                        // Queue availability cannot undo a confirmed registration or transfer.
+                        \Illuminate\Support\Facades\Log::warning('Enom automatic domain refresh could not be queued.', ['operation_id' => $result->id]);
+                    }
+                });
+            }
             return $result->fresh();
         });
     }
@@ -1503,6 +1510,7 @@ class DomainOperations
             $key = $kind === 'lock' ? 'locked' : $kind;
             if (array_key_exists($key, $partial)) { $snapshot[$key] = $partial[$key]; }
             $snapshot['read_status'][$kind] = $partial['read_status'][$kind];
+            if ($kind === 'nameservers') { $snapshot['registrar_dns'] = is_bool($partial['registrar_dns'] ?? null) ? $partial['registrar_dns'] : null; }
             if ($kind === 'dnssec') { $snapshot['dnssec_shape_verified'] = $partial['dnssec_shape_verified'] ?? false; }
             if ($kind === 'contacts' && isset($partial['contact_status'])) { $snapshot['contact_status'] = $partial['contact_status']; }
             if ($kind === 'contacts' && isset($partial['contact_roles'])) { $snapshot['contact_roles'] = $partial['contact_roles']; }

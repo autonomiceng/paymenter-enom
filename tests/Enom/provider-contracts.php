@@ -298,6 +298,20 @@ $subsetCalls = [];
 $subsetApi = new EnomApi(new RegistrarClient('uid', 'token', function ($command) use (&$subsetCalls) { $subsetCalls[] = $command; return xml($command, '<reg-lock>1</reg-lock>'); }));
 $snapshot = $subsetApi->snapshot('demo.com', ['lock']);
 check($subsetCalls === ['GetRegLock'] && $snapshot['locked'] === true && $snapshot['read_status'] === ['lock' => 'success'], 'partial snapshot bounds command count and keeps flat fields');
+$detailCalls = [];
+$detailFailure = false;
+$detailApi = new EnomApi(new RegistrarClient('uid', 'token', function ($command) use (&$detailCalls, &$detailFailure) {
+    $detailCalls[] = $command;
+    if ($detailFailure) { throw new RuntimeException('Synthetic transport failure'); }
+    return xml($command, $command === 'GetDNS' ? '<dns>dns1.name-services.com</dns><dns>dns2.name-services.com</dns><UseDNS>default</UseDNS>' : '<reg-lock>1</reg-lock>');
+}));
+$details = $detailApi->snapshot('demo.com', ['nameservers', 'lock']);
+check($detailCalls === ['GetDNS', 'GetRegLock'] && $details['locked'] === true && $details['registrar_dns'] === true
+    && $details['nameservers'] === ['dns1.name-services.com', 'dns2.name-services.com'], 'refresh snapshot retains lock, nameservers and registrar DNS together');
+$detailFailure = true; $detailCalls = [];
+$details = $detailApi->snapshot('demo.com', ['nameservers', 'lock']);
+check($detailCalls === ['GetDNS', 'GetRegLock'] && $details['locked'] === null && $details['nameservers'] === []
+    && !isset($details['registrar_dns']) && $details['read_status'] === ['nameservers' => 'unknown', 'lock' => 'unknown'], 'failed snapshot records unknown facts without retries');
 $transfer = response('TP_GetOrder', xml('TP_GetOrder', '<transferorder><transferorderid>123</transferorderid><statusid>3</statusid><transferorderdetail><sld>demo</sld><tld>com</tld><statusid>5</statusid></transferorderdetail></transferorder>'));
 check(EnomApi::normalize('transfer', $transfer)['completed'] && EnomApi::normalize('transfer', $transfer)['provider_order_id'] === '123', 'single transfer header and detail prove same domain operation');
 // Getter response contracts use synthetic domain and order identifiers.

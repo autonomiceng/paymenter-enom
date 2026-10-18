@@ -105,5 +105,28 @@ CatalogueRuntime::boot();
 $scheduled = collect(app(Illuminate\Console\Scheduling\Schedule::class)->events())->first(fn ($event) => $event->description === 'enom-catalogue-costs');
 verify($scheduled && $scheduled->expression === '0 0 * * *' && $scheduled->withoutOverlapping, 'Daily cost schedule is missing or can overlap.');
 
+// Sync warnings retain a review action for renewal-only losses, including repeat syncs.
+Auth::setUser($coster);
+$summaryServer = App\Models\Server::create(['name' => 'Renewal summary', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
+$renewalEnding = Tld::create(['server_id' => $summaryServer->id, 'tld' => 'com', 'enabled' => true, 'min_years' => 1, 'max_years' => 1,
+    'register_enabled' => true, 'renew_enabled' => true, 'transfer_enabled' => true, 'use_default_rule' => false, 'pricing_mode' => 'fixed',
+    'fixed_register' => '20.00', 'fixed_transfer' => '20.00', 'fixed_renew' => '1.00']);
+foreach ([1, 2] as $repeat) {
+    session()->forget('filament.notifications');
+    TldResource::syncCosts($summaryServer->id);
+    $notice = collect(session('filament.notifications'))->last();
+    $review = collect($notice['actions'])->first();
+    verify($notice['status'] === 'warning' && str_contains($notice['body'], 'Renewals below cost (still billed): .com.')
+        && !str_contains($notice['body'], 'Nothing on sale is below cost.') && $review['label'] === 'Review pricing'
+        && $review['url'] === \Paymenter\Extensions\Servers\Enom\Services\Catalogue::pricingUrl($renewalEnding), 'Renewal-only sync lost its warning or direct review action.');
+}
+$secondRenewal = $renewalEnding->replicate();
+$secondRenewal->tld = 'org'; $secondRenewal->save();
+session()->forget('filament.notifications');
+TldResource::syncCosts($summaryServer->id);
+$notice = collect(session('filament.notifications'))->last();
+$review = collect($notice['actions'])->first();
+verify($review['url'] === TldResource::getUrl('index', ['tableFilters' => ['below_cost' => ['isActive' => true]]]), 'Several renewal losses do not open the below-cost filter.');
+
 echo 'Catalogue admin: '.$checks.' checks passed; native Filament forms and permissions.'.PHP_EOL;
 $successful = true;

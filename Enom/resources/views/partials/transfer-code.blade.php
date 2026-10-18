@@ -2,13 +2,12 @@
 @php
     $transfer = \Paymenter\Extensions\Servers\Enom\Models\Operation::where('domain_id', $domain->id)->where('action', 'transfer')->latest('id')->first();
     $transferOwner = auth()->id() && (int) auth()->id() === (int) $domain->user_id;
-    $transferOpen = $transfer && in_array($transfer->state, ['awaiting_payment', 'awaiting_code', 'queued', 'held'], true)
-        && \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::unsent($transfer) && $domain->status === 'transfer_pending';
+    $transferOpen = $transfer && \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::codeRejection($transfer, false) === null;
     $transferDeadline = $transfer ? \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::deadline($transfer) : null;
     $transferReceived = $transfer && !app(\Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class)->needsCode($transfer);
     $transferPaid = $transfer && \App\Models\Invoice::whereKey($transfer->invoice_id)->value('status') === \App\Models\Invoice::STATUS_PAID;
     $transferAmount = $transfer ? \Paymenter\Extensions\Servers\Enom\Http\Controllers\DomainController::money($transfer->amount, $transfer->currency ?: 'USD') : null;
-    $transferAccepting = (!$transferDeadline || $transferDeadline->isFuture()) && (!$transferPaid || $transferDeadline);
+    $transferAccepting = $transfer && \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::codeRejection($transfer) === null;
 @endphp
 @if ($transferOwner && $transferOpen)
 <div id="transfer-code">

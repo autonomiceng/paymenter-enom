@@ -29,6 +29,7 @@
     $current = array_values($cached['nameservers'] ?? []);
     $norm = fn (array $list) => collect($list)->map(fn ($h) => rtrim(strtolower($h), '.'))->sort()->values()->all();
     $usingDefault = $defaults && $current && $norm($defaults) === $norm($current);
+    $registrarDns = ($cached['registrar_dns'] ?? null) === true;
     $locked = $cached['locked'] ?? null;
     $privacy = $cached['privacy'] ?? [];
     $registrant = $cached['contacts']['registrant'] ?? [];
@@ -238,7 +239,7 @@
                 <div class="enom-fact"><dt>Renewal price</dt><dd>{{ $free ? 'Complimentary' : ($amount && !($s['zero_retail'] ?? false) ? $amount.'/yr' : 'Not set — contact support') }}</dd></div>
                 <div class="enom-fact"><dt>Transfer lock</dt><dd>{{ $locked === null ? 'Unknown' : ($locked ? 'On' : 'Off') }}</dd></div>
                 @if ($showPrivacy)<div class="enom-fact"><dt>ID Protect</dt><dd>{{ $privacy['enabled'] === true ? 'On' : 'Off' }}</dd></div>@endif
-                <div class="enom-fact"><dt>Nameservers</dt><dd>{{ !$current ? 'Unknown' : ($usingDefault ? 'Default' : 'Custom') }}<small>{{ implode(', ', array_slice($current, 0, 2)) }}{{ count($current) > 2 ? ' +'.(count($current) - 2) : '' }}</small></dd></div>
+                <div class="enom-fact"><dt>Nameservers</dt><dd>{{ !$current ? 'Unknown' : ($registrarDns ? 'Registrar default' : ($usingDefault ? 'Default' : 'Custom')) }}<small>{{ implode(', ', array_slice($current, 0, 2)) }}{{ count($current) > 2 ? ' +'.(count($current) - 2) : '' }}</small></dd></div>
             </dl>
             @if ($renewOn && !$free && $can('renew'))
                 <section class="enom-section" aria-labelledby="enom-renew-heading" style="border-top:0">
@@ -295,7 +296,7 @@
             <section class="enom-section" aria-labelledby="enom-ns-heading">
                 <div class="enom-section__head">
                     <div><h2 id="enom-ns-heading" class="enom-h2">Nameservers</h2><p>These decide where your website and email are hosted. Changes can take up to 48 hours to reach everyone.</p></div>
-                    @if ($usingDefault)<span class="enom-badge enom-tone-info">Using defaults</span>@endif
+                    @if ($registrarDns)<span class="enom-badge enom-tone-info">Registrar default</span>@elseif ($usingDefault)<span class="enom-badge enom-tone-info">Using defaults</span>@endif
                 </div>
                 @if ($current)
                     <ul class="enom-hosts">@foreach ($current as $host)<li>{{ $host }}</li>@endforeach</ul>

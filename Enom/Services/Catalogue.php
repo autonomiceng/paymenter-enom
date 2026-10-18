@@ -11,11 +11,13 @@ use App\Models\User;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
+use Paymenter\Extensions\Servers\Enom\Admin\Resources\TldResource;
 use Paymenter\Extensions\Servers\Enom\Api\DomainName;
 use Paymenter\Extensions\Servers\Enom\Api\RegistrarResult;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Models\Tld;
 use RuntimeException;
+use Throwable;
 
 /** Extension-owned native products and exact-term prices. */
 class Catalogue
@@ -66,12 +68,12 @@ class Catalogue
 
     /**
      * Synchronous cost sync with a summary for staff: endings read, endings whose costs changed,
-     * endings on sale with a term missing an Enom price, and endings on sale with registration or transfer below cost.
+     * endings on sale with a missing Enom price, blocked new sales, and renewals still billed below cost.
      */
     public function sync(int $serverId): array
     {
         $api = $this->operations->apiForServer($serverId, true);
-        $summary = ['tlds' => 0, 'changed' => [], 'missing' => [], 'held' => []];
+        $summary = ['tlds' => 0, 'changed' => [], 'missing' => [], 'held' => [], 'renewals_below_cost' => []];
         foreach (Tld::where('server_id', $serverId)->orderBy('id')->get() as $tld) {
             $terms = [];
             // Provider reads finish before taking any catalogue row lock.
@@ -87,6 +89,9 @@ class Catalogue
             $tld->refresh();
             $ending = '.'.$tld->tld;
             if (self::costKey($before) !== self::costKey([$terms, $renew, $transfer])) { $summary['changed'][] = $ending; }
+            if ($tld->price('renew') !== null && str_starts_with((string) ($tld->sale_holds['renew'] ?? ''), 'Price is below cost.')) {
+                $summary['renewals_below_cost'][] = $ending;
+            }
             if (!$tld->enabled) { continue; }
             if (in_array(null, $terms, true) || $renew === null) { $summary['missing'][] = $ending; }
             $holds = array_intersect_key($tld->sale_holds ?? [], ['register' => true, 'transfer' => true]);
@@ -104,9 +109,12 @@ class Catalogue
         };
         $count = fn (int $n, string $one, string $many) => $n.' '.($n === 1 ? $one : $many);
         $body = [($summary['changed'] ? $count(count($summary['changed']), 'TLD', 'TLDs').' had cost changes' : 'No costs changed').'.'];
-        $body[] = $summary['held'] ? 'Below cost, partly or fully off sale: '.$list($summary['held']).'.' : 'Nothing on sale is below cost.';
+        $renewals = $summary['renewals_below_cost'] ?? [];
+        if ($summary['held']) { $body[] = 'Below cost, partly or fully off sale: '.$list($summary['held']).'.'; }
+        if ($renewals) { $body[] = 'Renewals below cost (still billed): '.$list($renewals).'.'; }
+        if (!$summary['held'] && !$renewals) { $body[] = 'Nothing on sale is below cost.'; }
         if ($summary['missing']) { $body[] = 'No Enom price for some terms of '.$list($summary['missing']).'. Those terms aren’t offered until a sync gets a price.'; }
-        return ['Costs synced for '.$count((int) $summary['tlds'], 'TLD', 'TLDs').'.', implode(' ', $body), (bool) ($summary['held'] || $summary['missing'])];
+        return ['Costs synced for '.$count((int) $summary['tlds'], 'TLD', 'TLDs').'.', implode(' ', $body), (bool) ($summary['held'] || $renewals || $summary['missing'])];
     }
 
     private static function costKey(array $costs): string
@@ -284,7 +292,7 @@ class Catalogue
         }
         // Staff choose transfer availability, so only price and registry holds alert.
         $newHolds = array_diff_key(array_diff_assoc($holds, $oldHolds), $transferAllowed ? [] : ['transfer' => true]);
-        if ($newHolds && $tld->enabled) { DB::afterCommit(fn () => $this->alert($tld->tld, $newHolds, $belowTerms, array_keys($prices['register']))); }
+        if ($newHolds && $tld->enabled) { DB::afterCommit(fn () => $this->alert($tld, $newHolds, $belowTerms, array_keys($prices['register']))); }
     }
 
     /** Staff hold text; the 'Price is below cost.' prefix is what the TLD filter and sync summary match. */
@@ -361,8 +369,10 @@ class Catalogue
         }
     }
 
-    private function alert(string $ending, array $holds, array $belowTerms, array $offered): void
+    private function alert(Tld $tld, array $holds, array $belowTerms, array $offered): void
     {
+        $ending = $tld->tld;
+        $url = self::pricingUrl($tld);
         $messages = [];
         foreach ($holds as $action => $reason) {
             $messages[] = isset($belowTerms[$action]) ? self::belowCostAlert($ending, $action, $belowTerms[$action], $offered)
@@ -371,10 +381,18 @@ class Catalogue
         foreach (User::whereHas('role')->get() as $user) {
             if (!$user->hasPermission('admin.enom.manage') || !$user->hasPermission('admin.enom.costs')) { continue; }
             foreach ($messages as [$title, $body]) {
-                \App\Models\Notification::create(['user_id' => $user->id, 'title' => $title, 'body' => $body, 'show_in_app' => true, 'show_as_push' => true]);
-                NotificationHelper::sendSystemEmailNotification($title, $body, email: $user->email);
+                \App\Models\Notification::create(['user_id' => $user->id, 'title' => $title, 'body' => $body, 'url' => $url, 'show_in_app' => true, 'show_as_push' => true]);
+                NotificationHelper::sendSystemEmailNotification($title, $body.($url ? '<p><a href="'.e($url).'">Review pricing</a></p>' : ''), email: $user->email);
             }
         }
+    }
+
+    /** The TLD list with this ending's pricing open, for "Review pricing" in alerts. */
+    public static function pricingUrl(Tld $tld): ?string
+    {
+        try {
+            return TldResource::getUrl('index', ['tableAction' => 'edit', 'tableActionRecord' => $tld->getKey()], panel: 'admin');
+        } catch (Throwable) { return null; }
     }
 
     /** Margin-guard alert text: [title, body]. */

@@ -559,6 +559,8 @@ final class EnomApi
                 $snapshot['contact_roles'] = array_keys(array_filter($normalized['collected'] ?? ['registrant' => true, 'admin' => true, 'tech' => true, 'auxbilling' => true])) ?: ['registrant'];
             }
             if ($kind === 'dnssec') { $snapshot['dnssec_shape_verified'] = $normalized['shape_verified'] ?? false; }
+            // UseDNS=default: the domain points at Enom's own name servers.
+            if ($kind === 'nameservers') { $snapshot['registrar_dns'] = $normalized['uses_enom_dns'] ?? null; }
             if (in_array($kind, ['contacts', 'nameservers', 'hosts', 'srv', 'dnssec'], true)) { $snapshot[$kind] = $normalized[$kind] ?? []; }
             elseif ($kind === 'lock') { $snapshot['locked'] = $normalized['locked'] ?? null; }
             else { $snapshot[$kind] = $normalized; }

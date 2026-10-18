@@ -224,6 +224,26 @@ class TransferOrders
         };
     }
 
+    /** Shared code-entry gate for the owner form and submission; payment recovery runs before checking the cutoff. */
+    public static function codeRejection(Operation $operation, bool $checkDeadline = true): ?string
+    {
+        $domain = $operation->domain;
+        $invoiceStatus = Invoice::whereKey($operation->invoice_id)->value('status');
+        if ($operation->action !== 'transfer' || !in_array($operation->state, self::OPEN, true) || !self::unsent($operation)
+            || !$domain || (int) $domain->service_id !== (int) $operation->service_id
+            || $domain->status !== 'transfer_pending' || $domain->provider_order_id !== null
+            || !in_array($domain->service?->status, ['pending', 'active'], true)
+            || !in_array($invoiceStatus, [Invoice::STATUS_PENDING, Invoice::STATUS_PAID], true)) {
+            return 'This transfer can no longer accept a code.';
+        }
+        if ($checkDeadline && $invoiceStatus === Invoice::STATUS_PAID) {
+            $deadline = self::deadline($operation);
+            if (!$deadline) { return 'The transfer payment needs review. Please contact support.'; }
+            if ($deadline <= CarbonImmutable::now('UTC')) { return 'The transfer code deadline has passed.'; }
+        }
+        return null;
+    }
+
     public function submitCode(User $actor, int $domainId, string $code): Operation
     {
         $domain = Domain::whereKey($domainId)->where('user_id', $actor->id)->firstOrFail();
@@ -231,22 +251,15 @@ class TransferOrders
         $operation = Operation::where('domain_id', $domain->id)->where('action', 'transfer')->latest('id')->firstOrFail();
         $result = $this->locked($operation, function (Operation $current, Domain $domain) use ($actor, $code) {
             abort_unless((int) $domain->user_id === (int) $actor->id && (int) $domain->service_id === (int) $current->service_id, 404);
-            if (!in_array($current->state, self::OPEN, true) || !self::unsent($current)
-                || $domain->status !== 'transfer_pending' || $domain->provider_order_id !== null || !in_array($domain->service?->status, ['pending', 'active'], true)) {
-                throw new InputValidationException(['transfer_code' => 'This transfer can no longer accept a code.']);
+            $current->setRelation('domain', $domain);
+            if ($error = self::codeRejection($current, false)) {
+                throw new InputValidationException(['transfer_code' => $error]);
             }
-            $invoiceStatus = Invoice::whereKey($current->invoice_id)->value('status');
-            if (!in_array($invoiceStatus, [Invoice::STATUS_PENDING, Invoice::STATUS_PAID], true)) {
-                throw new InputValidationException(['transfer_code' => 'This transfer can no longer accept a code.']);
-            }
-            $invoicePaid = $invoiceStatus === Invoice::STATUS_PAID;
-            if ($invoicePaid) {
+            if (Invoice::whereKey($current->invoice_id)->value('status') === Invoice::STATUS_PAID) {
                 $this->paymentAccepted($current);
                 $current->refresh();
-                $deadline = self::deadline($current);
-                if (!$deadline) { return ['error' => 'The transfer payment needs review. Please contact support.']; }
-                if ($deadline <= CarbonImmutable::now('UTC')) { return ['error' => 'The transfer code deadline has passed.']; }
             }
+            if ($error = self::codeRejection($current)) { return ['error' => $error]; }
             $current->update(['payload' => array_replace($current->payload ?? [], ['epp' => $code])]);
             DB::afterCommit(fn () => app(DomainOperations::class)->resumeInitial((int) $current->id));
             return ['operation' => $current];

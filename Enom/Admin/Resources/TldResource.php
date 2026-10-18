@@ -228,12 +228,18 @@ class TldResource extends Resource
         app(Catalogue::class)->publish($tld);
     }
 
-    /** Runs a synchronous cost sync and tells staff what changed. Takes about a second per ending. */
+    /** Runs a synchronous cost sync and tells staff what changed. Takes about 7 seconds per ending on Enom TEST. */
     public static function syncCosts(int $serverId): void
     {
         Staff::attempt(function () use ($serverId) {
-            [$title, $body, $warn] = Catalogue::syncMessage(app(Catalogue::class)->sync($serverId));
+            $summary = app(Catalogue::class)->sync($serverId);
+            [$title, $body, $warn] = Catalogue::syncMessage($summary);
             $notification = \Filament\Notifications\Notification::make()->title($title)->body($body);
+            // One ending below cost opens its pricing; several open the below-cost filter.
+            $belowCost = array_values(array_unique([...$summary['held'], ...$summary['renewals_below_cost']]));
+            $held = count($belowCost) === 1 ? Tld::where('server_id', $serverId)->where('tld', ltrim($belowCost[0], '.'))->first() : null;
+            $review = $held ? Catalogue::pricingUrl($held) : ($belowCost ? self::getUrl('index', ['tableFilters' => ['below_cost' => ['isActive' => true]]]) : null);
+            if ($review) { $notification->actions([Action::make('review')->label('Review pricing')->url($review)]); }
             return $warn ? $notification->warning()->persistent() : $notification->success();
         }, 'Costs synced.', 'Couldn’t sync costs. TLDs read before the error keep their new costs. Check the Enom setup page, then try again.');
     }

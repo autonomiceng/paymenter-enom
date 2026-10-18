@@ -23,10 +23,13 @@ $privacyReadFails = false;
 $failPrivacyAfterWrite = false;
 $dnssecReadFails = false;
 $commands = [];
+$providerNameservers = ['dns1.name-services.com', 'dns2.name-services.com'];
+$registrarDns = true;
 $ds = ['algorithm' => 13, 'digest_type' => 2, 'digest' => str_repeat('A', 64), 'key_tag' => 12345];
-$client = new Paymenter\Extensions\Servers\Enom\Api\RegistrarClient('offline', 'offline', function ($command) use (&$providerDs, &$privacyExists, &$privacyEnabled, &$privacyExpiry, &$privacyReadFails, &$failPrivacyAfterWrite, &$dnssecReadFails, &$commands, $ds, $domain): string {
+$client = new Paymenter\Extensions\Servers\Enom\Api\RegistrarClient('offline', 'offline', function ($command, $params) use (&$providerNameservers, &$registrarDns, &$providerDs, &$privacyExists, &$privacyEnabled, &$privacyExpiry, &$privacyReadFails, &$failPrivacyAfterWrite, &$dnssecReadFails, &$commands, $ds, $domain): string {
     $commands[] = $command;
     if (($command === 'GetDnsSec' && $dnssecReadFails) || ($command === 'GetWPPSInfo' && $privacyReadFails)) { return '<invalid'; }
+    if ($command === 'ModifyNS') { $providerNameservers = [$params['NS1'], $params['NS2']]; }
     if ($command === 'AddDnsSec') { $providerDs = [$ds]; }
     if ($command === 'DeleteDnsSec') { $providerDs = []; }
     if ($failPrivacyAfterWrite && in_array($command, ['PurchaseServices', 'RenewServices'], true)) { $privacyReadFails = true; }
@@ -35,6 +38,7 @@ $client = new Paymenter\Extensions\Servers\Enom\Api\RegistrarClient('offline', '
     if ($command === 'EnableServices') { $privacyEnabled = true; }
     if ($command === 'DisableServices') { $privacyEnabled = false; }
     $body = match ($command) {
+        'GetDNS' => ($registrarDns === null ? '' : '<UseDNS>'.($registrarDns ? 'default' : 'custom').'</UseDNS>').'<dns>'.implode('</dns><dns>', $providerNameservers).'</dns>',
         'GetDnsSec' => '<Success>True</Success><DnsSecDataCount>'.count($providerDs).'</DnsSecDataCount><DnsSecData>'.($providerDs ? '<KeyData><Algorithm>13</Algorithm><Digest>'.str_repeat('A', 64).'</Digest><DigestType>2</DigestType><KeyTag>12345</KeyTag></KeyData>' : '').'<Result><ResponseCode>200</ResponseCode></Result></DnsSecData>',
         'GetWPPSInfo' => '<GetWPPSInfo><WPPSAllowed>True</WPPSAllowed><WPPSExists>'.($privacyExists ? 'True' : 'False').'</WPPSExists><WPPSEnabled>'.($privacyEnabled ? 'True' : 'False').'</WPPSEnabled><WPPSExpDate>'.$privacyExpiry.'</WPPSExpDate></GetWPPSInfo>',
         'PurchaseServices', 'RenewServices' => '<OrderID>123456</OrderID><RRPCode>200</RRPCode>',
@@ -46,6 +50,16 @@ $client = new Paymenter\Extensions\Servers\Enom\Api\RegistrarClient('offline', '
 $operations = new Paymenter\Extensions\Servers\Enom\Services\DomainOperations(new Paymenter\Extensions\Servers\Enom\Api\EnomApi($client), fn () => []);
 $app->instance(Paymenter\Extensions\Servers\Enom\Services\DomainOperations::class, $operations);
 $operations->refreshSnapshot($user, $domain->id);
+// Nameserver-only readbacks replace the associated Registrar DNS flag in both directions.
+verify($domain->fresh()->snapshot['registrar_dns'] === true, 'Full refresh did not establish registrar DNS.');
+foreach ([false, true, null] as $index => $registrarDns) {
+    $nameservers = $registrarDns === true ? ['dns1.name-services.com', 'dns2.name-services.com'] : ['ns1.example-host.com', 'ns2.example-host.com'];
+    $change = $operations->enqueueManagement($user, $domain->id, 'nameservers', ['nameservers' => $nameservers], hash('sha256', 'ns-partial-'.$index));
+    $commands = [];
+    verify($operations->execute($change->id)->state === 'succeeded', 'Nameserver partial readback did not complete.');
+    verify($domain->fresh()->snapshot['registrar_dns'] === $registrarDns && $domain->fresh()->snapshot['nameservers'] === $nameservers, 'Nameserver partial readback retained a stale registrar DNS flag.');
+    verify($commands === ['ModifyNS', 'GetDNS'], 'Nameserver flag update required a full refresh.');
+}
 verify($domain->fresh()->capabilities['dnssec_add'] && !$domain->fresh()->capabilities['dnssec_delete'], 'Verified empty fixture does not allow controlled add only.');
 $add = $operations->enqueueManagement($user, $domain->id, 'dnssec_add', ['confirmed' => true, 'ds' => $ds], hash('sha256', 'add-first-ds'));
 $commands = [];

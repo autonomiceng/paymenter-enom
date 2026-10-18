@@ -207,7 +207,7 @@ final class DomainObservation
     }
 
 
-    private function recordFailure(int $domainId, string $error): void
+    public function recordFailure(int $domainId, string $error): void
     {
         DB::transaction(function () use ($domainId, $error) {
             $domain = Domain::lockForUpdate()->find($domainId);

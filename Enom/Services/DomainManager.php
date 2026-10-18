@@ -222,6 +222,7 @@ class DomainManager
             }
         }
         $result['locked'] = is_bool($snapshot['locked'] ?? null) ? $snapshot['locked'] : null;
+        $result['registrar_dns'] = is_bool($snapshot['registrar_dns'] ?? null) ? $snapshot['registrar_dns'] : null;
         foreach (['pending_verification', 'transfer_locked'] as $key) {
             $value = $snapshot['contact_status'][$key] ?? null;
             $result['contact_status'][$key] = is_bool($value) ? $value : null;

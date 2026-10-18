@@ -117,9 +117,17 @@ $missingTerms = [];
 $costOverride['net:16:1'] = '17.0001';
 $catalogue->syncCosts($server->id);
 verify($net->fresh()->renew_enabled && $net->fresh()->price('renew') === '17.00' && isset($net->fresh()->sale_holds['renew']), 'Renewal margin warning stopped billing.');
+foreach ([1, 2] as $repeat) {
+    $renewalSummary = $catalogue->sync($server->id);
+    [$title, $body, $warn] = Catalogue::syncMessage($renewalSummary);
+    verify($renewalSummary['held'] === [] && $renewalSummary['renewals_below_cost'] === ['.net'] && $warn
+        && str_contains($body, 'Renewals below cost (still billed): .net.') && !str_contains($body, 'Nothing on sale is below cost.'), 'Repeat sync concealed below-cost renewals.');
+    verify($net->fresh()->price('renew') === '17.00', 'Renewal warning stopped billing.');
+}
 $net->refresh()->fill(['renew_enabled' => false]);
 $catalogue->publish($net);
 verify(!$net->orderable() && $net->price('renew') === null, 'Explicit renewal disable left new sales available.');
+verify($catalogue->sync($server->id)['renewals_below_cost'] === [], 'Disabled renewal reported as still billed.');
 $costOverride = [];
 $catalogue->syncCosts($server->id);
 verify(!$net->fresh()->renew_enabled, 'Renewal recovery silently re-enabled renewal.');
