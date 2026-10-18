@@ -26,7 +26,7 @@ use Paymenter\Extensions\Servers\Enom\Services\DomainOperations;
 use RuntimeException;
 use Throwable;
 
-#[ExtensionMeta(name: 'Enom', description: 'Sell and manage domain names through an Enom reseller account.', version: '0.4.0', author: 'Autonomic Engineering')]
+#[ExtensionMeta(name: 'Enom', description: 'Sell and manage domain names through an Enom reseller account.', version: '0.5.0', author: 'Autonomic Engineering')]
 class Enom extends Server
 {
     private static bool $credentialHook = false;
