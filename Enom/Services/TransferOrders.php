@@ -211,10 +211,13 @@ class TransferOrders
         }
     }
 
+    /** Owner text for an ordered transfer held because the registry has no record of the name. */
+    public const NOT_REGISTERED_HOLD = 'We can’t transfer this name because its registry has no record of it. Contact support and we’ll sort it out.';
+
     public static function reason(?string $code): string
     {
         return match ($code) {
-            'transfer_not_registered' => "This name isn't registered with its registry, so it can't be transferred.",
+            'transfer_not_registered' => 'This name can’t be registered or transferred right now. Its registry may have reserved it.',
             'transfer_locked' => 'This domain is locked at its current registrar. Turn off the transfer lock there, then try again.',
             'transfer_redemption' => 'This domain has expired at its current registrar. Renew or restore it there first.',
             'transfer_pending_delete' => 'This domain is about to be deleted by its registry and cannot be transferred.',
@@ -229,7 +232,7 @@ class TransferOrders
     public static function codeRejection(Operation $operation, bool $checkDeadline = true): ?string
     {
         if ($operation->state === 'held' && $operation->safe_code === 'transfer_not_registered') {
-            return self::reason('transfer_not_registered');
+            return self::NOT_REGISTERED_HOLD;
         }
         $domain = $operation->domain;
         $invoiceStatus = Invoice::whereKey($operation->invoice_id)->value('status');

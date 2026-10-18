@@ -97,13 +97,13 @@ app()->instance(TransferOrders::class, $missingTransfers);
 $engine->resumeInitial($saved->id);
 $saved->refresh();
 verify($saved->state === 'held' && $saved->safe_code === 'transfer_not_registered' && !isset($saved->cost['refund']), 'Registry 404 did not retain a safe unsent hold.');
-verify(TransferOrders::codeRejection($saved) === $missingReason, 'Held code-entry page lacks the reason.');
-refuses(fn () => $missingTransfers->submitCode($owner, $saved->domain_id, 'new-code'), $missingReason, 'Blocked transfer accepted a replacement code.', [InputValidationException::class]);
-verify(\Paymenter\Extensions\Servers\Enom\Admin\Support\Labels::stateHint('held', $saved) === $missingReason, 'Staff hold lacks the registry reason.');
+verify(TransferOrders::codeRejection($saved) === TransferOrders::NOT_REGISTERED_HOLD, 'Held code-entry page lacks the reason.');
+refuses(fn () => $missingTransfers->submitCode($owner, $saved->domain_id, 'new-code'), TransferOrders::NOT_REGISTERED_HOLD, 'Blocked transfer accepted a replacement code.', [InputValidationException::class]);
+verify(\Paymenter\Extensions\Servers\Enom\Admin\Support\Labels::stateHint('held', $saved) === 'Never sent: the registry has no record of this name, so it can’t be transferred. Refund it as credit instead of resuming.', 'Staff hold lacks the registry reason.');
 $heldPage = enomHttp($owner, 'GET', '/domains/'.$saved->domain_id);
 $heldText = html_entity_decode(strip_tags(preg_replace('#<(style|script)\b.*?</\1>#si', '', $heldPage->getContent())));
-verify($heldPage->getStatusCode() === 200 && str_contains($heldText, $missingReason)
-    && !str_contains($heldPage->getContent(), 'id="transfer-code-input"') && !str_contains($heldText, 'account credit'), 'Held transfer page offers code entry or implies a refund.');
+verify($heldPage->getStatusCode() === 200 && str_contains($heldText, TransferOrders::NOT_REGISTERED_HOLD)
+    && !str_contains($heldPage->getContent(), 'id="transfer-code-input"') && !str_contains($heldText, 'account credit') && !str_contains($heldText, Rdap::UNCHECKED), 'Held transfer page offers code entry or implies a refund.');
 app()->instance(TransferOrders::class, $transfers);
 DB::rollBack();
 $unpaid = transferFixture(false);
@@ -221,7 +221,7 @@ auth()->login($owner);
 $boundaryHtml = view('enom::partials.transfer-code', ['domain' => $boundary->domain])->render();
 verify(str_contains($boundaryHtml, 'datetime="2026-11-16T00:30:00+00:00" data-enom-time="zone">Nov 16, 2026, 12:30 AM UTC</time>')
     && TransferOrders::deadline($boundary)->setTimezone('America/Los_Angeles')->format('M j, Y, g:i A') === 'Nov 15, 2026, 4:30 PM', 'Date-boundary cutoff lacks an exact, localizable timestamp.');
-verify(str_contains($html, "transfer status in advance"), 'Lookup-unavailable warning is missing from the domain page.');
+verify(str_contains(html_entity_decode($html), Rdap::UNCHECKED), 'Lookup-unavailable warning is missing from the domain page.');
 verify(!str_contains($html, 'value="'.$secret.'"'), 'Form redisplayed the code.');
 verify(!str_contains((string) @file_get_contents($testRoot.'/storage/logs/laravel.log'), 'NEVER-FLASH-THIS'), 'Code reached application logs.');
 echo 'Transfer codes: '.$checks.' passed; SQLite in memory; native cart and ordering resume integrated.'.PHP_EOL;

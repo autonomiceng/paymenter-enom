@@ -12,6 +12,8 @@ class Rdap
 {
     private const BOOTSTRAP = 'https://data.iana.org/rdap/dns.json';
     private const BODY_LIMIT = 2097152;
+    /** Shown with a transfer offer when the public lookup gave no usable answer. */
+    public const UNCHECKED = 'We couldn’t check this transfer in advance. If the current registrar refuses it, we credit your account in full.';
     private ?array $bootstrap = null;
 
     /** Injected transport returns ['status' => int, 'body' => string], without following redirects. */
@@ -22,7 +24,7 @@ class Rdap
 
     public function precheck(string $domain, int $creationDays = 60, int $transferDays = 60, ?DateTimeImmutable $today = null): array
     {
-        $unknown = ['allowed' => true, 'code' => null, 'warning' => "We couldn't check {$domain}'s transfer status in advance. If its current registrar refuses the transfer, you get the full amount back as account credit.", 'expires_at' => null];
+        $unknown = ['allowed' => true, 'code' => null, 'warning' => self::UNCHECKED, 'expires_at' => null];
         try {
             if (strlen($domain) > 253 || !preg_match('/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z]{2,63}\z/D', $domain)
                 || $creationDays < 0 || $creationDays > 365 || $transferDays < 0 || $transferDays > 365) { return $unknown; }

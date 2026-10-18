@@ -43,7 +43,7 @@
         @endif
         <p class="enom-small enom-muted" style="margin-top:.75rem">Next, your current registrar may email the domain owner to approve the transfer. Most transfers finish within 5 to 7 days. Your website and email keep working.</p>
         @if ($transfer->policy['transfer_lookup_unknown'] ?? false)
-            <p class="enom-small enom-muted" style="margin-top:.5rem">We couldn’t check {{ $domain->domain }}’s transfer status in advance. If its current registrar refuses the transfer, you get the full amount back as account credit.</p>
+            <p class="enom-small enom-muted" style="margin-top:.5rem">{{ \Paymenter\Extensions\Servers\Enom\Services\Rdap::UNCHECKED }}</p>
         @endif
     @elseif ($transferPaid && !$transferDeadline)
         <p>We couldn’t confirm the payment date for this transfer. Contact support and we’ll sort it out.</p>

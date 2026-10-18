@@ -181,7 +181,7 @@
                 @if ($invoiceId)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ route('invoices.show', $invoiceId) }}">Pay invoice</a></div>@endif
             @elseif ($isTransfer && ($progress['safe_code'] ?? null) === 'transfer_not_registered')
                 <h2 id="enom-status-heading">This transfer is on hold</h2>
-                <p>{{ \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::reason('transfer_not_registered') }}</p>
+                <p>{{ \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::NOT_REGISTERED_HOLD }}</p>
                 @if ($supportUrl)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--secondary" href="{{ $supportUrl }}">Contact support</a></div>@endif
             @elseif ($delayed)
                 <h2 id="enom-status-heading">This {{ $kind }} is taking longer than usual</h2>

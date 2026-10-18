@@ -143,7 +143,7 @@ const submit = (w, form, submitter) => form.requestSubmit(submitter || form.quer
     }
 
     {
-        const reason = "This name isn't registered with its registry, so it can't be transferred.";
+        const reason = 'This name can’t be registered or transferred right now. Its registry may have reserved it.';
         const fetch = async () => ({status: 200, json: async () => ({status: 'invalid', transfer_reason: reason, transfer_price: null, transfer_url: null})});
         const {w, d, errors} = mount(pages.search, {fetch}); await sleep(200);
         const row = d.querySelector('[data-enom-result]');

@@ -225,8 +225,8 @@
 .enom .enom-results { border: 1px solid var(--e-line); border-radius: .875rem; background: var(--e-panel); overflow: hidden; }
 .enom .enom-result { display: grid; grid-template-columns: minmax(12rem, 1fr) max-content 12rem 9.5rem; align-items: center; gap: .5rem 1.25rem; padding: 1rem 1.25rem; }
 .enom .enom-result + .enom-result { border-top: 1px solid var(--e-line); }
-.enom .enom-result__name { min-width: 0; overflow-x: auto; overflow-wrap: normal; word-break: normal; font-size: 1.0625rem; font-weight: 700; letter-spacing: -.01em; }
-.enom .enom-result__note { grid-column: 1 / -1; max-width: 80ch; margin: 0; line-height: 1.5; }
+.enom .enom-result__name { min-width: 0; overflow-wrap: anywhere; font-size: 1.0625rem; font-weight: 700; letter-spacing: -.01em; }
+.enom .enom-result__note { grid-column: 1 / -1; max-width: 96ch; margin: 0; line-height: 1.5; }
 .enom .enom-result__note:empty { display: none; }
 .enom .enom-result__name .enom-tld { color: var(--e-accent); }
 .enom .enom-result.is-first { padding-block: 1.375rem; background: color-mix(in srgb, var(--e-bg) 40%, transparent); }
@@ -262,9 +262,10 @@
     .enom .enom-result__price { text-align: left; }
     .enom .enom-result__status { grid-column: 1; grid-row: 2; }
     .enom .enom-result__price { grid-column: 1; grid-row: 3; }
-    .enom .enom-result__note { grid-row: 4; }
     .enom .enom-result__price:empty { display: none; }
     .enom .enom-result__action { grid-column: 2; grid-row: 2 / span 2; align-self: center; min-width: 7.5rem; }
+    /* Without a price the note moves up into row 3, so no empty track is left. */
+    .enom .enom-result:has(> .enom-result__price:empty) .enom-result__action { grid-row: 2; }
 }
 
 /* Term picker on search rows */

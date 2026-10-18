@@ -158,7 +158,7 @@ final class Labels
             return 'Processing is off in the Enom server settings. Sends once it is turned on.';
         }
         if ($operation?->safe_code === 'transfer_not_registered' && $state === 'held') {
-            return \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::reason('transfer_not_registered');
+            return 'Never sent: the registry has no record of this name, so it can’t be transferred. Refund it as credit instead of resuming.';
         }
         if ($operation?->safe_code === 'contact_details_required' && $state === 'held') {
             return 'Needs account details. Ask the customer to save their account details, then use updated account details on the domain page.';
