@@ -56,6 +56,22 @@ $contacts = ['registrant' => ['first_name' => 'Nexus', 'last_name' => 'Owner', '
     'country' => 'US', 'email_address' => 'nexus.owner@example.com', 'phone' => '+1.5125550100']];
 $history = fn () => tableRows(['invoices', 'invoice_items', 'services', 'orders', 'enom_domains', 'enom_operations']);
 
+// Resolve a dependency chain even when children precede their parents in the schema.
+$chain = [
+    ['name' => 'child_c', 'label' => 'Child C', 'required' => false, 'child' => true, 'text' => true, 'options' => []],
+    ['name' => 'child_b', 'label' => 'Child B', 'required' => false, 'child' => true, 'text' => false,
+        'options' => [['value' => 'needs-c', 'label' => 'Needs C', 'requires' => ['child_c']]]],
+    ['name' => 'parent', 'label' => 'Parent', 'required' => true, 'child' => false, 'text' => false,
+        'options' => [['value' => 'needs-b', 'label' => 'Needs B', 'requires' => ['child_b']], ['value' => 'independent', 'label' => 'Independent', 'requires' => []]]],
+];
+try { RegistryFields::validate($chain, ['parent' => 'needs-b', 'child_b' => 'needs-c']); throw new RuntimeException('Multi-step registry dependency accepted missing C.'); }
+catch (InputValidationException $error) { verify($error->errors === ['registry.child_c' => 'Fill in this field.'], 'Multi-step registry validation did not require child C.'); }
+verify(RegistryFields::validate($chain, ['parent' => 'needs-b', 'child_b' => 'needs-c', 'child_c' => 'details'])
+    === ['child_c' => 'details', 'child_b' => 'needs-c', 'parent' => 'needs-b'], 'Complete multi-step registry input was not retained.');
+foreach ([['parent' => 'independent', 'child_b' => 'needs-c'], ['parent' => 'independent', 'child_b' => 'needs-c', 'child_c' => 'unused']] as $input) {
+    verify(RegistryFields::validate($chain, $input) === ['parent' => 'independent'], 'Unused child B activated or retained its dependency C.');
+}
+
 // The stored schema reaches native checkout with its conditional child fields.
 verify(app(Catalogue::class)->attributesFor($us->fresh()) === $schema && count($schema) === 3, 'Stored registry schema did not round-trip.');
 $fields = app(\Paymenter\Extensions\Servers\Enom\Services\CartOrdering::class)->fields(app(Catalogue::class)->productFor($us, 'register'), ['enom_registry_us_nexus'=>'C31']);

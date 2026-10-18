@@ -68,11 +68,12 @@ final class PricingRule
     /** Per-year retail, rounded before multiplying by the purchased years. */
     public static function price(string $cost, array $rule, string $action): string
     {
+        if (!in_array($action, ['register', 'renew', 'transfer'], true)) { throw new InvalidArgumentException('Unknown price action.'); }
         $rule = self::validate($rule);
         $units = self::units($cost);
         $markup = self::units($rule['markup'], 2);
         $remainder = 0;
-        if ($rule['mode'] === 'fixed') { return $rule['fixed'][$action] ?? throw new InvalidArgumentException('Unknown price action.'); }
+        if ($rule['mode'] === 'fixed') { return $rule['fixed'][$action]; }
         if ($rule['mode'] === 'markup_amount') {
             $units += $markup * 100;
         } else {

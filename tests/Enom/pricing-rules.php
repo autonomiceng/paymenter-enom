@@ -42,6 +42,10 @@ check(PricingRule::total('8.95', 2) === '17.90', 'Exact two-year .net cost diffe
 check(!PricingRule::covers('8.95', '8.9501') && PricingRule::covers('8.96', '8.9501'), 'Wholesale margin lost four-place precision.');
 foreach (['-1', '1e3', '1.23456', '', ' 1.00', 'NaN'] as $bad) { check(PricingRule::wholesale($bad) === null, 'Bad wholesale accepted.'); }
 $fixed = array_replace($rule, ['mode' => 'fixed', 'fixed' => ['register' => '12.00', 'renew' => '13.00', 'transfer' => '14.00']]);
+foreach ([$fixed, array_replace($rule, ['mode' => 'markup_amount']), $rule] as $candidate) {
+    try { PricingRule::price('8.95', $candidate, 'invalid'); throw new RuntimeException('Unknown action accepted in '.$candidate['mode']); }
+    catch (InvalidArgumentException $error) { check($error->getMessage() === 'Unknown price action.', 'Unknown action has the wrong error in '.$candidate['mode']); }
+}
 check(PricingRule::price('8.95', $fixed, 'register') === '12.00' && PricingRule::price('8.95', $fixed, 'renew') === '13.00', 'Action-specific fixed prices differ.');
 foreach ([array_replace($rule, ['mode' => 'bad']), array_replace($rule, ['markup' => '-1']), array_replace($rule, ['markup' => '100001']),
     array_replace($rule, ['round_up' => 'bad']), array_replace($fixed, ['fixed' => ['register' => '0.00']])] as $bad) {
