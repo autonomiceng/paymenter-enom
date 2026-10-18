@@ -329,8 +329,10 @@ foreach ([1, 2] as $repeat) {
     $notice = collect(session('filament.notifications'))->last();
     $review = collect($notice['actions'])->first();
     verify($notice['status'] === 'warning' && str_contains($notice['body'], 'Renewals below cost (still billed): .com.')
-        && !str_contains($notice['body'], 'Nothing on sale is below cost.') && $review['label'] === 'Review pricing'
-        && $review['url'] === \Paymenter\Extensions\Servers\Enom\Services\Catalogue::pricingUrl($renewalEnding), 'Renewal-only sync lost its warning or direct review action.');
+        && !str_contains($notice['body'], 'Nothing on sale is below cost.') && $review['label'] === 'Review pricing', 'Renewal-only sync lost its warning or direct review action.');
+    parse_str(parse_url($review['url'], PHP_URL_QUERY) ?? '', $destination);
+    verify(($destination['tableAction'] ?? null) === 'edit'
+        && ($destination['tableActionRecord'] ?? null) === (string) $renewalEnding->id, 'Direct pricing review targets the wrong modal or ending.');
 }
 $secondRenewal = $renewalEnding->replicate();
 $secondRenewal->tld = 'org'; $secondRenewal->save();
@@ -338,7 +340,14 @@ session()->forget('filament.notifications');
 TldResource::syncCosts($summaryServer->id);
 $notice = collect(session('filament.notifications'))->last();
 $review = collect($notice['actions'])->first();
-verify($review['url'] === TldResource::getUrl('index', ['tableFilters' => ['below_cost' => ['isActive' => true]]]), 'Several renewal losses do not open the below-cost filter.');
+parse_str(parse_url($review['url'], PHP_URL_QUERY) ?? '', $destination);
+verify(($destination['tableFilters']['below_cost']['isActive'] ?? null) === '1', 'Several renewal losses do not activate the below-cost filter.');
+$unaffected = $renewalEnding->fresh()->replicate();
+$unaffected->tld = 'net'; $unaffected->sale_holds = []; $unaffected->save();
+$table = Livewire::test(ListTlds::class)->instance()->getTable();
+$affected = $table->getFilter('below_cost')->apply(Tld::where('server_id', $summaryServer->id), $destination['tableFilters']['below_cost'])
+    ->orderBy('tld')->pluck('tld')->all();
+verify($affected === ['com', 'org'], 'Below-cost filter lost an affected renewal ending.');
 
 // Failed delivery for one message/user must not stop publication or the remaining staff notices.
 $nextCoster = $staffUser('Nextcoster', ['admin.enom.manage', 'admin.enom.costs']);

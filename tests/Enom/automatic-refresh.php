@@ -25,7 +25,7 @@ function automaticProvider(Operation $operation): array {
         $calls[] = $command;
         if ($state['refresh']) {
             verify(DB::transactionLevel() === 0, 'Automatic registrar read ran inside a transaction.');
-            if ($state['fail']) { throw new RuntimeException('Synthetic private transport failure'); }
+            if ($state['fail'] && ($state['fail'] !== 'partial' || $command !== 'GetRegLock')) { throw new RuntimeException('Synthetic private transport failure'); }
         }
         $body = match ($command) {
             'Check' => '<Domains><Domain><Name>'.$name.'</Name><RRPCode>210</RRPCode><IsPremium>false</IsPremium><IsPlatinum>false</IsPlatinum><IsEAP>false</IsEAP></Domain></Domains>',
@@ -98,27 +98,33 @@ foreach (['register', 'transfer'] as $action) {
     $server->settings()->where('key', 'operations_enabled')->update(['value' => true]);
 }
 
-// Use the real database worker for provider non-success, recovered throws and exhausted throws.
+// Use the real database worker for all-failed reads, partial reads and thrown configuration failures.
 $queue = $app['queue']->connection('database');
 $worker = $app['queue.worker'];
-foreach ([0, 1, 3] as $throws) {
+foreach (['all', 'partial', 'recover', 'throws'] as $mode) {
+    $throws = ['all' => 0, 'partial' => 0, 'recover' => 1, 'throws' => 3][$mode];
+    $failures = $mode === 'all' ? 3 : $throws;
     [$domain, $operation] = fixture('transfer');
     [$reader, $calls, $state] = automaticProvider($operation);
     $app->instance(DomainOperations::class, $reader);
     $reader->reconcile($operation->id);
     $audit = $operation->fresh()->getAttributes();
     $beforeMoney = tableRows(['invoices', 'invoice_items', 'invoice_transactions', 'credits']);
-    $calls->exchangeArray([]); $state['refresh'] = true; $state['fail'] = $throws === 0;
+    $calls->exchangeArray([]); $state['refresh'] = true; $state['fail'] = $mode === 'all' ? true : ($mode === 'partial' ? 'partial' : false);
     $token = $server->settings()->where('key', 'token')->value('value');
     $queue->push(refreshJob($operation), '', 'automatic-refresh-test');
-    for ($attempt = 1; $attempt <= ($throws === 3 ? 3 : $throws + 1); $attempt++) {
+    for ($attempt = 1; $attempt <= ($failures === 3 ? 3 : $failures + 1); $attempt++) {
         $server->settings()->where('key', 'token')->update(['value' => $attempt <= $throws ? '' : $token]);
         $queued = $queue->pop('automatic-refresh-test');
         verify($queued !== null && $queued->attempts() === $attempt, 'Queue did not retry the refresh.');
         try { $worker->process('database', $queued, new Illuminate\Queue\WorkerOptions); $error = null; }
         catch (Throwable $error) {}
-        verify(($error !== null) === ($attempt <= $throws), 'Thrown refresh failure did not reach the worker.');
-        if ($attempt <= $throws && $attempt < 3) {
+        verify(($error !== null) === ($attempt <= $failures), 'Unsuccessful refresh did not reach the worker.');
+        if ($mode === 'all') {
+            verify($error instanceof RuntimeException && $error->getMessage() === 'Registrar refresh did not complete any reads.'
+                && $error->getPrevious() === null, 'All-failed refresh exposed provider exception text.');
+        }
+        if ($attempt <= $failures && $attempt < 3) {
             $row = DB::table('jobs')->where('queue', 'automatic-refresh-test')->first();
             $delay = [60, 300][$attempt - 1];
             verify($row && $row->available_at === now()->timestamp + $delay
@@ -130,17 +136,35 @@ foreach ([0, 1, 3] as $throws) {
     $snapshot = $domain->fresh()->snapshot ?? [];
     verify(DB::table('jobs')->where('queue', 'automatic-refresh-test')->count() === 0, 'Completed refresh stayed queued.');
     verify($operation->fresh()->getAttributes() === $audit && tableRows(array_keys($beforeMoney)) === $beforeMoney, 'Refresh changed operation or billing.');
-    if ($throws === 1) {
+    if ($mode === 'partial') {
+        verify($calls->getArrayCopy() === $refreshCommands && $snapshot['read_status']['lock'] === 'success'
+            && $snapshot['read_status']['nameservers'] === 'unknown' && $snapshot['locked'] === true
+            && !isset($domain->fresh()->observation['error']), 'Partial refresh did not complete after one successful read.');
+    } elseif ($mode === 'recover') {
         verify($calls->getArrayCopy() === $refreshCommands && $snapshot['locked'] === true
             && $snapshot['registrar_dns'] === true && count($snapshot['nameservers']) === 2, 'Recovered retry did not store registrar facts.');
     } else {
         verify(($snapshot['locked'] ?? null) === null && empty($snapshot['nameservers'])
             && ($snapshot['registrar_dns'] ?? null) === null, 'Failed read invented known facts.');
-        verify($throws === 0 ? $calls->getArrayCopy() === $refreshCommands && $snapshot['read_status']['lock'] === 'unknown'
-            : count($calls) === 0 && $domain->fresh()->observation['error'] === 'refresh_failed'
-                && $domain->fresh()->observation['status'] === 'stale', 'Provider result retried or three throws lost final observation failure.');
+        verify(($mode === 'all' ? $calls->getArrayCopy() === array_merge(...array_fill(0, 3, $refreshCommands))
+                && $snapshot['read_status']['lock'] === 'unknown' : count($calls) === 0)
+            && ($domain->fresh()->observation['error'] ?? null) === 'refresh_failed'
+            && ($domain->fresh()->observation['status'] ?? null) === 'stale', 'Exhausted refresh did not record final observation failure.');
     }
     $server->settings()->where('key', 'token')->update(['value' => $token]);
+}
+
+// Empty and non-success status vocabularies cannot masquerade as a successful read.
+foreach ([[], ['lock' => 'unsupported'], ['lock' => 'pending'], ['lock' => 'rejected']] as $statuses) {
+    $reader = new class($statuses) extends DomainOperations {
+        public function __construct(private array $statuses) {}
+        public function refreshDomain(int $domainId, ?App\Models\User $actor = null): Paymenter\Extensions\Servers\Enom\Models\Domain {
+            return new Paymenter\Extensions\Servers\Enom\Models\Domain(['snapshot' => ['read_status' => $this->statuses]]);
+        }
+    };
+    $error = null;
+    try { (new RefreshDomain($domain->id))->handle($reader); } catch (RuntimeException $error) {}
+    verify($error !== null, 'Empty or non-success read status completed the refresh.');
 }
 
 // The job is published only by the outermost successful commit; a rollback discards it.

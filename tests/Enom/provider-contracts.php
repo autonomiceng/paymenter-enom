@@ -228,6 +228,10 @@ check(EnomApi::normalize('order', response('GetOrderDetail', xml('GetOrderDetail
 
 $dns = response('GetDNS', xml('GetDNS', '<dns>ns1.example.com</dns><dns>ns2.example.com</dns><UseDNS>default</UseDNS>'));
 check(EnomApi::normalize('nameservers', $dns)['nameservers'] === ['ns1.example.com', 'ns2.example.com'], 'repeated DNS tags retained');
+foreach (['default', 'DeFaUlT', 'ours', 'OuRs', 'custom'] as $useDns) {
+    $read = response('GetDNS', xml('GetDNS', '<dns>ns1.example.com</dns><UseDNS>'.$useDns.'</UseDNS>'));
+    check(EnomApi::normalize('nameservers', $read)['uses_enom_dns'] === ($useDns !== 'custom'), 'UseDNS '.$useDns.' classification');
+}
 $dnsWithAttributes = response('GetDNS', xml('GetDNS', '<dns>ns1.example.com</dns><UseDNS source="provider">default</UseDNS>'));
 check(is_array($dnsWithAttributes->data['usedns']), 'UseDNS with attributes retains its array shape');
 check(EnomApi::normalize('nameservers', $dnsWithAttributes)['uses_enom_dns'] === null, 'array-shaped UseDNS remains unknown');

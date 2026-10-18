@@ -447,7 +447,7 @@ final class EnomApi
                 'grace_eligible' => null];
         } elseif ($kind === 'nameservers') {
             $normalized['nameservers'] = self::list($data['dns'] ?? null);
-            $normalized['uses_enom_dns'] = is_string($data['usedns'] ?? null) ? strtolower($data['usedns']) === 'default' : null;
+            $normalized['uses_enom_dns'] = is_string($data['usedns'] ?? null) ? in_array(strtolower($data['usedns']), ['default', 'ours'], true) : null;
         } elseif ($kind === 'lock') {
             $normalized['locked'] = self::flag($data['reg-lock'] ?? null);
         } elseif ($kind === 'privacy') {
@@ -559,7 +559,7 @@ final class EnomApi
                 $snapshot['contact_roles'] = array_keys(array_filter($normalized['collected'] ?? ['registrant' => true, 'admin' => true, 'tech' => true, 'auxbilling' => true])) ?: ['registrant'];
             }
             if ($kind === 'dnssec') { $snapshot['dnssec_shape_verified'] = $normalized['shape_verified'] ?? false; }
-            // UseDNS=default: the domain points at Enom's own name servers.
+            // UseDNS=default or ours: the domain points at Enom's own name servers.
             if ($kind === 'nameservers') { $snapshot['registrar_dns'] = $normalized['uses_enom_dns'] ?? null; }
             if (in_array($kind, ['contacts', 'nameservers', 'hosts', 'srv', 'dnssec'], true)) { $snapshot[$kind] = $normalized[$kind] ?? []; }
             elseif ($kind === 'lock') { $snapshot['locked'] = $normalized['locked'] ?? null; }

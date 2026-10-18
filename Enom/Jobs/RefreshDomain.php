@@ -22,7 +22,12 @@ class RefreshDomain implements ShouldQueue
     public function backoff(): array { return [60, 300]; }
     public function handle(DomainOperations $operations): void
     {
-        if ($this->eligible()) { $operations->refreshDomain($this->domainId); }
+        if (!$this->eligible()) { return; }
+        $domain = $operations->refreshDomain($this->domainId);
+        // Only an explicit successful read counts; unavailable sections cannot complete the job.
+        if (!in_array('success', $domain->snapshot['read_status'] ?? [], true)) {
+            throw new \RuntimeException('Registrar refresh did not complete any reads.');
+        }
     }
     public function failed(?\Throwable $exception): void
     {
