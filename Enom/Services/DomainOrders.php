@@ -101,7 +101,7 @@ class DomainOrders
     public function renewalOptions(User $user, int $domainId): array
     {
         $domain = Domain::where('user_id', $user->id)->findOrFail($domainId);
-        $max = DomainBilling::maxRenewalYears($domain);
+        $max = $domain->billing_managed ? DomainBilling::maxRenewalYears($domain) : 0;
         $perYear = Pricing::renewalPrice($domain);
         return ['years' => $max > 0 ? range(1, $max) : [], 'price_per_year' => $perYear,
             'totals' => $perYear === null ? [] : array_combine($max > 0 ? range(1, $max) : [], array_map(

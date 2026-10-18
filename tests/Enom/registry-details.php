@@ -45,7 +45,7 @@ $app->instance(DomainOperations::class, $operations);
 $orders = new DomainOrders($operations);
 $client = User::create(['email' => 'nexus@example.invalid', 'password' => 'synthetic']);
 $server = App\Models\Server::create(['name' => 'Registry Enom', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
-foreach (['uid' => 'offline-account', 'token' => 'offline-token', 'operations_enabled' => '1', 'billing_enabled' => '1'] as $key => $value) { $server->settings()->create(['key' => $key, 'value' => $value]); }
+foreach (['uid' => 'offline-account', 'token' => 'offline-token', 'operations_enabled' => '1', 'billing_enabled' => '1', 'transfer_allowlist' => 'com,us'] as $key => $value) { $server->settings()->create(['key' => $key, 'value' => $value]); }
 $fixture = file_get_contents(dirname(__DIR__).'/fixtures/enom-test-api/enom-getextattributes-us.xml');
 $schema = RegistryFields::normalize((new RegistrarClient('uid', 'token', fn () => $fixture, null, true))->execute('GetExtAttributes', ['TLD' => 'us']));
 $us = enomTestTld(['server_id' => $server->id, 'tld' => 'us', 'enabled' => true, 'pricing_mode' => 'fixed', 'register_price' => '9.00', 'renew_price' => '10.00', 'transfer_price' => '9.50',
@@ -112,6 +112,20 @@ $refreshTransport = new DomainOperations(new EnomApi(new RegistrarClient('offlin
     fn () => ['uid' => 'offline-account', 'token' => 'offline-token', 'operations_enabled' => true]);
 $refreshTransport->refreshDomain($domain->id, $client);
 verify(($domain->fresh()->snapshot['registry'] ?? null) === ['us_nexus' => 'C31', 'global_cc_us' => 'GB', 'us_purpose' => 'P1'], 'Refresh dropped the registry details.');
+
+// Transfers send the conditional child value and the EPP code through native checkout and payment.
+$available = false;
+$app->instance(\Paymenter\Extensions\Servers\Enom\Services\Rdap::class,
+    new \Paymenter\Extensions\Servers\Enom\Services\Rdap(fn () => ['status' => 503, 'body' => '']));
+$transfer = enomCartOrder($client, 'nexus-move.us', 'transfer', 1, ['us_nexus' => 'C31', 'global_cc_us' => 'GB', 'us_purpose' => 'P2']);
+app(\Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class)->submitCode($client, $transfer['domain']->id, 'EPP-NEXUS-1');
+ExtensionHelper::addPayment($transfer['invoice']->id, null, amount: (float) $transfer['invoice']->fresh()->total, isCreditTransaction: true);
+$requests = [];
+$transferResult = $operations->execute($transfer['operation']->id);
+$create = array_values(array_filter($requests, fn ($request) => $request[0] === 'TP_CreateOrder'));
+verify(count($create) === 1 && ($create[0][1]['us_nexus'] ?? null) === 'C31' && ($create[0][1]['global_cc_us'] ?? null) === 'GB'
+    && ($create[0][1]['us_purpose'] ?? null) === 'P2' && ($create[0][1]['AuthInfo1'] ?? null) === 'EPP-NEXUS-1',
+    'TP_CreateOrder did not carry the conditional registry details and EPP code: '.$transferResult->state.'/'.$transferResult->safe_code);
 
 echo 'Registry details: '.$checks.' passed; injected provider only; SQLite in memory.'.PHP_EOL;
 $successful = true;

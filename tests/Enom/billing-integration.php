@@ -307,12 +307,12 @@ check($guardClient->execute('GetDomainInfo')->status === 'rejected' && $guardRea
 $beforeTransferInvoices = App\Models\Invoice::count();
 $unregisteredTransferRejected = false;
 try { app(Paymenter\Extensions\Servers\Enom\Services\CartOrdering::class)->checkName($tld,'transfer','unregistered-transfer-demo.com',1); }
-catch (Throwable) { $unregisteredTransferRejected = true; }
+catch (\App\Exceptions\DisplayException $error) { $unregisteredTransferRejected = $error->getMessage() === 'unregistered-transfer-demo.com isn’t registered yet, so there’s nothing to transfer.'; }
 check($unregisteredTransferRejected, 'Unregistered transferable name was quoted.');
 $checkOverrides['ineligible-transfer-demo'] = ['available' => false, 'transferable' => false];
 $ineligibleTransferRejected = false;
 try { app(Paymenter\Extensions\Servers\Enom\Services\CartOrdering::class)->checkName($tld,'transfer','ineligible-transfer-demo.com',1); }
-catch (Throwable) { $ineligibleTransferRejected = true; }
+catch (\App\Exceptions\DisplayException $error) { $ineligibleTransferRejected = $error->getMessage() === 'ineligible-transfer-demo.com can’t be transferred to us.'; }
 check($ineligibleTransferRejected, 'Registered but ineligible transfer name was quoted.');
 // Eligibility may disappear after a valid quote and payment. Never send TP_CreateOrder then.
 $checkOverrides['race-transfer-demo'] = ['available' => false, 'transferable' => true];

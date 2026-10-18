@@ -92,9 +92,13 @@ verify(count($purchase) === 1 && $purchase[0][1]['NumYears'] === 3, 'Purchase di
 verify($done->cost['quote']['amount'] === '26.8500' && $done->cost['quote']['source'] === 'PE_GetProductPrice', 'Exact-term preflight price differs.');
 verify($done->state === 'succeeded' && $done->domain->fresh()->provider_expires_at->format('Y-m-d') === '2029-10-14', 'Purchased term did not confirm: '.$done->safe_code);
 $short = enomCartOrder($client, 'short-term.com', 'register', 3)['invoice'];
-pay($short); $purchaseYears = 1;
+pay($short); $purchaseYears = 1; $requests = [];
 $shortResult = $operations->execute(Operation::where('invoice_id', $short->id)->sole()->id); $purchaseYears = null;
-verify($shortResult->state !== 'succeeded', 'A paid three-year registration confirmed a one-year readback.');
+$shortPurchase = array_values(array_filter($requests, fn ($request) => $request[0] === 'Purchase'));
+verify(count($shortPurchase) === 1 && $shortPurchase[0][1]['NumYears'] === 3,
+    'Short-term readback did not follow exactly one three-year Purchase.');
+verify($shortResult->state === 'uncertain' && $shortResult->safe_code === 'expiry_unconfirmed',
+    'Short-term readback returned '.$shortResult->state.'/'.$shortResult->safe_code.'.');
 $minLater = enomCartOrder($client, 'min-later.com', 'register', 2)['invoice'];
 pay($minLater); $names['min-later.com'] = ['min' => 3]; $requests = [];
 $rejected = $operations->execute(Operation::where('invoice_id', $minLater->id)->sole()->id);
@@ -131,9 +135,80 @@ verify($orders->renew($client, $active->id, null, 2)->id === $renewal->id, 'Same
 $before = tableRows(['invoices', 'invoice_items', 'enom_operations']);
 refuses(fn () => $orders->renew($client, $active->id, null, 3), 'already exists', 'A different term replaced or duplicated the open renewal invoice.');
 verify(tableRows(['invoices', 'invoice_items', 'enom_operations']) == $before, 'Refused renewal term wrote records.');
+// Unmanaged domains cannot enter managed renewal billing.
+$legacyService = Service::create(['user_id' => $client->id, 'product_id' => $product->id, 'plan_id' => $plan->id,
+    'price' => '14.00', 'quantity' => 1, 'currency_code' => 'USD', 'status' => Service::STATUS_ACTIVE]);
+$legacy = Domain::create(['service_id' => $legacyService->id, 'user_id' => $client->id, 'server_id' => $server->id,
+    'domain' => 'legacy-term.com', 'sld' => 'legacy-term', 'tld' => 'com', 'status' => 'active',
+    'provider_expires_at' => '2027-01-01', 'billing_managed' => false, 'capabilities' => ['renew' => true]]);
+$legacyOptions = $orders->renewalOptions($client, $legacy->id);
+verify($legacyOptions === ['years' => [], 'price_per_year' => '14.00', 'totals' => [], 'expires_at' => '2027-01-01',
+    'complimentary' => false, 'open_invoice' => null], 'Unmanaged renewal options differ: '.json_encode($legacyOptions));
+foreach ([1, 2] as $years) {
+    $beforeUnmanaged = tableRows(['invoices', 'invoice_items', 'enom_operations']);
+    refuses(fn () => $orders->renew($client, $legacy->id, null, $years), 'Domain service binding requires review.',
+        'Unmanaged domain accepted a '.$years.'-year renewal.', [RuntimeException::class]);
+    verify(tableRows(array_keys($beforeUnmanaged)) === $beforeUnmanaged, 'Refused unmanaged renewal wrote billing rows.');
+}
 // Staff renew-now honours the same ceiling and term.
 refuses(fn () => $staffDomains->renewNow($funder, $active->id, 8), '10-year', 'Staff renewed past the ceiling.', [InvalidArgumentException::class]);
 verify($staffDomains->renewalYears($active->id) === range(1, 7), 'Staff renewal terms differ.');
+
+// Native cart displays admission errors as notifications rather than field errors.
+// A domain claimed after cart admission must refuse checkout without new obligations.
+$collisionCart = enomCartStart($client);
+enomCartAdd($client, $collisionCart, 'claimed-after-quote.com')->assertHasNoErrors();
+$collisionService = $legacyService->replicate(); $collisionService->user_id = $other->id; $collisionService->save();
+Domain::create(['service_id' => $collisionService->id, 'user_id' => $other->id, 'server_id' => $server->id,
+    'domain' => 'claimed-after-quote.com', 'sld' => 'claimed-after-quote', 'tld' => 'com', 'status' => 'active']);
+$beforeCollision = tableRows(['services', 'orders', 'invoices', 'invoice_items', 'enom_operations', 'enom_domains']);
+$collisionCheckout = enomCartCheckout($client, $collisionCart);
+verify(($collisionCheckout->effects['dispatches'] ?? []) === [['name' => 'notify', 'params' => [[
+    'message' => 'claimed-after-quote.com already has an order.', 'type' => 'error']]]],
+    'Claimed domain did not return the expected native checkout error.');
+verify(tableRows(array_keys($beforeCollision)) === $beforeCollision, 'Claimed domain checkout left new billing rows.');
+
+// Defer only the synchronous binding callback, leaving the native cart to create the service and line.
+$app->instance(DomainOperations::class, new class(new EnomApi(new RegistrarClient('offline-account', 'offline-token', $transport)),
+    fn () => ['uid' => 'offline-account', 'token' => 'offline-token', 'operations_enabled' => true]) extends DomainOperations {
+    public function bindInvoiceItem(App\Models\InvoiceItem $item): ?Operation { return null; }
+});
+$bindingCart = enomCartStart($client);
+enomCartAdd($client, $bindingCart, 'binding-race.com')->assertHasNoErrors();
+enomCartCheckout($client, $bindingCart)->assertHasNoErrors();
+$app->instance(DomainOperations::class, $operations);
+$bindingInvoice = Invoice::where('user_id', $client->id)->latest('id')->firstOrFail();
+$bindingItem = $bindingInvoice->items()->sole();
+$bindingFailure = true;
+Operation::creating(function (Operation $operation) use ($bindingItem, &$bindingFailure): void {
+    if ($operation->operation_key === 'invoice-item:'.$bindingItem->id && $bindingFailure) {
+        throw new RuntimeException('Synthetic binding storage failure');
+    }
+});
+$beforeBinding = tableRows(['services', 'orders', 'invoices', 'invoice_items', 'enom_domains', 'enom_operations']);
+refuses(fn () => $operations->bindInvoiceItem($bindingItem), 'Synthetic binding storage failure',
+    'Unexpected binding storage failure was hidden.', [RuntimeException::class]);
+verify(tableRows(array_keys($beforeBinding)) === $beforeBinding, 'Failed binding left domain or billing rows.');
+$bindingFailure = false;
+// Native binders lock product, ending and service before inserting the unique operation key.
+// Complete the winner after the loser's unlocked domain lookup, before it enters those locks.
+$race = true;
+$winner = null;
+Illuminate\Support\Facades\DB::listen(function ($query) use (&$race, &$winner, $operations, $bindingItem): void {
+    if (!$race || !str_contains($query->sql, 'from "enom_domains"') || !str_contains($query->sql, '"service_id" = ?')
+        || $query->bindings !== [$bindingItem->reference_id]) { return; }
+    $race = false;
+    $winner = $operations->bindInvoiceItem($bindingItem->fresh());
+});
+$bound = $operations->bindInvoiceItem($bindingItem);
+verify(!$race && $winner !== null && $bound !== null && $bound->id === $winner->id
+    && $bound->operation_key === 'invoice-item:'.$bindingItem->id
+    && Operation::where('operation_key', $bound->operation_key)->count() === 1
+    && Domain::where('service_id', $bindingItem->reference_id)->count() === 1,
+    'Serialized native binding lost or duplicated the winning domain or operation.');
+$beforeReplay = tableRows(array_keys($beforeBinding));
+verify($operations->bindInvoiceItem($bindingItem->fresh())->id === $bound->id
+    && tableRows(array_keys($beforeReplay)) === $beforeReplay, 'Binding replay changed the winner or wrote duplicate rows.');
 
 echo 'Registrar terms: '.$checks.' passed; exact-term registration and renewal proofs; SQLite.'.PHP_EOL;
 $successful = true;

@@ -492,8 +492,14 @@ foreach (['before_claim', 'during_check'] as $phase) {
         }
         $result = $operations->execute($initial->id);
         $during = null;
-        checkExecution(in_array($result->state, ['held', 'rejected'], true) && $writes === [] && $result->domain->service->status === $status,
-            'Initial '.$status.' lifecycle sent '.$action.' during '.$phase.'.');
+        [$expectedState, $expectedCode] = match ([$phase, $status]) {
+            ['before_claim', Service::STATUS_CANCELLED] => ['rejected', 'initial_cancelled_payment_review'],
+            ['before_claim', Service::STATUS_SUSPENDED] => ['held', 'funding_or_preference_invalid'],
+            default => ['held', 'dispatch_authority_changed'],
+        };
+        checkExecution($result->state === $expectedState && $result->safe_code === $expectedCode
+            && $writes === [] && $result->domain->service->status === $status,
+            'Initial '.$status.' lifecycle during '.$action.'/'.$phase.' returned '.$result->state.'/'.$result->safe_code.'.');
         checkExecution($phase !== 'before_claim' || $calls === [], 'Initial invalid lifecycle caused provider reads before claim.');
         checkExecution($before === executionNativeMoney() && $result->domain->provider_expires_at === null,
             'Initial lifecycle refusal changed native finance or confirmed registrar expiry.');

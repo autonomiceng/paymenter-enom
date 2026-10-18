@@ -186,6 +186,19 @@ verify(str_contains($dnsPage, 'id="dns"') && str_contains($dnsPage, '/domains/'.
 accessible($dnsPage, 'Active domain with DNS tools');
 serverSetting('dns_tools', '0');
 
+// An unmanaged domain can advertise registrar renewal capability but offers no billable terms.
+$unmanaged = clientDomain($owner, ['domain' => 'unmanaged-renewal.com', 'billing_managed' => false]);
+$unmanagedPage = ok('/domains/'.$unmanaged->id, $owner);
+$unmanagedDom = enomDocument($unmanagedPage);
+verify($unmanaged->capabilities['renew'] === true && $unmanagedDom->query('//form[@action="http://enom-tests.invalid/domains/'.$unmanaged->id.'/renew"]')->length === 0
+    && $unmanagedDom->query('//*[@name="years"]')->length === 0, 'Unmanaged domain page offers a renewal form or term choices.');
+verify($unmanagedDom->query('//section[@aria-labelledby="enom-renew-heading"]')->length === 0
+    && !str_contains(text($unmanagedPage), 'already renewed as far ahead'), 'Unmanaged domain page claims a registry ceiling.');
+$ceiling = clientDomain($owner, ['domain' => 'managed-ceiling.com', 'provider_expires_at' => now()->addYearsNoOverflow(10)->toDateString()]);
+$ceilingPage = ok('/domains/'.$ceiling->id, $owner);
+verify(enomDocument($ceilingPage)->query('//section[@aria-labelledby="enom-renew-heading"]')->length === 1
+    && str_contains(text($ceilingPage), 'already renewed as far ahead'), 'Managed domain lost its registry ceiling explanation.');
+
 // ---------------------------------------------------------------- transfer-code cooldown
 Operation::create(['domain_id' => $active->id, 'service_id' => $active->service_id, 'operation_key' => 'view-epp', 'action' => 'epp_email', 'state' => 'succeeded', 'currency' => 'USD', 'term' => 1, 'amount' => '0.00', 'payload' => [], 'created_at' => now()->subMinutes(3)]);
 $cooldown = ok('/domains/'.$active->id, $owner);

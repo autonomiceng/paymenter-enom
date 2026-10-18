@@ -257,7 +257,7 @@
                 @if ($showPrivacy)<div class="enom-fact"><dt>ID Protect</dt><dd>{{ $privacy['enabled'] === true ? 'On' : 'Off' }}</dd></div>@endif
                 <div class="enom-fact"><dt>Nameservers</dt><dd>{{ !$current ? 'Unknown' : ($registrarDns ? 'Registrar default' : ($usingDefault ? 'Default' : 'Custom')) }}<small>{{ implode(', ', array_slice($current, 0, 2)) }}{{ count($current) > 2 ? ' +'.(count($current) - 2) : '' }}</small></dd></div>
             </dl>
-            @if ($renewOn && !$free && $can('renew'))
+            @if ($domain->billing_managed && $renewOn && !$free && $can('renew'))
                 <section class="enom-section" aria-labelledby="enom-renew-heading" style="border-top:0">
                     <div class="enom-section__head" style="margin-bottom:0;align-items:center">
                         <div><h2 id="enom-renew-heading" class="enom-h2">Renew now</h2>
