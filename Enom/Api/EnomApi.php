@@ -45,7 +45,6 @@ final class EnomApi
     }
 
     public function tldList(): RegistrarResult { return $this->client->execute('GetTLDList'); }
-    public function domainPricing(): RegistrarResult { return $this->client->execute('PE_GetDomainPricing', ['Years' => 1]); }
     public function productPrice(string $tld, string $action, int $years = 1): RegistrarResult
     {
         $tld = strtolower($tld);
@@ -85,13 +84,7 @@ final class EnomApi
     }
 
     public function emailTransferCode(string $domain): RegistrarResult { return $this->call('SynchAuthInfo', $domain, ['EmailEPP' => 'True', 'RunSynchAutoInfo' => 'True']); }
-    public function resendTransferApproval(string $domain): RegistrarResult { return $this->call('TP_ResendEmail', $domain); }
-
     public function balance(): RegistrarResult { return $this->client->execute('GetBalance'); }
-    public function tldDetails(): RegistrarResult { return $this->client->execute('GetTLDDetails', ['TLD' => 'com']); }
-    public function extendedAttributes(): RegistrarResult { return $this->client->execute('GetExtAttributes', ['TLD' => 'com']); }
-    public function transferTldInfo(): RegistrarResult { return $this->client->execute('TP_GetTLDInfo', ['TLD' => 'com']); }
-
     private function call(string $command, string $domain, array $parameters = []): RegistrarResult
     {
         $parts = $this->parse($domain);
@@ -100,7 +93,6 @@ final class EnomApi
 
     public function search(string $domain): RegistrarResult { return $this->call('Check', $domain, ['Version' => 2, 'IncludePrice' => 1, 'IncludeProperties' => 1, 'IncludeEAP' => 1]); }
     public function info(string $domain): RegistrarResult { return $this->call('GetDomainInfo', $domain); }
-    public function registrationStatus(string $domain): RegistrarResult { return $this->call('GetRegistrationStatus', $domain); }
     public function expiry(string $domain): RegistrarResult { return $this->call('GetDomainExp', $domain); }
     public function renewalInfo(string $domain): RegistrarResult { return $this->call('GetExtendInfo', $domain); }
     public function contacts(string $domain): RegistrarResult { return $this->call('GetContacts', $domain); }
@@ -111,8 +103,6 @@ final class EnomApi
     public function hosts(string $domain): RegistrarResult { return $this->call('GetHosts', $domain); }
     public function srv(string $domain): RegistrarResult { return $this->call('GetDomainSRVHosts', $domain); }
     public function dnssec(string $domain): RegistrarResult { return $this->call('GetDnsSec', $domain); }
-    public function transferStatus(string $domain): RegistrarResult { return $this->call('TP_GetDetailsByDomain', $domain); }
-
     public function orders(string $begin, string $end, int $start = 1): RegistrarResult
     {
         foreach ([$begin, $end] as $date) {
@@ -166,13 +156,6 @@ final class EnomApi
     public function renew(string $domain, int $years = 1): RegistrarResult
     {
         return $this->call('Extend', $domain, ['NumYears' => $this->term($years), 'UseCreditCard' => 'no']);
-    }
-
-    /** Parse existing registrations without the new-order catalogue restriction. */
-    public function existingRenew(string $domain, int $years = 1): RegistrarResult
-    {
-        $parts = $this->parse($domain);
-        return $this->client->execute('Extend', ['SLD' => $parts['sld'], 'TLD' => $parts['tld'], 'NumYears' => $this->term($years), 'UseCreditCard' => 'no']);
     }
 
     public function expiredDomains(): RegistrarResult { return $this->client->execute('GetExpiredDomains'); }

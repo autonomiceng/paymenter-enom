@@ -12,36 +12,36 @@ final class RegistrarClient
     ];
     private const BODY_LIMIT = 1048576;
     /** Catalogue reads list every ending Enom sells and need more room than per-domain commands. */
-    private const CATALOGUE_COMMANDS = ['gettldlist', 'pe_getdomainpricing'];
+    private const CATALOGUE_COMMANDS = ['gettldlist'];
     private const CATALOGUE_BODY_LIMIT = 8388608;
     private const COMMANDS = [
         'check', 'gettlddetails', 'getextattributes', 'getbalance', 'getdomaininfo',
-        'getregistrationstatus', 'getdomainexp', 'getextendinfo', 'purchase', 'extend',
-        'getorderlist', 'getorderdetail', 'queue_getorders', 'queue_getorderdetail',
-        'tp_createorder', 'tp_submitorder', 'tp_updateorderdetail', 'tp_getorderstatuses',
-        'tp_getorder', 'tp_getorderdetail', 'tp_getdetailsbydomain', 'tp_getordersbydomain',
-        'tp_gettldinfo', 'getcontacts', 'contacts', 'getdns', 'modifyns', 'getreglock',
+        'getdomainexp', 'getextendinfo', 'purchase', 'extend',
+        'getorderlist', 'getorderdetail',
+        'tp_createorder',
+        'tp_getorder', 'tp_getorderdetail',
+        'getcontacts', 'contacts', 'getdns', 'modifyns', 'getreglock',
         'setreglock', 'synchauthinfo', 'getwppsinfo', 'purchaseservices', 'renewservices',
         'enableservices', 'disableservices', 'getrenew', 'setrenew', 'gethosts', 'sethosts',
         'getdomainsrvhosts', 'setdomainsrvhosts', 'getdnssec', 'adddnssec', 'deletednssec',
-        'getexpireddomains', 'updateexpireddomains', 'gettldlist', 'pe_getdomainpricing', 'pe_getproductprice', 'pe_getresellerprice',
-        'tp_resendemail', 'checknsstatus', 'registernameserver', 'updatenameserver', 'deletenameserver',
+        'getexpireddomains', 'updateexpireddomains', 'gettldlist', 'pe_getproductprice',
+        'checknsstatus', 'registernameserver', 'updatenameserver', 'deletenameserver',
     ];
     private const WRITES = [
-        'purchase', 'extend', 'tp_createorder', 'tp_submitorder', 'tp_updateorderdetail',
+        'purchase', 'extend', 'tp_createorder',
         'contacts', 'modifyns', 'setreglock', 'synchauthinfo', 'purchaseservices',
         'renewservices', 'enableservices', 'disableservices', 'setrenew', 'sethosts',
-        'setdomainsrvhosts', 'adddnssec', 'deletednssec', 'updateexpireddomains', 'tp_resendemail',
+        'setdomainsrvhosts', 'adddnssec', 'deletednssec', 'updateexpireddomains',
         'registernameserver', 'updatenameserver', 'deletenameserver',
     ];
     private const READS = [
         'check', 'gettlddetails', 'getextattributes', 'getbalance', 'getdomaininfo',
-        'getregistrationstatus', 'getdomainexp', 'getextendinfo', 'getorderlist', 'getorderdetail',
-        'queue_getorders', 'queue_getorderdetail', 'tp_getorderstatuses', 'tp_getorder',
-        'tp_getorderdetail', 'tp_getdetailsbydomain', 'tp_getordersbydomain', 'tp_gettldinfo',
+        'getdomainexp', 'getextendinfo', 'getorderlist', 'getorderdetail',
+        'tp_getorder',
+        'tp_getorderdetail',
         'getcontacts', 'getdns', 'getreglock', 'getwppsinfo', 'getrenew', 'gethosts',
-        'getdomainsrvhosts', 'getdnssec', 'getexpireddomains', 'gettldlist', 'pe_getdomainpricing',
-        'pe_getresellerprice', 'pe_getproductprice', 'checknsstatus',
+        'getdomainsrvhosts', 'getdnssec', 'getexpireddomains', 'gettldlist',
+        'pe_getproductprice', 'checknsstatus',
     ];
 
     public function __construct(private string $uid, private string $token, private $transport = null, private $guard = null, private bool $readOnly = false, private string $environment = 'test')
@@ -239,15 +239,8 @@ final class RegistrarClient
                 && strtolower((string) ($reactivation['status'] ?? '')) === 'true'
                 && $this->id($reactivation['orderid'] ?? null) ? 'pending' : 'unknown', $result->code, $data);
         }
-        if (in_array($command, ['tp_createorder', 'tp_submitorder'], true)) {
-            return new RegistrarResult($command === 'tp_submitorder' || $this->id($data['transferorderid'] ?? null) ? 'pending' : 'unknown', $result->code, $data);
-        }
-        if ($command === 'getregistrationstatus') {
-            $registration = strtolower((string) ($data['registrationstatus'] ?? ''));
-            $purchase = strtolower((string) ($data['purchasestatus'] ?? ''));
-            // The sandbox omits PurchaseStatus on a confirmed registration. This getter
-            // confirms registration only; financial reconciliation still requires its bound order.
-            return new RegistrarResult($registration === 'registered' && ($purchase === 'paid' || !array_key_exists('purchasestatus', $data)) ? 'success' : ($registration === 'processing' || $purchase === 'processing' ? 'pending' : 'unknown'), $result->code, $data);
+        if ($command === 'tp_createorder') {
+            return new RegistrarResult($this->id($data['transferorderid'] ?? null) ? 'pending' : 'unknown', $result->code, $data);
         }
         if ($command === 'getdomainexp' && !$result->confirmedExpiry()) {
             return new RegistrarResult('unknown', 'invalid_expiry', $data);

@@ -34,10 +34,6 @@ use Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard;
 use Paymenter\Extensions\Servers\Enom\Services\TransferOrders;
 use Throwable;
 
-use Filament\Schemas\Components\Grid;
-
-use Filament\Tables\Filters\SelectFilter;
-
 class TldResource extends Resource
 {
     protected static ?string $model = Tld::class;
@@ -136,18 +132,6 @@ class TldResource extends Resource
         if ($enabled && $action !== 'renew' && !$record->orderable($action)) { throw new \InvalidArgumentException($record->sale_holds[$action] ?? 'No sale price is available.'); }
     }
 
-    private static function priceColumn(string $action, string $label, bool $costs): TextColumn
-    {
-        return TextColumn::make($action.'_price')
-            ->label($label)
-            ->formatStateUsing(fn ($state) => Labels::money($state))
-            ->description(fn (Tld $record) => $costs && $record->cost($action) !== null ? 'Cost '.Labels::money($record->cost($action)) : null)
-            ->color(fn (Tld $record) => self::below($record, $action) ? 'danger' : null)
-            ->placeholder('Not set')
-            ->alignEnd()
-            ->sortable();
-    }
-
     public static function termRange(Tld $record): string
     {
         $terms = $record->terms();
@@ -202,138 +186,6 @@ class TldResource extends Resource
         return $fields;
     }
 
-    private static function orderRules(Tld $record): string
-    {
-        $terms = self::terms($record);
-        $min = $terms[0];
-        $max = $terms[count($terms) - 1];
-        $line = $min === $max ? 'Registers for '.$min.' year'.($min === 1 ? '' : 's').' only.'
-            : 'Registers for '.$min.' to '.$max.' years.';
-        $needs = self::registryNeeds($record);
-        return $line.($needs ? ' The order form asks for: '.implode(', ', $needs).'.' : '');
-    }
-
-    private static function hasRegistryColumn(): bool
-    {
-        try { return self::$registryColumn ??= \Illuminate\Support\Facades\Schema::hasColumn('enom_tlds', 'registry_fields'); }
-        catch (Throwable) { return false; }
-    }
-
-    private static function modeSummary(Tld $record): string
-    {
-        $markup = is_numeric($record->markup) ? (float) $record->markup : 0.0;
-        // Markup plus retail price reveals cost, so its size needs the costs permission.
-        if (!Staff::can(Staff::COSTS)) { return $record->pricing_mode === 'fixed' ? 'Fixed' : 'Markup'; }
-        return match ($record->pricing_mode) {
-            'markup_percent' => rtrim(rtrim(number_format($markup, 2, '.', ''), '0'), '.').'% markup',
-            'markup_amount' => Labels::money($markup).' markup',
-            'fixed' => 'Fixed',
-            default => '—',
-        };
-    }
-
-    private static function below(Tld $record, string $action): bool
-    {
-        if (!Staff::can(Staff::COSTS)) { return false; }
-        $price = $record->price($action);
-        $cost = $record->cost($action);
-        return $price !== null && $cost !== null && (float) $price < (float) $cost;
-    }
-
-    private static function belowCost(Tld $record): bool
-    {
-        foreach (Tld::ACTIONS as $action) {
-            if (self::below($record, $action)) { return true; }
-        }
-        return false;
-    }
-
-    private static function renewalMargin(Tld $record): ?string
-    {
-        $price = $record->price('renew');
-        $cost = $record->cost('renew');
-        if ($price === null || $cost === null) { return null; }
-        return Labels::money(round((float) $price - (float) $cost, 2));
-    }
-
-    private static function setEnabled(Tld $record, bool $state): bool
-    {
-        Staff::require();
-        if (!$state) {
-            $record->update(['enabled' => false]);
-            \Filament\Notifications\Notification::make()->title('.'.$record->tld.' is no longer for sale.')->body('Existing domains still renew.')->success()->send();
-            return false;
-        }
-        $ok = Staff::attempt(fn () => app(Catalogue::class)->enable($record), '.'.$record->tld.' is now for sale.', 'Could not check .'.$record->tld.' with Enom. Try again.');
-        return $ok ? true : (bool) $record->fresh()?->enabled;
-    }
-
-    private static function bulkEnable(Collection $records): void
-    {
-        Staff::require();
-        $catalogue = app(Catalogue::class);
-        $enabled = 0;
-        $problems = [];
-        foreach ($records as $tld) {
-            if ($tld->enabled) { $enabled++; continue; }
-            try { $catalogue->enable($tld); $enabled++; }
-            catch (\InvalidArgumentException|\RuntimeException $exception) { $problems[] = $exception->getMessage(); }
-            catch (Throwable $exception) { report($exception); $problems[] = 'Could not check .'.$tld->tld.' with Enom.'; }
-        }
-        $notification = \Filament\Notifications\Notification::make()->title($enabled.' of '.$records->count().' TLDs for sale.');
-        if ($problems) {
-            $notification->body(implode(' ', array_slice($problems, 0, 3)).(count($problems) > 3 ? ' And '.(count($problems) - 3).' more.' : ''))->warning()->persistent();
-        } else {
-            $notification->success();
-        }
-        $notification->send();
-    }
-
-    private static function fixedInputs(bool $conditional = false): array
-    {
-        $inputs = [];
-        foreach (['register' => 'Register', 'renew' => 'Renew', 'transfer' => 'Transfer'] as $action => $label) {
-            $input = TextInput::make($action.'_price')->label($label)->prefix('$')->numeric()->minValue(0.01)->maxValue(100000)->live(onBlur: true);
-            if ($conditional) {
-                $input->required(fn (Get $get) => $get('pricing_mode') === 'fixed')->visible(fn (Get $get) => $get('pricing_mode') === 'fixed');
-            } else {
-                $input->required();
-            }
-            $inputs[] = $input;
-        }
-        return $inputs;
-    }
-
-    private static function priceForm(Tld $record): array
-    {
-        return [
-            Radio::make('pricing_mode')
-                ->label('How to price')
-                ->options(self::MODE_LABELS)
-                ->descriptions([
-                    'markup_percent' => 'Enom cost plus a percentage. Follows cost changes.',
-                    'markup_amount' => 'Enom cost plus a fixed amount. Follows cost changes.',
-                    'fixed' => 'Your own prices. Cost changes don\'t affect them.',
-                ])
-                ->required()
-                ->live(),
-            TextInput::make('markup')
-                ->label('Markup')
-                ->numeric()
-                ->minValue(0)
-                ->maxValue(100000)
-                ->live(onBlur: true)
-                ->suffix(fn (Get $get) => $get('pricing_mode') === 'markup_percent' ? '%' : null)
-                ->prefix(fn (Get $get) => $get('pricing_mode') === 'markup_amount' ? '$' : null)
-                ->required(fn (Get $get) => $get('pricing_mode') !== 'fixed')
-                ->visible(fn (Get $get) => $get('pricing_mode') !== 'fixed'),
-            Grid::make(3)->schema(self::fixedInputs(conditional: true)),
-            Text::make(fn (Get $get) => self::preview($record, $get))->visible(fn (Get $get) => $get('pricing_mode') !== 'fixed' && Staff::can(Staff::COSTS)),
-            Text::make(fn (Get $get) => self::costLine($record))->visible(fn () => Staff::can(Staff::COSTS))->color('gray'),
-            Text::make(self::orderRules($record))->color('gray'),
-        ];
-    }
-
     public static function preview(Tld $tld, array $rule): HtmlString
     {
         Staff::require(Staff::COSTS);
@@ -362,15 +214,6 @@ class TldResource extends Resource
             }
         }
         return new HtmlString($html.'</tbody></table></div>');
-    }
-
-    private static function costLine(Tld $record): string
-    {
-        $parts = [];
-        foreach (['register' => 'register', 'renew' => 'renew', 'transfer' => 'transfer'] as $action => $label) {
-            $parts[] = $label.' '.(Labels::money($record->cost($action)) ?? 'unknown');
-        }
-        return 'Enom cost: '.implode(', ', $parts).'.';
     }
 
     public static function applyPricing(Tld $tld, array $data): void
@@ -411,15 +254,6 @@ class TldResource extends Resource
      * The registry fields an order for this ending asks for (for example .us nexus), from the stored schema.
      * @return list<array{name: string, label: string, required: bool, parent: ?string, options: array}>
      */
-    private static function terms(Tld $record): array
-    {
-        if (method_exists($record, 'terms')) {
-            try { $terms = $record->terms(); if ($terms) { return array_values($terms); } } catch (Throwable) {}
-        }
-        $min = max(1, min(10, (int) ($record->getAttribute('min_years') ?: 1)));
-        return range($min, max($min, min(10, (int) ($record->getAttribute('max_years') ?: 10))));
-    }
-
     public static function registryFields(Tld $record): array
     {
         try {

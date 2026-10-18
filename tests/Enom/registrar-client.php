@@ -51,7 +51,7 @@ check(client(xml('SynchAuthInfo', '<EPPEmailMessage>  </EPPEmailMessage>'))->exe
 check(client(xml('SynchAuthInfo', '<RRPCode>200</RRPCode>'))->execute('SynchAuthInfo', ['SLD' => 'example', 'TLD' => 'com', 'EmailEPP' => 'True'])->code === 'sync_unconfirmed', 'Acknowledgement without a message was success.');
 check(client(xml('SynchAuthInfo', '<InfoSynched>True</InfoSynched><RRPCode>200</RRPCode>'))->execute('SynchAuthInfo', ['SLD' => 'example', 'TLD' => 'com', 'EmailEPP' => 'False'])->status === 'success', 'Plain synchronization stopped parsing.');
 $blocked = new RegistrarClient('u', 't', fn () => throw new RuntimeException('must not run'));
-foreach (['Purchase', 'Contacts', 'TP_CreateOrder', 'GetDomainInfo', 'TP_ResendEmail'] as $command) {
+foreach (['Purchase', 'Contacts', 'TP_CreateOrder', 'GetDomainInfo', 'SetRegLock'] as $command) {
     foreach (['True', 'False'] as $value) {
         rejects(fn () => $blocked->execute($command, ['SLD' => 'example', 'TLD' => 'com', 'EmailEPP' => $value]), 'EmailEPP='.$value.' accepted on '.$command);
     }
@@ -59,25 +59,25 @@ foreach (['Purchase', 'Contacts', 'TP_CreateOrder', 'GetDomainInfo', 'TP_ResendE
 rejects(fn () => $blocked->execute('SynchAuthInfo', ['SLD' => 'example', 'TLD' => 'com', 'emailepp' => 'True', 'EmailEPP' => 'True']), 'Duplicate EmailEPP spellings accepted.');
 check((new RegistrarClient('u', 't', fn () => xml('SynchAuthInfo', $message), null, true))->execute('SynchAuthInfo', ['EmailEPP' => 'True'])->code === 'read_only', 'Read-only client sent a transfer-code email.');
 
-// Catalogue reads list hundreds of endings: larger body and node limits apply to GetTLDList/PE_GetDomainPricing only.
+// Catalogue reads list hundreds of endings: larger body and node limits apply to GetTLDList only.
 $entries = 30000; // 60,001 elements: over the per-domain node limit, under the catalogue limit.
 $tldList = xml('GetTLDList', '<tldlist>'.str_repeat('<tld><tld>com</tld></tld>', $entries).'<tldcount>'.$entries.'</tldcount></tldlist>');
 check(strlen($tldList) < 1048576, 'Node-limit fixture unexpectedly exceeds the body limit.');
 check(client($tldList)->execute('GetTLDList')->status === 'success', 'Catalogue list over the per-domain node limit was refused.');
 check(client(str_replace('GETTLDLIST', 'GETBALANCE', $tldList))->execute('GetBalance')->code === 'invalid_response', 'Per-domain command accepted a catalogue-sized node count.');
-$product = '<product><tld>com</tld><resellerpricereg>8.95</resellerpricereg><registerenabled>True</registerenabled><resellerpricerenew>8.95</resellerpricerenew><renewenabled>True</renewenabled><resellerpricetran>9.50</resellerpricetran><transferenabled>True</transferenabled><padding>'.str_repeat('x', 200).'</padding></product>';
-$pricing = xml('PE_GetDomainPricing', '<pricestructure>'.str_repeat($product, 6000).'</pricestructure>');
+$pricing = xml('PE_GetProductPrice', '<productprice><padding>'.str_repeat('x', 1500000).'</padding></productprice>');
 check(strlen($pricing) > 1048576 && strlen($pricing) < 8388608, 'Pricing fixture is not between the two body limits.');
-check(client($pricing)->execute('PE_GetDomainPricing', ['Years' => 1])->status === 'success', 'Catalogue pricing over 1 MiB was refused.');
-check(client(str_replace('PE_GETDOMAINPRICING', 'GETBALANCE', $pricing))->execute('GetBalance')->code === 'invalid_response', 'Per-domain command accepted a body over 1 MiB.');
+check(client($pricing)->execute('PE_GetProductPrice', ['Years' => 1])->code === 'invalid_response', 'Per-term pricing over 1 MiB was accepted.');
+check(client(str_replace('PE_GETPRODUCTPRICE', 'GETBALANCE', $pricing))->execute('GetBalance')->code === 'invalid_response', 'Per-domain command accepted a body over 1 MiB.');
 $oversized = xml('GetTLDList', '<tldlist><padding>'.str_repeat('x', 8388608).'</padding></tldlist>');
 check(client($oversized)->execute('GetTLDList')->code === 'invalid_response', 'Catalogue body over 8 MiB was accepted.');
 check(client(xml('GetTLDList', '<!DOCTYPE x [<!ENTITY a "b">]><tldlist/>'))->execute('GetTLDList')->code === 'invalid_response', 'Catalogue response with a DTD was accepted.');
 // Catalogue commands are reads; a read-only client may send them, and they carry no domain.
 $readOnly = new RegistrarClient('u', 't', fn ($command) => xml($command), null, true);
-foreach (['GetTLDList', 'PE_GetDomainPricing', 'GetExtAttributes', 'GetTLDDetails', 'GetBalance'] as $command) {
+foreach (['GetTLDList', 'PE_GetProductPrice', 'GetExtAttributes', 'GetTLDDetails', 'GetBalance'] as $command) {
     check($readOnly->execute($command)->code !== 'read_only', $command.' was treated as a write.');
 }
-check($readOnly->execute('TP_ResendEmail')->code === 'read_only', 'TP_ResendEmail was treated as a read.');
+check($readOnly->execute('SetRegLock')->code === 'read_only', 'SetRegLock was treated as a read.');
+
 
 echo 'Registrar client: '.$checks.' checks passed (offline).'.PHP_EOL;

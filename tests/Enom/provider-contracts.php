@@ -182,7 +182,7 @@ check(end($requests)[1]['Target1'] === 'sip.example.com.' && end($requests)[1]['
 $ds = ['algorithm' => 13, 'digest_type' => 2, 'key_tag' => 1234, 'digest' => str_repeat('AB', 32)];
 $api->addDnssec('demo.com', $ds); $added = end($requests)[1];
 $api->deleteDnssec('demo.com', $ds); check(end($requests)[1] === $added, 'delete DS exact matching tuple');
-foreach ([fn () => $api->register('demo.com', $contact, [], 0), fn () => $api->register('demo.com', $contact, [], 11), fn () => $api->renew('demo.com', 11), fn () => $api->existingRenew('demo.com', 0), fn () => $api->register('xn--bcher-kva.com', $contact), fn () => $api->updateContact('demo.com', 'billing', $contact), fn () => $api->updateContact('demo.com', 'registrant', ['first_name' => 'Only']), fn () => $api->setNameservers('demo.com', ['ns1.example.com']), fn () => $api->setHosts('demo.com', []), fn () => $api->setHosts('demo.com', [['name' => '@', 'type' => 'A', 'address' => 'bad']]), fn () => $api->setHosts('demo.com', [['name' => '@', 'type' => 'MX', 'address' => 'mail.example.com']]), fn () => $api->addDnssec('demo.com', ['algorithm' => 13, 'digest_type' => 2, 'key_tag' => 1234, 'digest' => 'BAD']), fn () => $api->orders('10/12/2026', '10/12/2027')] as $invalid) {
+foreach ([fn () => $api->register('demo.com', $contact, [], 0), fn () => $api->register('demo.com', $contact, [], 11), fn () => $api->renew('demo.com', 11), fn () => $api->register('xn--bcher-kva.com', $contact), fn () => $api->updateContact('demo.com', 'billing', $contact), fn () => $api->updateContact('demo.com', 'registrant', ['first_name' => 'Only']), fn () => $api->setNameservers('demo.com', ['ns1.example.com']), fn () => $api->setHosts('demo.com', []), fn () => $api->setHosts('demo.com', [['name' => '@', 'type' => 'A', 'address' => 'bad']]), fn () => $api->setHosts('demo.com', [['name' => '@', 'type' => 'MX', 'address' => 'mail.example.com']]), fn () => $api->addDnssec('demo.com', ['algorithm' => 13, 'digest_type' => 2, 'key_tag' => 1234, 'digest' => 'BAD']), fn () => $api->orders('10/12/2026', '10/12/2027')] as $invalid) {
     $before = count($requests); rejects($invalid, 'invalid facade request'); check(count($requests) === $before, 'invalid request makes no transport call');
 }
 
@@ -190,7 +190,6 @@ foreach ([fn () => $api->register('demo.com', $contact, [], 0), fn () => $api->r
 foreach ([1, 3, 10] as $years) {
     $api->register('demo.com', ['registrant' => $contact], [], $years); check(end($requests)[0] === 'Purchase' && end($requests)[1]['NumYears'] === $years, 'Purchase NumYears '.$years);
     $api->renew('demo.com', $years); check(end($requests)[0] === 'Extend' && end($requests)[1]['NumYears'] === $years, 'Extend NumYears '.$years);
-    $api->existingRenew('demo.com', $years); check(end($requests)[1]['NumYears'] === $years, 'existing Extend NumYears '.$years);
 }
 // Registry details travel as name=value parameters on Purchase and TP_CreateOrder, after the ordinary parameters.
 $api->register('demo.com', ['registrant' => $contact], [], 2, ['us_nexus' => 'C31', 'global_cc_us' => 'GB', 'us_purpose' => 'P1']);
@@ -308,12 +307,6 @@ $observedOrderNormalized = EnomApi::normalize('order', $observedOrder);
 check($observedOrder->status === 'success' && $observedOrderNormalized['completed'] === true
     && $observedOrderNormalized['provider_order_id'] === '12345' && $observedOrderNormalized['domain'] === 'demo.com'
     && $observedOrderNormalized['term'] === 1, 'actual numeric order header preserves Closed successful detail identity');
-$registered = response('GetRegistrationStatus', xml('GETREGISTRATIONSTATUS', '<RegistrationStatus>Registered</RegistrationStatus>'));
-check($registered->status === 'success', 'Registered getter works when sandbox omits PurchaseStatus');
-check(response('GetRegistrationStatus', xml('GetRegistrationStatus', '<RegistrationStatus>Registered</RegistrationStatus><PurchaseStatus>Unpaid</PurchaseStatus>'))->status === 'unknown', 'explicit unpaid purchase status is not silently ignored');
-check(response('GetRegistrationStatus', xml('GetRegistrationStatus', '<RegistrationStatus>Hosted</RegistrationStatus>'))->status === 'unknown', 'Hosted without purchase status cannot prove registration');
-check(response('GetRegistrationStatus', xml('GetRegistrationStatus', '<RegistrationStatus>Processing</RegistrationStatus>'))->status === 'pending', 'processing getter remains pending');
-check(response('GetRegistrationStatus', xml('GetRegistrationStatus', '<RegistrationStatus>Registered</RegistrationStatus><PurchaseStatus/>'))->status === 'unknown', 'explicit empty purchase status remains unknown');
 $observedRenewal = response('GetRenew', xml('GETRENEW', '<auto-renew>0</auto-renew><IDProtectRenew>0</IDProtectRenew>'));
 check($observedRenewal->status === 'success' && EnomApi::normalize('renewal', $observedRenewal)['auto_renew'] === false, 'actual auto-renew zero confirms provider renewal disabled');
 check(response('GetRenew', xml('GetRenew', '<auto-renew>1</auto-renew>'))->status === 'success'

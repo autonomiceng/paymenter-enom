@@ -90,13 +90,6 @@ class StaffDomains
     }
 
     /** Reads the account balance. Never changes anything. */
-    public function setClientComplimentary(User $staff, User $client, bool $on, ?int $maxDomains = null): void
-    {
-        $this->authorize($staff, 'admin.enom.fund');
-        if ($maxDomains !== null && ($maxDomains < 1 || $maxDomains > 10000)) { throw new InvalidArgumentException('Enter a domain limit from 1 to 10000, or leave it blank.'); }
-        Pricing::setClientComplimentary($client, $on, $staff, $maxDomains);
-    }
-
     public function testConnection(int $serverId): array
     {
         $status = RuntimeGuard::status($serverId);

@@ -16,7 +16,6 @@ use Paymenter\Extensions\Servers\Enom\Api\RegistrarResult;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Models\Tld;
 use RuntimeException;
-use Illuminate\Support\Facades\Cache;
 
 /** Extension-owned native products and exact-term prices. */
 class Catalogue
@@ -127,15 +126,6 @@ class Catalogue
         return $tld->use_default_rule ? CatalogueRuntime::defaultRule((int) $tld->server_id)
             : PricingRule::validate(['mode' => $tld->pricing_mode, 'markup' => $tld->markup ?? '0', 'round_up' => $tld->round_up,
                 'fixed' => ['register' => $tld->fixed_register, 'renew' => $tld->fixed_renew, 'transfer' => $tld->fixed_transfer]]);
-    }
-
-    public static function applyMarkup(Tld $tld): void
-    {
-        if (!in_array($tld->pricing_mode, ['markup_amount', 'markup_percent'], true)) { return; }
-        foreach (Tld::ACTIONS as $action) {
-            $cost = $tld->cost($action);
-            $tld->{$action.'_price'} = $cost === null ? null : self::retail($cost, $tld->pricing_mode, (string) ($tld->markup ?? '0'));
-        }
     }
 
     public static function retail(string $cost, string $mode, string $markup, string $roundUp = 'none'): string
@@ -412,8 +402,6 @@ class Catalogue
 
     public function enable(Tld $tld): void
     {
-        // Temporary 0.4 row adapter; removed in the explicit adapter-removal PR.
-        if ($tld->register_price !== null) { $this->temporaryLegacyEnable($tld); return; }
         if ($tld->tld === 'de' || str_ends_with($tld->tld, '.de')) { throw new InvalidArgumentException('This ending requires nameservers at purchase.'); }
         if (Tld::where('tld', $tld->tld)->where('enabled', true)->whereKeyNot($tld->id)->exists()) {
             throw new InvalidArgumentException('This ending is already sold through another Enom server.');
@@ -434,45 +422,6 @@ class Catalogue
         $this->publish($tld);
     }
 
-    private function enableLocked(Tld $tld): void
-    {
-        if (Tld::query()->where('tld', $tld->tld)->where('enabled', true)->where('id', '!=', $tld->id)->exists()) {
-            throw new InvalidArgumentException('.'.$tld->tld.' is already sold through another Enom server.');
-        }
-        $api = $this->operations->apiForServer((int) $tld->server_id, true);
-        $details = $api->tldInfo($tld->tld);
-        $minimum = $details->value('tlds.tld.registration.minimum');
-        $maximum = $details->value('tlds.tld.registration.maximum');
-        $identified = strtolower((string) $details->value('tlds.tld.tld')) === $tld->tld;
-        if ($details->status !== 'success' || !$identified || !is_numeric($minimum)) {
-            throw new RuntimeException('Could not read .'.$tld->tld.' registration terms from Enom. Try again.');
-        }
-        $min = max(1, (int) $minimum);
-        $max = is_numeric($maximum) ? min(10, max($min, (int) $maximum)) : 10;
-        if ($min > 10) { throw new InvalidArgumentException('.'.$tld->tld.' needs a registration term longer than 10 years.'); }
-        $attributes = $api->tldExtendedAttributes($tld->tld);
-        if ($attributes->status !== 'success') { throw new RuntimeException('Could not check .'.$tld->tld.' registry requirements with Enom. Try again.'); }
-        try { $fields = RegistryFields::normalize($attributes); } catch (InvalidArgumentException) { $fields = null; }
-        if ($fields === null || !RegistryFields::supported($fields)) {
-            throw new InvalidArgumentException('.'.$tld->tld.' needs registrant details in a form the order page can\'t collect yet.');
-        }
-        DB::transaction(function () use ($tld, $min, $max, $fields) {
-            $rows = Tld::query()->where('tld', $tld->tld)->orderBy('id')->lockForUpdate()->get();
-            $current = $rows->firstWhere('id', $tld->id);
-            if (!$current || (int) $current->server_id !== (int) $tld->server_id) {
-                throw new RuntimeException('This ending changed. Reload the page and try again.');
-            }
-            if ($rows->contains(fn (Tld $row) => $row->id !== $current->id && $row->enabled)) {
-                throw new InvalidArgumentException('.'.$tld->tld.' is already sold through another Enom server.');
-            }
-            if (!$current->price('register') || !$current->price('renew') || !$current->price('transfer')) {
-                throw new InvalidArgumentException('Set registration, renewal and transfer prices before enabling .'.$tld->tld.'.');
-            }
-            $current->fill(['min_years' => $min, 'max_years' => $max, 'registry_fields' => $fields, 'enabled' => true])->save();
-            $this->ensureProduct((int) $current->server_id);
-        });
-    }
-
     public function attributesFor(Tld $tld): array { return $tld->registry_fields ?? []; }
 
     public function publicPrices(): array
@@ -483,24 +432,6 @@ class Catalogue
     }
 
     /** @return list<string> */
-    public function ensureProduct(int $serverId): Product
-    {
-        $existing = Product::query()->where('server_id', $serverId)->get()
-            ->first(fn (Product $product) => $product->settings->firstWhere('key', self::PRODUCT_SETTING)?->value === '1');
-        if ($existing) { return $existing; }
-        return DB::transaction(function () use ($serverId) {
-            $category = Category::query()->where('slug', 'domains')->first()
-                ?? Category::create(['slug' => 'domains', 'name' => 'Domains', 'description' => 'Domain names.']);
-            $slug = Product::query()->where('category_id', $category->id)->where('slug', 'domain-name')->exists() ? 'domain-name-'.$serverId : 'domain-name';
-            $product = Product::create(['category_id' => $category->id, 'name' => 'Domain name', 'slug' => $slug, 'hidden' => true,
-                'server_id' => $serverId, 'description' => 'Ordered and managed on the Domains page.']);
-            $plan = $product->plans()->create(['name' => 'Yearly', 'type' => 'recurring', 'billing_period' => 1, 'billing_unit' => 'year']);
-            $plan->prices()->create(['currency_code' => 'USD', 'price' => '0.00', 'setup_fee' => '0.00']);
-            $product->settings()->updateOrCreate(['key' => self::PRODUCT_SETTING], ['value' => '1', 'type' => 'string', 'encrypted' => false]);
-            return $product->fresh();
-        });
-    }
-
     public static function tldNames(RegistrarResult $result): array
     {
         $names = [];
@@ -519,68 +450,10 @@ class Catalogue
         return $names;
     }
 
-    public static function costs(RegistrarResult $result): array
-    {
-        $products = $result->value('pricestructure.product');
-        if (is_array($products) && !array_is_list($products)) { $products = [$products]; }
-        $costs = [];
-        foreach (is_array($products) ? $products : [] as $product) {
-            if (!is_array($product) || !is_string($product['tld'] ?? null)) { continue; }
-            $tld = strtolower(trim($product['tld']));
-            if ($tld === '' || !preg_match('/^[a-z0-9]+(?:\.[a-z0-9]+)*$/D', $tld)) { continue; }
-            $read = fn (string $price, string $enabled) => strcasecmp((string) ($product[$enabled] ?? ''), 'true') === 0
-                ? self::money($product[$price] ?? null) : null;
-            $costs[$tld] = [
-                'register' => $read('resellerpricereg', 'registerenabled'),
-                'renew' => $read('resellerpricerenew', 'renewenabled'),
-                'transfer' => $read('resellerpricetran', 'transferenabled'),
-            ];
-        }
-        return $costs;
-    }
-
-    public static function requiresExtraDetails(RegistrarResult $result): bool
-    {
-        $attributes = $result->value('attributes.attribute');
-        if ($attributes === null || $attributes === '') { return false; }
-        if (is_array($attributes) && !array_is_list($attributes)) { $attributes = [$attributes]; }
-        foreach (is_array($attributes) ? $attributes : [] as $attribute) {
-            if (is_array($attribute) && (string) ($attribute['required'] ?? '0') === '1') { return true; }
-        }
-        return false;
-    }
-
-    private static function money(mixed $value): ?string
-    {
-        if (!is_string($value) || !preg_match('/^[0-9]{1,8}(?:\.[0-9]{1,4})?$/D', trim($value))) { return null; }
-        // Enom quotes to the cent; anything finer rounds half-up.
-        return number_format(round((float) trim($value) + 1e-9, 2), 2, '.', '');
-    }
-
-    private static function minor(string $value): int
-    {
-        if (!preg_match('/^([0-9]{1,10})(?:\.([0-9]{1,2}))?$/D', trim($value), $match)) { throw new InvalidArgumentException('Invalid amount.'); }
-        return (int) $match[1] * 100 + (int) str_pad($match[2] ?? '', 2, '0');
-    }
-
     private static function defaultSort(string $tld): int
     {
         $popular = ['com', 'net', 'org', 'io', 'co', 'ai', 'app', 'dev', 'info', 'biz'];
         $index = array_search($tld, $popular, true);
         return $index === false ? 100 : $index + 1;
-    }
-
-    public function temporaryLegacyEnable(Tld $tld): void
-    {
-        if (!$tld->price('register') || !$tld->price('renew') || !$tld->price('transfer')) {
-            throw new InvalidArgumentException('Set registration, renewal and transfer prices before enabling .'.$tld->tld.'.');
-        }
-        $lock = Cache::lock('enom:enable-tld:'.$tld->tld, 120);
-        if (!$lock->get()) { throw new RuntimeException('.'.$tld->tld.' is being changed by someone else. Try again in a minute.'); }
-        try {
-            $this->enableLocked($tld);
-        } finally {
-            $lock->release();
-        }
     }
 }

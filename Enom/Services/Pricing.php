@@ -10,75 +10,11 @@ use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Models\Tld;
-use App\Models\CustomProperty;
 
 /** Standard catalogue prices and staff-approved complimentary renewals. */
 final class Pricing
 {
-    public const CLIENT_PROPERTY = 'enom_complimentary';
     public const MODES = ['standard', 'complimentary'];
-
-    public static function clientGrant(?User $user): ?array
-    {
-        if (!$user || CustomProperty::query()->where('key', self::CLIENT_PROPERTY)->exists()) { return null; }
-        // Writers and dispatch hold the client row lock before reading this, so a plain read is current.
-        $property = $user->properties()->where('key', self::CLIENT_PROPERTY)->whereNull('custom_property_id')->first();
-        if (!$property) { return null; }
-        $grant = json_decode((string) $property->value, true);
-        if ($property->value === '1') { $grant = []; }
-        if (!is_array($grant)) { return null; }
-        $max = $grant['max_domains'] ?? null;
-        return ['granted_by' => is_int($grant['granted_by'] ?? null) ? $grant['granted_by'] : null,
-            'granted_at' => is_string($grant['granted_at'] ?? null) ? $grant['granted_at'] : null,
-            'max_domains' => is_int($max) && $max > 0 ? $max : null];
-    }
-
-    public static function clientComplimentary(?User $user): bool { return self::clientGrant($user) !== null; }
-
-    public static function setClientComplimentary(User $user, bool $complimentary, ?User $staff = null, ?int $maxDomains = null): void
-    {
-        // The client row is the authority lock shared with order placement and dispatch (user before domain).
-        DB::transaction(function () use ($user, $complimentary, $staff, $maxDomains) {
-            User::whereKey($user->id)->lockForUpdate()->first();
-            if ($complimentary && $maxDomains !== null) {
-                $following = self::liveDomains($user->id)->where(fn ($q) => $q->whereNull('price_mode')->orWhere('price_mode', 'complimentary'))->count();
-                if ($following > $maxDomains) {
-                    throw new InvalidArgumentException('This client already has '.$following.' domains that would become complimentary. Set a limit of at least '.$following.', or leave it blank.');
-                }
-            }
-            self::writeClientGrant($user, $complimentary, $staff, $maxDomains);
-        });
-        foreach (Domain::query()->where('user_id', $user->id)->whereNull('price_mode')->get() as $domain) {
-            self::syncServicePrice($domain);
-            self::retireIfComplimentary($domain);
-        }
-    }
-
-    private static function writeClientGrant(User $user, bool $complimentary, ?User $staff, ?int $maxDomains): void
-    {
-        if ($complimentary) {
-            $user->properties()->updateOrCreate(['key' => self::CLIENT_PROPERTY], ['name' => 'Complimentary domains', 'custom_property_id' => null,
-                'value' => json_encode(['granted_by' => $staff?->id, 'granted_at' => now()->toIso8601String(),
-                    'max_domains' => $maxDomains !== null && $maxDomains > 0 ? $maxDomains : null])]);
-        } else {
-            $user->properties()->where('key', self::CLIENT_PROPERTY)->delete();
-        }
-    }
-
-    private static function liveDomains(int $userId)
-    {
-        return Domain::query()->where('user_id', $userId)
-            ->whereNotIn('status', ['cancelled', 'transferred_away', 'deleted', 'registration_rejected', 'transfer_rejected']);
-    }
-
-    public static function clientHasRoom(User $user): bool
-    {
-        $grant = self::clientGrant($user);
-        if ($grant === null) { return false; }
-        if ($grant['max_domains'] === null) { return true; }
-        $held = self::liveDomains($user->id)->where(fn ($q) => $q->whereNull('price_mode')->orWhere('price_mode', 'complimentary'))->count();
-        return $held < $grant['max_domains'];
-    }
 
     public static function mode(Domain $domain): string
     {
