@@ -5,9 +5,6 @@ namespace Paymenter\Extensions\Servers\Enom;
 use App\Attributes\ExtensionMeta;
 use App\Classes\Extension\Server;
 use App\Events\Invoice\Paid;
-use App\Events\InvoiceItem\Created;
-use App\Events\CartItem\Creating as CartItemCreating;
-use App\Exceptions\DisplayException;
 use App\Models\Server as ServerModel;
 use App\Models\Service;
 use App\Models\Setting;
@@ -95,9 +92,11 @@ class Enom extends Server
             ['name' => 'privacy_price', 'label' => 'ID Protect price per year (USD)', 'type' => 'number', 'validation' => 'nullable|numeric|min:0.01|max:1000',
                 'description' => 'Leave blank to stop selling ID Protect (WHOIS privacy).'],
             ['name' => 'complimentary_cost_cap', 'label' => 'Complimentary cost limit (USD)', 'type' => 'number', 'default' => 50, 'validation' => 'numeric|min:0|max:10000',
-                'description' => 'A complimentary registration or renewal waits for staff if Enom quotes more than this.'],
+                'description' => 'A complimentary renewal waits for staff if Enom quotes more than this.'],
             ['name' => 'observer_requests_per_minute', 'label' => 'Enom requests per minute', 'type' => 'number', 'default' => 60, 'database_type' => 'integer', 'validation' => 'integer|min:4|max:300',
                 'description' => 'Limit for daily status checks, shared by servers using the same Enom account.'],
+            ...app(Services\CatalogueRuntime::class)->config(),
+            ...app(Services\TransferOrders::class)->config(),
         ];
     }
 
@@ -120,10 +119,9 @@ class Enom extends Server
             'label' => 'Domain prices are set per ending in Domains → TLDs & pricing. This product is managed by the Enom extension.']];
     }
 
-    public function getCheckoutConfig()
+    public function getCheckoutConfig($product, $values = [], $settings = [])
     {
-        return [['name' => 'enom_order_path', 'type' => 'text', 'label' => 'Domain',
-            'required' => true, 'validation' => [function ($attribute, $value, $fail) { $fail('Search for domains on the Domains page.'); }]]];
+        return app(Services\CartOrdering::class)->fields($product, $values);
     }
 
     public function installed(): void
@@ -139,16 +137,16 @@ class Enom extends Server
     public function verifySchema(): void
     {
         $required = [
-            'enom_domains' => ['id', 'service_id', 'user_id', 'server_id', 'domain', 'sld', 'tld', 'status', 'provider_expires_at', 'provider_order_id', 'provider_domain_id', 'snapshot', 'capabilities', 'last_synced_at', 'drift_detected_at', 'billing_managed', 'renewal_policy', 'sponsorship', 'observation', 'authority_generation', 'confirmed_revision', 'price_mode', 'created_at', 'updated_at'],
+            'enom_domains' => ['id', 'service_id', 'user_id', 'server_id', 'domain', 'reservation_name', 'sld', 'tld', 'status', 'provider_expires_at', 'provider_order_id', 'provider_domain_id', 'snapshot', 'capabilities', 'last_synced_at', 'billing_managed', 'renewal_policy', 'observation', 'authority_generation', 'confirmed_revision', 'price_mode', 'reminders', 'created_at', 'updated_at'],
             'enom_operations' => ['id', 'domain_id', 'service_id', 'invoice_id', 'operation_key', 'invoice_item_id', 'action', 'term', 'state', 'payload', 'policy', 'cost', 'funding_basis', 'amount', 'currency', 'lease_expires_at', 'base_expires_at', 'expected_expires_at', 'confirmed_expires_at', 'provider_order_id', 'safe_code', 'request_fingerprint', 'authorized_by', 'funding_reason', 'started_at', 'completed_at', 'created_at', 'updated_at'],
-            'enom_tlds' => ['id', 'server_id', 'tld', 'enabled', 'pricing_mode', 'markup', 'register_price', 'renew_price', 'transfer_price',
-                'cost_register', 'cost_renew', 'cost_transfer', 'costs_synced_at', 'sort_order', 'created_at', 'updated_at'],
-            'enom_order_intents' => ['id', 'user_id', 'server_id', 'product_id', 'plan_id', 'domain', 'sld', 'tld', 'action', 'term', 'amount', 'renewal_amount', 'currency', 'service_id', 'invoice_id', 'invoice_item_id', 'payload', 'claimed_at', 'expires_at', 'created_at', 'updated_at'],
+            'enom_tlds' => ['id', 'server_id', 'tld', 'enabled', 'pricing_mode', 'markup', 'renew_price', 'register_enabled', 'renew_enabled', 'transfer_enabled', 'use_default_rule', 'round_up',
+                'fixed_register', 'fixed_renew', 'fixed_transfer', 'cost_register_terms', 'sale_holds', 'min_years', 'max_years', 'registry_fields',
+                'cost_renew', 'cost_transfer', 'costs_synced_at', 'sort_order', 'created_at', 'updated_at'],
         ];
         foreach ($required as $table => $columns) {
             if (!Schema::hasTable($table) || !Schema::hasColumns($table, $columns)) { throw new RuntimeException('Enom extension schema is incomplete.'); }
         }
-        foreach (['enom_domains' => [['domain'], ['service_id']], 'enom_operations' => [['operation_key'], ['invoice_item_id', 'action']], 'enom_order_intents' => [['service_id']], 'enom_tlds' => [['server_id', 'tld']]] as $table => $constraints) {
+        foreach (['enom_domains' => [['reservation_name'], ['service_id']], 'enom_operations' => [['operation_key'], ['invoice_item_id', 'action']], 'enom_tlds' => [['server_id', 'tld']]] as $table => $constraints) {
             $indexes = Schema::getIndexes($table);
             foreach ($constraints as $columns) {
                 if (!collect($indexes)->contains(fn ($index) => $index['unique'] && $index['columns'] === $columns)) { throw new RuntimeException('Enom extension uniqueness constraints are incomplete.'); }
@@ -164,25 +162,29 @@ class Enom extends Server
             && preg_match('/\Adomains\/[0-9]+\/manage\/hosts\z/', $request->path()) === 1);
         View::addNamespace('enom', __DIR__.'/resources/views');
         if (is_file(__DIR__.'/routes/web.php')) { require __DIR__.'/routes/web.php'; }
-        Event::listen(Created::class, function (Created $event) {
-            try { app(DomainOperations::class)->bindInvoiceItem($event->invoiceItem); } catch (Throwable $e) { report($e); }
-        });
+        app(Services\CartOrdering::class)->boot();
+        app(Services\CatalogueRuntime::class)->boot();
+        app(Services\TransferOrders::class)->boot();
+        app(Services\RegistrationSetup::class)->boot();
         Event::listen(Paid::class, function (Paid $event) {
             try { app(DomainOperations::class)->acceptPaidInvoice($event->invoice); } catch (Throwable $e) { report($e); }
         });
         Service::updating(fn (Service $service) => app(DomainBilling::class)->preserveNativeDate($service));
-        Event::listen(CartItemCreating::class, function (CartItemCreating $event) {
-            if ($event->cartItem->product?->server?->extension === 'Enom') { throw new DisplayException('Search for domains on the Domains page.'); }
+        Service::updated(function (Service $service) {
+            if ($service->wasChanged('status') && $service->status === Service::STATUS_CANCELLED) { app(DomainOperations::class)->retireCancelledInitials(); }
+        });
+        Event::listen(\App\Events\Invoice\Updated::class, function ($event) {
+            if ($event->invoice->status === \App\Models\Invoice::STATUS_CANCELLED) { app(DomainOperations::class)->retireCancelledInitials(); }
         });
         self::encryptCredentialsOnSave();
         Event::listen('permissions', fn () => ['admin.enom.manage' => 'Manage domains',
-            'admin.enom.fund' => 'Give complimentary domains', 'admin.enom.costs' => 'See Enom costs and margins']);
+            'admin.enom.fund' => 'Fund domain renewals', 'admin.enom.costs' => 'See Enom costs and margins']);
         Event::listen('navigation.dashboard', fn () => ['name' => 'Domains', 'url' => route('enom.domains.index'), 'icon' => 'ri-global', 'priority' => 12]);
         // Everyone, signed in or not, can search for domains from the top navigation.
         Event::listen('navigation', fn () => Http\Navigation::domains());
         foreach (['Domain', 'Operation', 'Tld'] as $model) {
             $policy = __NAMESPACE__.'\\Policies\\'.$model.'Policy';
-            if (class_exists($policy)) { Gate::policy(__NAMESPACE__.'\\Models\\'.$model, $policy); }
+            Gate::policy(__NAMESPACE__.'\\Models\\'.$model, $policy);
         }
         Schedule::call(function () {
             try { app(DomainOperations::class)->sweep(); } catch (Throwable $e) { report($e); }
@@ -225,7 +227,16 @@ class Enom extends Server
     public function getActions(Service $service, $settings = [], $properties = []): array
     {
         $domain = Domain::where('service_id', $service->id)->where('user_id', Auth::id())->first();
-        return $domain ? [['type' => 'button', 'label' => 'Manage domain', 'url' => route('enom.domains.show', $domain->id)]] : [];
+        if (!$domain) { return []; }
+        // The native service status says "Active" once paid; the domain's own state is what the customer needs.
+        $snapshot = app(Services\DomainManager::class)->snapshot(Auth::user(), $domain->id);
+        [$state] = Http\Controllers\DomainController::badge($snapshot['status'] ?? null, $snapshot['progress'] ?? null);
+        $needsCode = $state === 'Needs your code';
+        return [
+            ['type' => 'button', 'label' => $needsCode ? 'Enter transfer code' : 'Manage domain',
+                'url' => route('enom.domains.show', $domain->id).($needsCode ? '#transfer-code' : '')],
+            ['type' => 'text', 'label' => 'Domain status', 'text' => $state],
+        ];
     }
 
     public function getView(Service $service, $settings = [], $properties = [], $name = 'domain')

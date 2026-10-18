@@ -10,6 +10,6 @@
                 @if (($snapshot['status'] ?? null) === 'active')<span>Auto-renew <strong>{{ ($snapshot['renewal_enabled'] ?? true) ? 'on' : 'off' }}</strong></span>@endif
             </div>
         </div>
-        <a class="enom-btn enom-btn--primary" href="{{ route('enom.domains.show', $snapshot['id']) }}">Manage domain</a>
+        <a class="enom-btn enom-btn--primary" href="{{ route('enom.domains.show', $snapshot['id']).(($snapshot['status'] ?? null) === 'transfer_pending' ? '#transfer-code' : '') }}">{{ ($snapshot['progress']['label'] ?? null) === 'Needs your code' ? 'Enter transfer code' : 'Manage domain' }}</a>
     </div>
 </div>

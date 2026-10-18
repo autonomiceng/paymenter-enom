@@ -17,7 +17,7 @@ use Paymenter\Extensions\Servers\Enom\Models\Tld;
 use Paymenter\Extensions\Servers\Enom\Services\Catalogue;
 use Paymenter\Extensions\Servers\Enom\Services\DomainBilling;
 use Paymenter\Extensions\Servers\Enom\Services\DomainOperations;
-use Paymenter\Extensions\Servers\Enom\Services\Pricing;
+require_once __DIR__.'/enom-cart-order.php';
 
 Carbon\Carbon::setTestNow('2026-10-14 12:00:00'); Carbon\CarbonImmutable::setTestNow(Carbon\Carbon::now());
 config(['settings.mail_must_verify' => false]);
@@ -32,9 +32,9 @@ $transport = function (string $command, array $params) use (&$availability, &$pr
         return '<interface-response><Command>CHECK</Command><ErrCount>1</ErrCount><errors><Err1>Provider internal detail 7f3a</Err1></errors><Done>true</Done></interface-response>';
     }
     $premium = $state === 'premium' ? 'true' : 'false';
-    return enomXml('Check', '<Domains><Domain><Name>'.$name.'</Name><RRPCode>'.(in_array($state, ['available', 'premium', 'twoyear'], true) ? '210' : '211').'</RRPCode>'
+    return enomXml('Check', '<Domains><Domain><Name>'.$name.'</Name><RRPCode>'.(in_array($state, ['available', 'premium', 'twoyear', 'maxfive'], true) ? '210' : '211').'</RRPCode>'
         .'<IsPremium>'.$premium.'</IsPremium><IsPlatinum>false</IsPlatinum><IsEAP>false</IsEAP><Properties><Transferable>'.($state === 'transferable' ? 'true' : 'false').'</Transferable>'
-        .($state === 'twoyear' ? '<MinRegYear>2</MinRegYear>' : '').'</Properties>'
+        .($state === 'twoyear' ? '<MinRegYear>2</MinRegYear>' : '').($state === 'maxfive' ? '<MaxRegYear>5</MaxRegYear>' : '').'</Properties>'
         .'<Prices><Currency>USD</Currency><Registration>4.44</Registration><Renewal>4.44</Renewal><Transfer>4.44</Transfer></Prices></Domain></Domains>');
 };
 $operations = new DomainOperations(new EnomApi(new RegistrarClient('offline-account', 'offline-token', $transport)),
@@ -55,14 +55,15 @@ function serverSetting(string $key, ?string $value): void {
     $server->unsetRelation('settings');
 }
 // Retail prices, plus Enom costs that must never reach a client.
-Tld::create(['server_id' => $server->id, 'tld' => 'com', 'enabled' => true, 'pricing_mode' => 'fixed', 'register_price' => '12.00', 'renew_price' => '14.00', 'transfer_price' => '13.00',
+enomTestTld(['server_id' => $server->id, 'tld' => 'com', 'enabled' => true, 'pricing_mode' => 'fixed', 'register_price' => '12.00', 'renew_price' => '14.00', 'transfer_price' => '13.00',
     'cost_register' => '8.91', 'cost_renew' => '8.92', 'cost_transfer' => '8.93', 'sort_order' => 1]);
-Tld::create(['server_id' => $server->id, 'tld' => 'net', 'enabled' => true, 'pricing_mode' => 'fixed', 'register_price' => '15.00', 'renew_price' => '16.00', 'transfer_price' => '15.50',
+enomTestTld(['server_id' => $server->id, 'tld' => 'net', 'enabled' => true, 'pricing_mode' => 'fixed', 'register_price' => '15.00', 'renew_price' => '16.00', 'transfer_price' => '15.50',
     'cost_register' => '9.81', 'cost_renew' => '9.82', 'cost_transfer' => '9.83', 'sort_order' => 2]);
-Tld::create(['server_id' => $server->id, 'tld' => 'org', 'enabled' => false, 'pricing_mode' => 'fixed', 'register_price' => '11.00', 'renew_price' => '11.00', 'transfer_price' => '11.00', 'sort_order' => 3]);
+enomTestTld(['server_id' => $server->id, 'tld' => 'org', 'enabled' => false, 'pricing_mode' => 'fixed', 'register_price' => '11.00', 'renew_price' => '11.00', 'transfer_price' => '11.00', 'sort_order' => 3]);
 const ENOM_COST_MARKERS = ['8.91', '8.92', '8.93', '9.81', '9.82', '9.83', '4.44'];
-$product = app(Catalogue::class)->ensureProduct($server->id);
-$plan = $product->plans()->sole();
+$com = Tld::where('tld', 'com')->sole();
+$product = app(Catalogue::class)->productFor($com, 'register');
+$plan = app(Catalogue::class)->billingPlan($product);
 
 /** A client with a native profile, as the order page prefills it. */
 function client(string $email, array $profile = []): User {
@@ -93,9 +94,7 @@ function clientDomain(User $user, array $attributes = [], array $snapshot = [], 
         'capabilities' => ['nameservers' => true, 'contacts' => true, 'lock' => true, 'epp_sync' => true, 'renew' => true, 'privacy_purchase' => true,
             'hosts' => true, 'srv' => true, 'dnssec_add' => true, 'dnssec_delete' => true]]);
 }
-/** Make a client complimentary the way staff with admin.enom.fund would. */
-function grantComplimentary(User $client): void { Pricing::setClientComplimentary($client, true, null, null); }
 /** Business rows that every refused or redirect-only request must leave unchanged. */
 function clientRows(): array {
-    return tableRows(['enom_domains', 'enom_operations', 'enom_order_intents', 'services', 'orders', 'invoices', 'invoice_items', 'invoice_transactions', 'jobs']);
+    return tableRows(['enom_domains', 'enom_operations', 'services', 'orders', 'invoices', 'invoice_items', 'invoice_transactions', 'jobs']);
 }

@@ -38,7 +38,7 @@ class Refunds
             $credit = Credit::where('user_id', $ownerId)->where('currency_code', $invoice->currency_code)->lockForUpdate()->first()
                 ?? new Credit(['user_id' => $ownerId, 'currency_code' => $invoice->currency_code, 'amount' => '0.00']);
             $total = self::cents($credit->amount) + self::cents($amount);
-            $credit->amount = intdiv($total, 100).'.'.str_pad((string) ($total % 100), 2, '0', STR_PAD_LEFT);
+            $credit->amount = PricingRule::decimal($total);
             $credit->save();
             $refund = ['amount' => $amount, 'currency' => $invoice->currency_code, 'at' => now()->toIso8601String(), 'to' => 'account_credit'];
             $current->update(['cost' => array_replace($current->cost ?? [], ['refund' => $refund])]);
@@ -84,10 +84,8 @@ class Refunds
     {
         return $operation->state === 'held' && $operation->funding_basis === 'paid_invoice'
             && in_array($operation->action, self::REFUNDABLE, true) && !isset($operation->cost['refund'])
-            && !array_key_exists('dispatch_attempted_at', $operation->policy ?? []) && !isset($operation->cost['execution'])
+            && !array_key_exists('dispatch_attempted_at', $operation->policy ?? []) && !array_key_exists('execution', $operation->cost ?? [])
             && $operation->provider_order_id === null
-            // Managed requests carry a dispatch marker, so a claim without it is provably unsent. Older rows must never have started.
-            && (($operation->policy['dispatch_marker_version'] ?? null) === 1 || $operation->started_at === null)
             && Invoice::whereKey($operation->invoice_id)->value('status') === Invoice::STATUS_PAID;
     }
 
@@ -106,7 +104,7 @@ class Refunds
             $current = Operation::whereKey($operationId)->lockForUpdate()->firstOrFail();
             if (!$this->canRefundHeld($current)) { throw new RuntimeException('Only a paid request that was never sent to Enom can be refunded here.'); }
             if (!$this->refundablePayment($current, $ownerId)) { throw new RuntimeException('No eligible paid amount was found. The request is still held.'); }
-            $current->update(['state' => 'rejected', 'safe_code' => 'refunded_by_staff', 'completed_at' => now(),
+            $current->update(['state' => 'rejected', 'safe_code' => 'refunded_by_staff', 'payload' => null, 'completed_at' => now(),
                 'funding_reason' => mb_substr('Refunded by '.$staff->name.': '.$reason, 0, 500)]);
             if (in_array($current->action, ['register', 'transfer'], true)) {
                 Domain::whereKey($current->domain_id)->whereIn('status', ['registration_pending', 'transfer_pending'])->whereNull('provider_order_id')
@@ -117,32 +115,60 @@ class Refunds
         return $this->creditRejected($operation) ?? throw new RuntimeException('The request was closed, but no paid amount was found to refund.');
     }
 
+    /** Reject only a paid transfer that still has no code at its deadline and was never sent. */
+    public function rejectUnsentTransfer(int $operationId): ?array
+    {
+        $operation = Operation::findOrFail($operationId);
+        $ownerId = Domain::whereKey($operation->domain_id)->value('user_id');
+        $rejected = DB::transaction(function () use ($operation, $ownerId) {
+            User::whereKey($ownerId)->lockForUpdate()->firstOrFail();
+            $domain = Domain::whereKey($operation->domain_id)->lockForUpdate()->firstOrFail();
+            $current = Operation::whereKey($operation->id)->lockForUpdate()->firstOrFail();
+            $deadline = TransferOrders::deadline($current);
+            if ($current->action !== 'transfer' || $current->funding_basis !== 'paid_invoice'
+                || !in_array($current->state, ['awaiting_payment', 'awaiting_code', 'held', 'queued'], true)
+                || !TransferOrders::unsent($current) || !$deadline || $deadline->isFuture()
+                || !app(TransferOrders::class)->needsCode($current) || isset($current->cost['refund'])
+                || $domain->status !== 'transfer_pending' || $domain->provider_order_id !== null
+                || !$this->refundablePayment($current, $ownerId)) { return null; }
+            $current->update(['state' => 'rejected', 'safe_code' => 'transfer_code_timeout', 'payload' => null,
+                'completed_at' => now(), 'lease_expires_at' => null]);
+            $domain->update(['status' => 'transfer_rejected']);
+            Service::whereKey($current->service_id)->where('user_id', $ownerId)
+                ->whereIn('status', [Service::STATUS_PENDING, Service::STATUS_ACTIVE])->update(['status' => 'cancelled']);
+            return $current;
+        });
+        // Keep the rejection if writing credit fails. retryPending completes the same ledger entry.
+        return $rejected ? $this->creditRejected($rejected) : null;
+    }
+
     private function refundablePayment(Operation $current, mixed $ownerId): ?array
     {
         $invoice = Invoice::with('items', 'transactions')->find($current->invoice_id);
         $item = $invoice?->items->firstWhere('id', $current->invoice_item_id);
         $amount = RegistrarMoney::decimal((string) $current->amount);
         // Only money actually received for this exact line comes back: one unit, same currency,
-        // and successful positive payments covering the whole invoice.
+        // and successful net payments covering the whole invoice.
         $received = 0;
         foreach ($invoice?->transactions ?? [] as $transaction) {
-            if ($transaction->status === \App\Enums\InvoiceTransactionStatus::Succeeded && self::cents($transaction->amount) > 0) { $received += self::cents($transaction->amount); }
+            if ($transaction->status === \App\Enums\InvoiceTransactionStatus::Succeeded) { $received += self::cents($transaction->amount); }
         }
         if (!$invoice || !$item || (int) $invoice->user_id !== (int) $ownerId || $invoice->status !== Invoice::STATUS_PAID
             || $invoice->currency_code !== $current->currency || (int) $item->quantity !== 1
-            || self::cents($invoice->remaining) !== 0 || $amount === null || self::cents($amount) <= 0
+            || self::cents($invoice->remaining) > 0 || $amount === null || self::cents($amount) <= 0
             || self::cents($item->price) !== self::cents($amount)
-            || $received < self::cents($invoice->total) || $received < self::cents($amount)) { return null; }
+            || $received < self::cents($invoice->total)) { return null; }
         // The line must belong to this request: registrations/transfers reference their service, managed
         // renewals and ID Protect lines reference nothing; the domain must still own that service.
         $serviceLine = in_array($current->action, ['register', 'transfer'], true);
-        if ($serviceLine ? ($item->reference_type !== Service::class || (int) $item->reference_id !== (int) $current->service_id)
-                : ($item->reference_type !== null && !($item->reference_type === Service::class && (int) $item->reference_id === (int) $current->service_id))
-            || (int) Domain::whereKey($current->domain_id)->value('service_id') !== (int) $current->service_id) { return null; }
+        if (($serviceLine ? ($item->reference_type !== Service::class || (int) $item->reference_id !== (int) $current->service_id)
+                : ($item->reference_type !== null || $item->reference_id !== null))
+            || !Domain::whereKey($current->domain_id)->where('user_id', $ownerId)->where('service_id', $current->service_id)->exists()
+            || !Service::whereKey($current->service_id)->where('user_id', $ownerId)->where('currency_code', $current->currency)->where('quantity', 1)->exists()) { return null; }
         return ['invoice' => $invoice, 'amount' => $amount];
     }
 
-    private static function cents(mixed $amount): int { return (int) round(((float) $amount) * 100); }
+    private static function cents(mixed $amount): int { return PricingRule::minor($amount); }
 
     public static function actionLabel(string $action): string
     {

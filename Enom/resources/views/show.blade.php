@@ -11,12 +11,14 @@
     $status = $s['status'] ?? null;
     $progress = is_array($s['progress'] ?? null) ? $s['progress'] : null;
     $pending = in_array($status, ['registration_pending', 'transfer_pending'], true);
+    $cancelled = $status === 'cancelled';
+    $initial = collect($s['operations'] ?? [])->first(fn ($op) => in_array($op['action'] ?? null, ['register', 'transfer'], true));
+    $codeTimedOut = ($initial['outcome'] ?? null) === 'code_timeout';
     $failed = in_array($status, ['registration_rejected', 'transfer_rejected'], true);
-    $isTransfer = $status === 'transfer_pending' || $status === 'transfer_rejected';
+    $isTransfer = ($initial['action'] ?? null) === 'transfer' || in_array($status, ['transfer_pending', 'transfer_rejected'], true);
     $paused = !empty($s['writes_blocked']);
     $renewOn = ($s['renewal_enabled'] ?? true) === true;
     $price = is_array($s['price'] ?? null) ? $s['price'] : [];
-    // Only real complimentary authority reads as free. A legacy $0 custom price is shown as unset.
     $free = ($price['mode'] ?? null) === 'complimentary';
     $amount = $controller::money($price['amount'] ?? null, $price['currency'] ?? 'USD');
     $automation = $s['automation'] ?? [];
@@ -31,6 +33,7 @@
     $privacy = $cached['privacy'] ?? [];
     $registrant = $cached['contacts']['registrant'] ?? [];
     $invoiceId = ($progress['invoice_id'] ?? null) ?: ($s['pending_invoice_id'] ?? null);
+    if ($codeTimedOut) { $progress = array_replace($progress ?? [], ['safe_code' => 'transfer_code_timeout']); }
     [$badgeLabel] = $controller::badge($status, $progress);
     $manageable = in_array($status, ['active', 'expired', 'grace', 'redemption', 'needs_review'], true);
     $showPrivacy = $privacy['exists'] === true || $privacy['allowed'] === true || $can('privacy_purchase') || $can('privacy_renew');
@@ -66,7 +69,7 @@
                 <div class="enom-dhead__meta">
                     @include('enom::partials.badge', ['status' => $status, 'progress' => $progress])
                     @if ($expires)<span>{{ in_array($status, ['expired', 'grace', 'redemption'], true) ? 'Expired' : 'Expires' }} <strong>@include('enom::partials.date', ['date' => $expires])</strong></span>@endif
-                    @if (!$pending && !$failed)
+                    @if (!$pending && !$failed && !$cancelled)
                         <form method="POST" action="{{ route('enom.domains.refresh', $domainId) }}" class="enom-row" style="gap:.25rem">
                             @include('enom::partials.form-key', ['action' => 'refresh'])
                             <span>Updated @include('enom::partials.moment', ['at' => $checkedAt, 'style' => 'relative', 'fallback' => 'never'])</span>
@@ -109,60 +112,95 @@
         <div class="enom-notice enom-notice--bad" role="status"><x-ri-error-warning-fill aria-hidden="true" /><div><strong>This domain is in redemption.</strong> Contact support to restore it before it’s released.</div></div>
     @endif
 
-    @if ($pending || $failed)
+    @include('enom::partials.registration-setup', ['domain' => $domain, 'part' => 'notice'])
+    @if ($cancelled || $pending || $failed)
         {{-- A registration or transfer that isn't live yet: one focused status card instead of disabled settings. --}}
         @php
             $kind = $isTransfer ? 'transfer' : 'registration';
             $awaiting = $badgeLabel === 'Awaiting payment';
             $delayed = $badgeLabel === 'Delayed';
-            $step = $failed ? 0 : ($awaiting ? 1 : 2);
+            $codeReceived = $isTransfer && $initial && !app(\Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class)->needsCode(\Paymenter\Extensions\Servers\Enom\Models\Operation::find($initial['id']));
+            $steps = $isTransfer ? ['Ordered' => true, 'Paid' => !$awaiting, 'Code' => $codeReceived, 'Transferred' => false]
+                : ['Ordered' => true, 'Paid' => !$awaiting, 'Registered' => false];
+            $refund = is_array($initial['refund'] ?? null) ? $initial['refund'] : null;
+            $refunded = $refund ? $controller::money($refund['amount'] ?? null, $refund['currency'] ?? 'USD') : null;
+            $retryUrl = $isTransfer ? route('enom.domains.transfer', ['name' => $name]) : route('enom.domains.search', ['name' => $name]);
+            $creditButton = $credits ? '<a class="enom-btn enom-btn--primary" href="'.e($credits).'">View account credit</a>' : '';
         @endphp
         <section class="enom-panel enom-status-card" aria-labelledby="enom-status-heading">
-            @if ($failed)
-                @php
-                    $order = collect($s['operations'] ?? [])->first(fn ($op) => in_array($op['action'] ?? null, ['register', 'transfer'], true));
-                    $refund = is_array($order['refund'] ?? null) ? $order['refund'] : null;
-                    $refunded = $refund ? $controller::money($refund['amount'] ?? null, $refund['currency'] ?? 'USD') : null;
-                    $retryUrl = $isTransfer ? route('enom.domains.transfer', ['name' => $name]) : route('enom.domains.search', ['name' => $name]);
-                @endphp
+            @if ($cancelled)
+                <h2 id="enom-status-heading">Order cancelled</h2>
+                <p>The invoice wasn’t paid, so this order was cancelled. Nothing was charged.</p>
+                <div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ $retryUrl }}">{{ $isTransfer ? 'Try again' : 'Search again' }}</a></div>
+            @elseif ($codeTimedOut)
+                @php $deadline = \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::deadline(\Paymenter\Extensions\Servers\Enom\Models\Operation::find($initial['id'])); @endphp
+                <h2 id="enom-status-heading">Transfer cancelled</h2>
+                @if ($refunded)
+                    <p>We didn’t receive the transfer code by {{ $deadline ? $deadline->format('M j, Y') : 'the deadline' }}, so we cancelled the transfer and added {{ $refunded }} to your account credit.</p>
+                @else
+                    <p>We didn’t receive the transfer code in time, so we cancelled the transfer. The refund to your account credit is on its way.</p>
+                @endif
+                <div class="enom-row" style="margin-top:1.25rem">{!! $refunded ? $creditButton : '' !!}<a class="enom-btn enom-btn--secondary" href="{{ $retryUrl }}">Try again</a></div>
+            @elseif ($failed)
                 <h2 id="enom-status-heading">The {{ $kind }} didn’t go through</h2>
                 @if ($refunded)
-                    <p>The registry didn’t accept this {{ $kind }}, so we added {{ $refunded }} to your account credit. It’s used automatically on your next invoice.</p>
-                    <div class="enom-row" style="margin-top:1.25rem">
-                        @if ($credits)<a class="enom-btn enom-btn--primary" href="{{ $credits }}">View account credit</a>@endif
-                        @if (!$isTransfer)<a class="enom-btn enom-btn--secondary" href="{{ $retryUrl }}">Search for another name</a>@endif
-                    </div>
-                @elseif ($free || ($order && empty($order['invoice_id'])))
-                    <p>The registry didn’t accept this {{ $kind }}. Nothing was charged.</p>
-                    @if ($isTransfer)
-                        <p class="enom-small enom-muted">To try this transfer again, open a support ticket so we can reuse this order.</p>
-                    @else
-                        <div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ $retryUrl }}">Search for another name</a></div>
-                    @endif
+                    <p>{{ $isTransfer ? 'Your current registrar refused the transfer' : 'The registry didn’t accept this registration' }}, so we added {{ $refunded }} to your account credit.
+                        {{ $isTransfer ? 'Common reasons: the domain is locked, the code was wrong, or the owner declined.' : 'It’s used automatically on your next invoice.' }}</p>
+                @elseif ($free || ($initial && empty($initial['invoice_id'])))
+                    <p>{{ $isTransfer ? 'Your current registrar refused the transfer.' : 'The registry didn’t accept this registration.' }} Nothing was charged.</p>
                 @else
-                    <p>The registry didn’t accept this {{ $kind }}. Contact support and we’ll sort out your payment.</p>
-                    @if ($supportUrl)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ $supportUrl }}">Contact support</a></div>@endif
+                    <p>{{ $isTransfer ? 'Your current registrar refused the transfer.' : 'The registry didn’t accept this registration.' }} Contact support and we’ll sort out your payment.</p>
                 @endif
+                <div class="enom-row" style="margin-top:1.25rem">
+                    @if ($refunded || $free || ($initial && empty($initial['invoice_id'])))
+                        {!! $refunded ? $creditButton : '' !!}
+                        @if ($isTransfer)
+                            <a class="enom-btn enom-btn--secondary" href="{{ $retryUrl }}">Try again</a>
+                        @else
+                            <a class="enom-btn enom-btn--secondary" href="{{ route('enom.domains.search') }}">Search for another name</a>
+                        @endif
+                    @elseif ($supportUrl)
+                        <a class="enom-btn enom-btn--primary" href="{{ $supportUrl }}">Contact support</a>
+                    @endif
+                </div>
+            @elseif ($awaiting && $isTransfer)
+                <h2 id="enom-status-heading">{{ $codeReceived ? 'Pay the invoice to start the transfer' : 'Pay the invoice and enter the code to start the transfer' }}</h2>
+                @if (!$renewOn)<p>Auto-renew is off, so contact support before paying if you still want this domain.</p>@endif
+                @include('enom::partials.transfer-code', ['domain' => $domain])
             @elseif ($awaiting)
-                <h2 id="enom-status-heading">Pay the invoice to {{ $isTransfer ? 'start the transfer' : 'register '.$name }}</h2>
-                <p>{{ $isTransfer ? 'The transfer starts' : 'Registration starts' }} as soon as the payment clears.@if (!$renewOn) Auto-renew is off, so contact support before paying if you still want this domain.@endif</p>
+                <h2 id="enom-status-heading">Pay the invoice to register {{ $name }}</h2>
+                <p>Registration starts as soon as the payment clears.@if (!$renewOn) Auto-renew is off, so contact support before paying if you still want this domain.@endif</p>
                 @if ($invoiceId)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ route('invoices.show', $invoiceId) }}">Pay invoice</a></div>@endif
             @elseif ($delayed)
                 <h2 id="enom-status-heading">This {{ $kind }} is taking longer than usual</h2>
-                <p>We’re checking it with the registrar and will update this page. You don’t need to do anything.</p>
+                <p>We’re checking it and will update this page. You don’t need to do anything.</p>
                 @if ($supportUrl)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--secondary" href="{{ $supportUrl }}">Contact support</a></div>@endif
+            @elseif ($badgeLabel === 'Needs your code')
+                <h2 id="enom-status-heading">Enter your transfer code</h2>
+                @include('enom::partials.transfer-code', ['domain' => $domain])
+            @elseif ($badgeLabel === 'Needs your details')
+                <h2 id="enom-status-heading">We need a few details to {{ $isTransfer ? 'transfer' : 'register' }} {{ $name }}</h2>
+                @include('enom::partials.registration-setup', ['domain' => $domain, 'part' => 'hold'])
             @elseif ($isTransfer)
                 <h2 id="enom-status-heading">Transfer in progress</h2>
-                <p>Your current registrar may email the domain owner to approve the transfer. Most transfers finish within 5 to 7 days.</p>
+                <p>Your current registrar may email the domain owner to approve the transfer. Approving it there can speed things up. Most transfers finish within 5 to 7 days. Your website and email keep working.</p>
             @else
                 <h2 id="enom-status-heading">Registering {{ $name }}</h2>
                 <p>This usually takes a few minutes. Refresh this page to see when it’s ready.</p>
                 <div style="margin-top:1.25rem"><a class="enom-btn enom-btn--secondary" href="{{ route('enom.domains.show', $domainId) }}"><x-ri-refresh-line class="enom-i" aria-hidden="true" />Refresh</a></div>
             @endif
-            @if (!$failed)
-                <div class="enom-progress" aria-hidden="true">@for ($i = 1; $i <= 3; $i++)<span @class(['is-done' => $i <= $step])></span>@endfor</div>
-                <div class="enom-progress-labels" aria-hidden="true"><span>Ordered</span><span>Paid</span><span>{{ $isTransfer ? 'Transferred' : 'Registered' }}</span></div>
-                <p class="enom-sr">Step {{ $step }} of 3.</p>
+            @if ($pending)
+                @php
+                    $done = array_keys(array_filter($steps));
+                    $next = array_key_first(array_filter($steps, fn ($d) => !$d));
+                    $stepText = match ($next) {
+                        'Paid' => 'waiting for payment', 'Code' => 'waiting for the transfer code',
+                        'Transferred' => 'waiting for the transfer to finish', default => 'waiting for the registration to finish',
+                    };
+                @endphp
+                <div class="enom-progress" aria-hidden="true">@foreach ($steps as $isDone)<span @class(['is-done' => $isDone])></span>@endforeach</div>
+                <div class="enom-progress-labels" aria-hidden="true">@foreach ($steps as $label => $isDone)<span>{{ $label }}</span>@endforeach</div>
+                <p class="enom-sr">Step {{ count($done) + 1 }} of {{ count($steps) }}: {{ $stepText }}.</p>
             @endif
         </section>
         @if (count($s['operations'] ?? []))

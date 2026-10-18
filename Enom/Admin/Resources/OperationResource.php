@@ -165,6 +165,7 @@ class OperationResource extends Resource
             ->recordActions([
                 self::checkAction(),
                 self::resumeAction(),
+                self::resumeContactsAction(),
                 self::readResultAction(),
                 self::recordOutcomeAction(),
                 self::fundAction(),
@@ -323,6 +324,27 @@ class OperationResource extends Resource
                     $result = app(DomainOperations::class)->reconcile((int) $record->id);
                     return $charge ? 'Charge checked.' : 'Checked with Enom: '.strtolower(Labels::state($result->state)).'.';
                 }, 'Checked with Enom.', 'Enom could not be reached. Nothing was sent; try again later.');
+            });
+    }
+
+    private static function resumeContactsAction(): Action
+    {
+        return Action::make('resumeContacts')
+            ->label('Use updated account details')
+            ->icon('heroicon-o-play')
+            ->size('sm')
+            ->visible(fn (Operation $record) => Staff::user() && \Paymenter\Extensions\Servers\Enom\Services\RegistrationSetup::canResumeContacts($record, Staff::user()))
+            ->schema([
+                Text::make('Uses the domain owner’s current account contacts for this unsent order, then checks payment and transfer requirements before resuming.'),
+                Textarea::make('reason')->label('Reason')->required()->minLength(5)->maxLength(500)->rows(2),
+            ])
+            ->modalHeading('Use updated account details')
+            ->modalSubmitActionLabel('Use updated details')
+            ->modalWidth('lg')
+            ->action(function (Operation $record, array $data) {
+                $staff = Staff::require();
+                $reason = trim(preg_replace('/\s+/', ' ', (string) ($data['reason'] ?? '')));
+                Staff::attempt(fn () => \Paymenter\Extensions\Servers\Enom\Services\RegistrationSetup::resumeContacts($staff, (int) $record->id, $reason), 'Account details updated. The order will resume when its requirements are met.');
             });
     }
 

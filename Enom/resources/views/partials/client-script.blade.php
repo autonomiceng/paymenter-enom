@@ -216,14 +216,6 @@
         update();
     });
 
-    /* Order term: "Update" re-prices the order and appears once the term changes. */
-    document.querySelectorAll('select[data-enom-term]').forEach(select => {
-        const button = select.form?.querySelector('[data-enom-requote]');
-        const update = () => { if (button) button.hidden = select.value === select.dataset.enomTerm; };
-        select.addEventListener('change', update);
-        update();
-    });
-
     /* Auto-submit for list sort and filters. */
     document.querySelectorAll('select[data-enom-autosubmit]').forEach(select => select.addEventListener('change', () => select.form.submit()));
 
@@ -232,11 +224,12 @@
         const url = list.dataset.enomResults;
         const token = document.querySelector('meta[name="csrf-token"]')?.content || '';
         const rows = [...list.querySelectorAll('[data-enom-result]')];
-        const label = {available: ['Available', 'ok'], transferable: ['Registered', 'muted'], taken: ['Registered', 'muted'], premium: ['Premium name', 'muted'],
-            managed: ['Already registered here', 'muted'], yours: ['In your account', 'ok'], invalid: ['Not available', 'muted'], error: ['Couldn’t check', 'warn']};
+        const label = {available: ['Available', 'ok'], transferable: ['Taken', 'muted'], taken: ['Taken', 'muted'], premium: ['Premium name', 'muted'],
+            managed: ['Already registered here', 'muted'], yours: ['Yours', 'ok'], in_cart: ['In your cart', 'ok'], invalid: ['Not available', 'muted'], error: ['Couldn’t check', 'warn']};
         const render = (row, data) => {
             const state = label[data.status] ? data.status : 'error';
             row.dataset.state = state;
+            row.querySelectorAll('[data-when]').forEach(node => { node.style.display = node.dataset.when.split(' ').includes(state) ? 'flex' : 'none'; });
             const [text, tone] = label[state];
             const status = row.querySelector('[data-slot="status"]');
             status.innerHTML = '';
@@ -245,45 +238,42 @@
             badge.textContent = text;
             status.appendChild(badge);
             row.enomData = data;
-            const years = row.querySelector('select[data-slot="years"]');
-            if (state === 'available' && years && data.terms && Object.keys(data.terms).length) {
-                // The registry's term limits for this ending. Keep the client's choice when it still fits.
-                const wanted = years.value || list.dataset.years;
-                years.innerHTML = '';
-                Object.keys(data.terms).map(Number).sort((a, b) => a - b).forEach(n => {
-                    const option = document.createElement('option');
-                    option.value = String(n);
-                    option.textContent = n + (n === 1 ? ' year' : ' years');
-                    years.appendChild(option);
-                });
-                years.value = data.terms[wanted] !== undefined ? String(wanted) : years.options[0].value;
-                years.hidden = years.options.length < 2;
+            const register = row.querySelector('[data-slot="register"]');
+            const transfer = row.querySelector('[data-slot="transfer"]');
+            if (register && data.register_url) register.href = data.register_url;
+            if (transfer && data.transfer_url) transfer.href = data.transfer_url;
+            if (data.warning) {
+                const warning = document.createElement('small');
+                warning.textContent = data.warning;
+                status.appendChild(warning);
             }
             showPrice(row);
+            if (state === 'in_cart' && data.url) row.querySelector('[data-slot="cart"]')?.setAttribute('href', data.url);
             if (state === 'yours' && data.url) row.querySelector('[data-slot="yours"]')?.setAttribute('href', data.url);
-            if (state === 'available' && 'resume' in row.dataset) row.querySelector('[data-when~="available"] button')?.focus();
         };
         const showPrice = row => {
             const data = row.enomData || {};
             const state = row.dataset.state;
             const price = row.querySelector('[data-slot="price"]');
             price.innerHTML = '';
-            const years = Number(row.querySelector('select[data-slot="years"]')?.value || 1);
+            const years = Number(data.min_years || 1);
             const total = state === 'available' && data.terms ? data.terms[years] : null;
             const amount = state === 'available' ? (total || data.price) : (state === 'transferable' ? data.transfer_price : null);
+            if (state === 'premium') { price.textContent = 'Not sold here'; return; }
             if (!amount) return;
             const strong = document.createElement('strong');
-            const multi = state === 'available' && years > 1;
-            strong.textContent = amount + (data.complimentary || state === 'transferable' || multi ? '' : '/yr');
+            strong.textContent = state === 'transferable' ? 'Transfer for ' + amount : amount + ' for ' + years + (years === 1 ? ' year' : ' years');
             price.appendChild(strong);
+            if (state === 'available' && data.alternative?.total) {
+                const alternative = document.createElement('small');
+                alternative.textContent = 'or ' + data.alternative.total + ' for ' + data.alternative.years + ' years';
+                price.appendChild(alternative);
+            }
             const note = document.createElement('small');
-            if (data.complimentary) note.textContent = multi ? 'For ' + years + ' years' : '';
-            else if (state === 'transferable') note.textContent = 'Transfer, adds 1 year';
-            else if (multi) note.textContent = 'For ' + years + ' years, then ' + (data.renew_price || data.price) + '/yr';
+            if (state === 'transferable') note.textContent = 'Adds 1 year';
             else note.textContent = 'Renews at ' + (data.renew_price || data.price) + '/yr';
             if (note.textContent) price.appendChild(note);
         };
-        list.querySelectorAll('select[data-slot="years"]').forEach(select => select.addEventListener('change', () => showPrice(select.closest('[data-enom-result]'))));
         const request = async domain => {
             const response = await fetch(url, {method: 'POST', credentials: 'same-origin',
                 headers: {'Content-Type': 'application/json', 'Accept': 'application/json', 'X-CSRF-TOKEN': token, 'X-Requested-With': 'XMLHttpRequest'},

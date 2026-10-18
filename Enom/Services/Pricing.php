@@ -5,32 +5,19 @@ namespace Paymenter\Extensions\Servers\Enom\Services;
 use App\Classes\Price;
 use App\Classes\Settings;
 use App\Models\Currency;
-use App\Models\CustomProperty;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Models\Tld;
+use App\Models\CustomProperty;
 
-/**
- * Who pays for a domain.
- *
- * - Standard: the client pays the current catalogue price for the ending.
- * - Custom: the client pays the domain's own service price.
- * - Complimentary: the client pays nothing; the reseller pays Enom's cost.
- *
- * A domain setting wins over the client default. A client is complimentary when the raw
- * native user property `enom_complimentary` holds a staff grant. It is not a CustomProperty,
- * so clients can neither see nor submit it; a CustomProperty using the same key voids it.
- */
+/** Standard catalogue prices and staff-approved complimentary renewals. */
 final class Pricing
 {
-    /** Stored on enom_domains.price_mode. Null means "follow the client's default". */
-    public const MODES = ['standard', 'custom', 'complimentary'];
-
     public const CLIENT_PROPERTY = 'enom_complimentary';
+    public const MODES = ['standard', 'complimentary'];
 
-    /** @return array{granted_by: ?int, granted_at: ?string, max_domains: ?int}|null */
     public static function clientGrant(?User $user): ?array
     {
         if (!$user || CustomProperty::query()->where('key', self::CLIENT_PROPERTY)->exists()) { return null; }
@@ -48,7 +35,6 @@ final class Pricing
 
     public static function clientComplimentary(?User $user): bool { return self::clientGrant($user) !== null; }
 
-    /** Staff-only. $maxDomains limits how many complimentary domains the client may hold; null is no limit. */
     public static function setClientComplimentary(User $user, bool $complimentary, ?User $staff = null, ?int $maxDomains = null): void
     {
         // The client row is the authority lock shared with order placement and dispatch (user before domain).
@@ -79,14 +65,12 @@ final class Pricing
         }
     }
 
-    /** Domains that still count toward a client's portfolio. */
     private static function liveDomains(int $userId)
     {
         return Domain::query()->where('user_id', $userId)
             ->whereNotIn('status', ['cancelled', 'transferred_away', 'deleted', 'registration_rejected', 'transfer_rejected']);
     }
 
-    /** Whether a complimentary client may add one more domain under their limit. */
     public static function clientHasRoom(User $user): bool
     {
         $grant = self::clientGrant($user);
@@ -96,21 +80,14 @@ final class Pricing
         return $held < $grant['max_domains'];
     }
 
-    /** The mode that applies right now: the domain's own choice, else the client's default. */
     public static function mode(Domain $domain): string
     {
-        $own = $domain->price_mode;
-        if (in_array($own, self::MODES, true)) { return $own; }
-        return self::clientComplimentary($domain->service?->user ?? User::find($domain->user_id)) ? 'complimentary' : 'standard';
+        return $domain->price_mode === 'complimentary' ? 'complimentary' : 'standard';
     }
 
     public static function isComplimentary(Domain $domain): bool { return self::mode($domain) === 'complimentary'; }
 
-    /** Where the mode comes from, for display: "domain" (set on the domain) or "client" (the client's default). */
-    public static function source(Domain $domain): string
-    {
-        return in_array($domain->price_mode, self::MODES, true) ? 'domain' : 'client';
-    }
+    public static function source(Domain $domain): string { return 'domain'; }
 
     /**
      * Yearly renewal price the client pays, as a decimal string. "0.00" for complimentary.
@@ -120,7 +97,6 @@ final class Pricing
     {
         return match (self::mode($domain)) {
             'complimentary' => '0.00',
-            'custom' => RegistrarMoney::decimal((string) $domain->service?->price),
             default => ($user = $domain->service?->user ?? User::find($domain->user_id))
                 ? self::taxed($user, Tld::query()->where('server_id', $domain->server_id)->where('tld', $domain->tld)->first()?->price('renew'), $domain->service?->currency_code ?? 'USD')
                 : null,
@@ -132,30 +108,16 @@ final class Pricing
         return $domain->service !== null && RegistrarMoney::decimal((string) $domain->service->price) === '0.00';
     }
 
-    /** Save a domain's pricing. Custom needs a positive price, which becomes the service price. */
-    public static function setDomainMode(Domain $domain, string $mode, ?string $customPrice = null): void
+    /** Staff authorization is checked by StaffDomains before changing renewal funding. */
+    public static function setDomainMode(Domain $domain, string $mode): void
     {
-        if ($mode !== 'inherit' && !in_array($mode, self::MODES, true)) { throw new InvalidArgumentException('Choose who pays for this domain.'); }
-        $service = $domain->service;
-        $price = null;
-        if ($mode === 'custom') {
-            $price = is_string($customPrice) ? RegistrarMoney::decimal(trim($customPrice)) : null;
-            if ($price === null || (float) $price <= 0) { throw new InvalidArgumentException('Enter a custom yearly price above 0.00.'); }
-        }
-        DB::transaction(function () use ($domain, $mode, $price, $service) {
-            $owner = User::whereKey($domain->user_id)->lockForUpdate()->first();
-            $grant = self::clientGrant($owner);
-            $becomesFree = $mode === 'complimentary' || $mode === 'inherit' && $grant !== null;
-            if ($becomesFree && $domain->price_mode !== 'complimentary' && !($domain->price_mode === null && $grant !== null)
-                && $grant !== null && $grant['max_domains'] !== null
-                && self::liveDomains($domain->user_id)->where(fn ($q) => $q->whereNull('price_mode')->orWhere('price_mode', 'complimentary'))->count() >= $grant['max_domains']) {
-                throw new InvalidArgumentException('This client already has their limit of '.$grant['max_domains'].' complimentary domains.');
-            }
-            if ($mode === 'custom' && $service) { $service->price = $price; $service->save(); }
-            Domain::whereKey($domain->id)->lockForUpdate()->update(['price_mode' => $mode === 'inherit' ? null : $mode]);
+        if (!in_array($mode, self::MODES, true)) { throw new InvalidArgumentException('Choose standard or complimentary renewal.'); }
+        DB::transaction(function () use ($domain, $mode) {
+            User::whereKey($domain->user_id)->lockForUpdate()->firstOrFail();
+            Domain::whereKey($domain->id)->lockForUpdate()->update(['price_mode' => $mode]);
         });
         $domain->refresh();
-        if ($mode !== 'custom') { self::syncServicePrice($domain); }
+        self::syncServicePrice($domain);
         self::retireIfComplimentary($domain);
     }
 
@@ -171,7 +133,6 @@ final class Pricing
     {
         $service = $domain->service;
         $price = self::renewalPrice($domain);
-        // Legacy domains billed by native service dates keep their own price.
         if (!$domain->billing_managed || !$service || $price === null || RegistrarMoney::decimal((string) $service->price) === $price) { return; }
         $service->price = $price;
         $service->save();
@@ -185,11 +146,11 @@ final class Pricing
             apply_exclusive_tax: true, tax: Settings::tax($user)))->price, 2, '.', '');
     }
 
-    /** Most a complimentary registration or renewal may cost, in cents. */
+    /** Most a complimentary renewal may cost, in cents. */
     public static function complimentaryCapMinor(int $serverId): int
     {
         $value = RuntimeGuard::setting($serverId, 'complimentary_cost_cap', '50');
         $decimal = is_numeric($value) ? RegistrarMoney::decimal((string) $value) : null;
-        return $decimal === null ? 5000 : max(0, (int) round(((float) $decimal) * 100));
+        return $decimal === null ? 5000 : PricingRule::minor($decimal);
     }
 }

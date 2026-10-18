@@ -69,7 +69,6 @@ final class DomainObservation
         } finally { $lock->release(); }
     }
 
-    /** Staff-requested pricing reads; they never create funding or operations. */
     public function observeRenewalQuote(int $domainId): string
     {
         $domain = Domain::find($domainId);
@@ -267,6 +266,7 @@ final class DomainObservation
             return $error ?? ($success ? 'observed' : 'partial');
         });
     }
+
 
     private function applyQuote(int $domainId, array $capture, ?array $quote, ?string $error): string
     {

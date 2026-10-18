@@ -1,28 +1,6 @@
 <?php
-require_once dirname(__DIR__).'/paymenter-test-app.php';
+require dirname(__DIR__).'/enom-request-fixture.php';
 
-// Real stock native models. No installed application, credentials or provider requests.
-require __DIR__.'/reconciliation-rejection.php';
-$successful = false;
-$checks = 0;
-$providerCalls = 0;
-$operations = new Paymenter\Extensions\Servers\Enom\Services\DomainOperations(new Paymenter\Extensions\Servers\Enom\Api\EnomApi(new Paymenter\Extensions\Servers\Enom\Api\RegistrarClient('offline', 'offline', function () use (&$providerCalls) { $providerCalls++; throw new RuntimeException('Provider must not run while requesting changes.'); })), fn () => []);
-$app->instance(Paymenter\Extensions\Servers\Enom\Services\DomainOperations::class, $operations);
-$orders = new Paymenter\Extensions\Servers\Enom\Services\DomainOrders($operations);
-$manager = new Paymenter\Extensions\Servers\Enom\Services\DomainManager($operations);
-$product->settings()->create(['key' => 'enom_privacy_price', 'value' => '5.00']);
-function activeFixture(): array {
-    [$domain, $seed] = fixture('register');
-    $domain->update(['status' => 'active', 'provider_order_id' => '12345', 'provider_expires_at' => now()->addYear()->format('Y-m-d'), 'capabilities' => ['renew' => true, 'lock' => true, 'contacts' => true, 'privacy_purchase' => true], 'snapshot' => ['locked' => true]]);
-    App\Models\Service::withoutEvents(fn () => $domain->service->update(['status' => 'active']));
-    $seed->update(['state' => 'rejected']);
-    return [$domain, $seed];
-}
-function allRows(): array {
-    $rows = [];
-    foreach (['enom_operations', 'enom_domains', 'invoices', 'invoice_items', 'invoice_transactions', 'services', 'jobs', 'failed_jobs'] as $table) { $rows[$table] = Illuminate\Support\Facades\DB::table($table)->orderBy('id')->get()->toArray(); }
-    return $rows;
-}
 foreach (['running', 'pending', 'uncertain'] as $state) {
     [$domain, $blocker] = activeFixture();
     $nonce = hash('sha256', 'existing-management-'.$state);
@@ -36,7 +14,7 @@ foreach (['running', 'pending', 'uncertain'] as $state) {
     try { $operations->enqueueManagement($user, $domain->id, 'lock', ['confirmed' => true, 'locked' => '1'], hash('sha256', 'new-management-'.$state)); verify(false, 'Unresolved domain accepted a new management request.'); }
     catch (InvalidArgumentException $e) { verify(str_contains($e->getMessage(), 'still being processed'), 'Management refusal lacks a safe unresolved-request explanation.'); }
     try { $orders->renew($user, $domain->id, hash('sha256', 'new-renewal-'.$state)); verify(false, 'Unresolved domain accepted a new renewal invoice.'); }
-    catch (InvalidArgumentException $e) { verify(str_contains($e->getMessage(), 'registrar request'), 'Billing refusal lacks a safe unresolved-request explanation.'); }
+    catch (RuntimeException $e) { verify(str_contains($e->getMessage(), 'lifecycle requires review'), 'Billing refusal lacks a safe unresolved-request explanation.'); }
     verify($operations->enqueueManagement($user, $domain->id, 'lock', ['confirmed' => true, 'locked' => '0'], $nonce)->id === $known->id, 'Exact management nonce no longer returns its recorded request.');
     verify($orders->privacy($user, $domain->id, 'purchase', hash('sha256', 'known-privacy-'.$state))->id === $knownInvoice->id, 'Exact billing nonce no longer returns its invoice.');
     verify($orders->privacy($user, $domain->id, 'purchase', hash('sha256', 'another-privacy-'.$state))->id === $knownInvoice->id, 'Existing same-action invoice reuse was lost.');

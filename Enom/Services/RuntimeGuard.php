@@ -8,16 +8,15 @@ use RuntimeException;
 /** Reads an Enom server's configuration and decides whether registrar requests may run. */
 class RuntimeGuard
 {
+    public const ENDPOINTS = [
+        'test' => 'https://resellertest.enom.com/interface.asp',
+        'live' => 'https://reseller.enom.com/interface.asp',
+    ];
     public const ENVIRONMENTS = ['test', 'live'];
 
     public const BINDING = 'enom_account_binding';
 
     public const LIVE_URL = 'enom_live_url';
-
-    public const ENDPOINTS = [
-        'test' => 'https://resellertest.enom.com/interface.asp',
-        'live' => 'https://reseller.enom.com/interface.asp',
-    ];
 
     public static function configuration(int $serverId): array
     {
@@ -36,8 +35,6 @@ class RuntimeGuard
         if (array_key_exists('environment', $config) && !in_array($config['environment'], self::ENVIRONMENTS, true)) {
             throw new RuntimeException('Choose Test or Live as the Enom environment in the server settings.');
         }
-        // Decide before filling in the environment default, which would hide the legacy state.
-        $config['legacy_writes_disabled'] = self::legacyDisabled($config);
         $config['environment'] = self::environment($config);
         $config['enabled'] = (bool) $server->enabled;
         $binding = $config[self::BINDING] ?? null;
@@ -50,7 +47,7 @@ class RuntimeGuard
         return $config;
     }
 
-    /** Explicit `environment` wins. Older installs only had the `sandbox` flag, which always meant test. */
+    /** New servers use Test unless an environment is chosen. */
     public static function environment(array $config): string
     {
         $environment = $config['environment'] ?? null;
@@ -88,13 +85,16 @@ class RuntimeGuard
         catch (\Throwable $error) { $problem = $error->getMessage(); }
         return ['environment' => $environment, 'problem' => $problem,
             'credentials' => is_string($config['uid'] ?? null) && $config['uid'] !== '' && is_string($config['token'] ?? null) && $config['token'] !== '',
-            'processing' => filter_var($config['operations_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN) && !self::legacyDisabled($config),
+            'processing' => filter_var($config['operations_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN),
             'bound' => is_string($config[self::BINDING] ?? null) && $config[self::BINDING] !== '',
             'live_confirmed' => $environment === 'live' && rtrim((string) ($config[self::LIVE_URL] ?? ''), '/') === self::siteUrl(),
             'live_confirmed_for' => $config[self::LIVE_URL] ?? null];
     }
 
-    /** 0.2 installs that set sandbox=false meant "send nothing". Keep that until an environment is chosen. */
+    /**
+     * Reads (search, status, prices) need credentials only.
+     * Writes (registrations, renewals, changes) also need "Process orders and changes".
+     */
     private static function legacyDisabled(array $config): bool
     {
         return !array_key_exists('environment', $config) && array_key_exists('sandbox', $config)
@@ -106,26 +106,19 @@ class RuntimeGuard
         return self::ENDPOINTS[$environment] ?? throw new RuntimeException('Unknown Enom environment.');
     }
 
-    /**
-     * Reads (search, status, prices) need credentials only.
-     * Writes (registrations, renewals, changes) also need "Process orders and changes".
-     */
     public static function assertProvider(int $serverId, bool $readOnly = false): array
     {
         $config = self::configuration($serverId);
-        if (!$readOnly && (!filter_var($config['operations_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN) || $config['legacy_writes_disabled'])) {
+        if (!$readOnly && (!filter_var($config['operations_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN))) {
             throw new RuntimeException('Processing orders and changes is turned off for this Enom server.');
         }
         return $config;
     }
 
-    /**
-     * Identity of the Enom account a domain was registered under. Test keeps the historical
-     * `sandbox:` prefix so existing bindings stay valid; a live account never matches a test one.
-     */
+    /** Identity of the account and environment a domain belongs to. */
     public static function accountFingerprint(array $config): string
     {
-        $prefix = self::environment($config) === 'live' ? 'live' : 'sandbox';
+        $prefix = self::environment($config);
         return hash('sha256', $prefix.':'.strtolower((string) ($config['uid'] ?? '')));
     }
 
@@ -152,6 +145,7 @@ class RuntimeGuard
         return (int) $limit;
     }
 
+    /** @return list<string> */
     public static function leadDays(int $serverId): int
     {
         $lead = Server::findOrFail($serverId)->settings()->where('key', 'lead_days')->first()?->value ?? 30;
@@ -161,7 +155,6 @@ class RuntimeGuard
         return (int) $lead;
     }
 
-    /** @return list<string> */
     public static function defaultNameservers(int $serverId): array
     {
         $value = Server::find($serverId)?->settings->firstWhere('key', 'default_nameservers')?->value;

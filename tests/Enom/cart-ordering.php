@@ -86,7 +86,7 @@ verify(App\Models\InvoiceItem::findOrFail($operation->invoice_item_id)->descript
 verify($service->label === 'first.com' && (float) $service->price === 14.0 && $service->expires_at === null && (int)$service->plan->billing_period === 1, 'Annual billing identity differs: '.json_encode([$service->label,$service->price,$service->expires_at,$service->plan->billing_period]));
 verify((int)$operation->policy['checkout_years'] === 3 && (int)$operation->policy['checkout_plan_id'] !== (int)$service->plan_id, 'Chosen plan was not frozen.');
 verify(app(CartOrdering::class)->bind(App\Models\InvoiceItem::findOrFail($operation->invoice_item_id))->id === $operation->id && Operation::count() === 2, 'Binding replay duplicated an operation.');
-verify(!Illuminate\Support\Facades\Schema::hasTable('enom_order_intents'), 'Obsolete intent table remains.');
+verify(Illuminate\Support\Facades\Schema::hasTable('enom_order_intents'), 'Transitional intent table missing before D6.');
 verify(count(array_filter($providerCommands, fn($command) => $command[0] !== 'Check')) === 0, 'Checkout sent a registrar write.');
 echo 'Cart ordering: '.$checks.' passed; native product and cart components; SQLite; no provider writes.'.PHP_EOL;
 $successful = true;

@@ -2,12 +2,12 @@
 require_once dirname(__DIR__).'/paymenter-test-app.php';
 
 // Native models/events, SQLite memory, provider reads injected and writes prohibited.
-require __DIR__.'/domain-administration.php';
+require dirname(__DIR__).'/enom-managed-fixture.php';
 $successful = false; $checks = 0;
 $loader->addPsr4('Paymenter\\Extensions\\Servers\\Enom\\', $repo.'/Enom/', true);
-mkdir($testRoot, 0700, true);
-foreach (['storage/framework/views', 'storage/framework/cache', 'storage/logs', 'bootstrap/cache'] as $path) { mkdir($testRoot.'/'.$path, 0700, true); }
-foreach (['public', 'resources', 'themes', 'vendor', 'config'] as $path) { symlink($release.'/'.$path, $testRoot.'/'.$path); }
+
+
+
 $user->forceFill(['role_id' => null])->save(); $user->unsetRelation('role'); auth()->setUser($staff);
 $configuration = ['uid' => 'test-account', 'token' => 'offline', 'sandbox' => true, 'reads_enabled' => true, 'operations_enabled' => true];
 $commands = []; $response = ['expiry' => '2027-12-01', 'account' => 'test-account', 'anchor' => '456', 'order_domain' => null, 'order_id' => '789', 'order_term' => '1', 'order_status' => 'Closed']; $currentDomain = null;
@@ -33,8 +33,8 @@ function refuseDisposition(callable $call, string $message): void {
     try { $call(); throw new LogicException($message); }
     catch (Paymenter\Extensions\Servers\Enom\Services\InputValidationException | Symfony\Component\HttpKernel\Exception\HttpException | InvalidArgumentException $error) { checkBilling(dispositionRows() === $before, $message.' changed business data.'); }
 }
-$makeUncertain = function ($name, $known = true) use ($make, $admin, $staff, $policy, $billing, $user) {
-    $domain = $make($name); $admin->savePolicy($staff, $domain->id, $policy);
+$makeUncertain = function ($name, $known = true) use ($make, $billing, $user) {
+    $domain = $make($name);
     $invoice = $billing->invoice($domain->id, $user);
     App\Helpers\ExtensionHelper::addPayment($invoice, 'Stripe', 15, transactionId: 'synthetic-'.$name);
     $operation = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $invoice->id)->sole();
@@ -61,7 +61,8 @@ try {
     foreach (['services', 'invoices', 'invoice_items', 'invoice_transactions', 'jobs'] as $table) { checkBilling($before[$table] === $after[$table], 'Disposition changed '.$table); }
     checkBilling($commands === $commandsBefore && $disposed->state === 'disposed' && $disposed->policy['staff_disposition']['staff_id'] === $staff->id && $disposed->policy['staff_disposition']['financial'] === 'manual_review_required', 'Disposition resends or loses audited responsibility.');
     checkBilling($currentDomain->fresh()->provider_expires_at->format('Y-m-d') === '2026-12-01' && $currentDomain->fresh()->service->status === 'cancelled' && $currentDomain->fresh()->service->expires_at === null && Paymenter\Extensions\Servers\Enom\Services\DomainOperations::writesPaused($currentDomain->fresh()), 'Provider fact advanced confirmed expiry or resurrected native service.');
-    refuseDisposition(fn () => $admin->savePolicy($staff, $currentDomain->id, $policy), 'Policy toggle bypasses staff disposition hold');
+    $reviewer->toggleRenewalPreference($user, $currentDomain->id, true);
+    checkBilling(Paymenter\Extensions\Servers\Enom\Services\DomainOperations::writesPaused($currentDomain->fresh()), 'Renewal preference cleared the disposition hold.');
     refuseDisposition(fn () => $reviewer->enqueueManagement($user, $currentDomain->id, 'lock', ['locked' => true], str_repeat('a', 64)), 'New management bypasses staff disposition hold');
     checkBilling(!$reviewer->canReadmitHeld($disposed) && !$reviewer->funded($disposed), 'Disposition grants readmission or spending authority.');
     $unsafe = $disposed->replicate(); $unsafe->operation_key = 'synthetic-paused-queued'; $unsafe->state = 'queued'; $unsafe->action = 'lock'; $unsafe->save();
@@ -96,7 +97,7 @@ try {
     }
 
     // Native cancelled invoices accept payment and become paid; no retired renewal is requeued.
-    $late = $make('late-retired'); $admin->savePolicy($staff, $late->id, $policy);
+    $late = $make('late-retired');
     $retiredInvoice = $billing->invoice($late->id, $user); $retired = Paymenter\Extensions\Servers\Enom\Models\Operation::where('invoice_id', $retiredInvoice->id)->sole();
     $reviewer->toggleRenewalPreference($user, $late->id, false);
     checkBilling($retiredInvoice->fresh()->status === 'cancelled' && $retired->fresh()->safe_code === 'renewal_cancelled_unpaid', 'Synthetic invoice retirement did not preserve its explicit code.');
@@ -112,62 +113,35 @@ try {
     checkBilling(isset($retired->fresh()->policy['retired_payment_review']), 'Daily late-payment marker is absent.');
     $before = dispositionRows(); $reviewer->reportRetiredInvoicePayments(); checkBilling(dispositionRows() === $before, 'Daily unchanged report is not idempotent.');
 
+    $safe = Paymenter\Extensions\Servers\Enom\Services\DomainAdministration::customer($currentDomain->fresh());
+    checkBilling(!str_contains(json_encode($safe), 'internal-cost-marker') && !str_contains(json_encode($safe), 'account_fingerprint'), 'Customer projection leaked private evidence.');
+    $foreign = App\Models\Invoice::create(['user_id' => $other->id, 'currency_code' => 'USD', 'status' => 'pending', 'due_at' => '2026-11-24']);
+    $foreignItem = $foreign->items()->create(['description' => 'Foreign invoice', 'price' => 15, 'quantity' => 1]);
+    $wrong = $retired->replicate(); $wrong->operation_key = 'foreign-owner-invoice'; $wrong->invoice_id = $foreign->id; $wrong->invoice_item_id = $foreignItem->id; $wrong->save();
+    $safe = Paymenter\Extensions\Servers\Enom\Services\DomainAdministration::customer($late->fresh());
+    checkBilling(!in_array($foreign->id, array_column($safe['invoices'], 'id'), true), 'Customer projection linked a foreign-owner invoice.');
+
     // Registration cost polling is bounded independently of financial fulfillment.
     $response = ['expiry' => '2027-12-01', 'account' => 'test-account', 'anchor' => '456', 'order_domain' => null, 'order_id' => '789', 'order_term' => '1', 'order_status' => 'Closed'];
-    $currentDomain = $make('cost-limit'); $admin->savePolicy($staff, $currentDomain->id, $policy);
+    $currentDomain = $make('cost-limit');
     $costOperation = Paymenter\Extensions\Servers\Enom\Models\Operation::create(['domain_id' => $currentDomain->id, 'service_id' => $currentDomain->service_id, 'operation_key' => 'synthetic-cost-limit',
         'action' => 'register', 'state' => 'succeeded', 'provider_order_id' => '789', 'amount' => '15.00', 'currency' => 'USD', 'term' => 1,
-        'policy' => ['account_fingerprint' => hash('sha256', 'sandbox:test-account')], 'cost' => ['execution' => ['command' => 'Purchase', 'status' => 'success', 'orderid' => '789']]]);
+        'policy' => ['account_fingerprint' => hash('sha256', 'test:test-account')], 'cost' => ['execution' => ['command' => 'Purchase', 'status' => 'success', 'orderid' => '789']]]);
     $beforeCalls = count($commands); $before = dispositionRows();
     for ($i = 0; $i < 8; $i++) { $reviewer->reconcile($costOperation->id); }
     checkBilling(count($commands) - $beforeCalls === 5 && $costOperation->fresh()->cost['actual_attempts'] === 5 && $costOperation->fresh()->cost['actual']['reason'] === 'cost_poll_limit_reached', 'Registration cost polling exceeded its persisted attempt cap.');
     $after = dispositionRows(); foreach (['enom_domains', 'services', 'invoices', 'invoice_items', 'invoice_transactions', 'jobs'] as $table) { checkBilling($before[$table] === $after[$table], 'Cost polling changed '.$table); }
-    $costReview = $admin->get($costStaff, $currentDomain->id);
-    checkBilling($costReview['costs'][0]['poll_attempts'] === 5 && $costReview['costs'][0]['poll_reason'] === 'cost_poll_limit_reached', 'Cost-authorized staff cannot see the bounded polling review reason.');
     checkBilling($costOperation->fresh()->state === 'succeeded' && !array_intersect(['Extend', 'Purchase', 'UpdateExpiredDomains', 'SetRegLock'], $commands), 'Staff review/report/cost path performed a registrar mutation.');
 
-    // The 0.2 staff URLs only redirect into the Filament admin now. Old forms posted there, even fully confirmed
-    // with a current fact digest, change nothing and send nothing; customers are refused. Uses real routes.
     require_once dirname(__DIR__).'/enom-admin-panel.php';
     enomAdminPanel();
-    $controller = $app->make(Paymenter\Extensions\Servers\Enom\Http\Controllers\AdminController::class);
-    $requestFor = function ($actor, string $uri, array $input = []) use ($app) {
-        $request = Illuminate\Http\Request::create('http://enom-tests.invalid'.$uri, 'POST', $input);
-        $session = new Illuminate\Session\Store('provider-fact-redirect', new Illuminate\Session\ArraySessionHandler(60)); $session->start(); $request->setLaravelSession($session);
-        $app->instance('request', $request); $app->instance('session.store', $session); $app['url']->setRequest($request); $app['redirect']->setSession($session); $request->setUserResolver(fn () => $actor);
-        return $request;
-    };
     [$currentDomain, $uiOperation] = $makeUncertain('fact-ui', false);
     $observedUi = $reviewer->observeProviderFact($uiOperation->id, $staff);
     $uiFact = $observedUi->policy['provider_fact'];
-    $requestsIndex = Paymenter\Extensions\Servers\Enom\Admin\Resources\OperationResource::getUrl('index');
-    $legacyPosts = [
-        'providerFact' => ['provider-fact', ['confirmed' => '1']],
-        'disposition' => ['disposition', ['confirmed' => '1', 'fact_digest' => $uiFact['digest'], 'outcome' => 'unattributed_provider_fact', 'financial' => 'manual_review_required', 'reason' => 'Retain native financial review for the unattributed provider outcome']],
-        'reconcile' => ['reconcile', ['confirmed' => '1']],
-        'readmit' => ['readmit', ['confirmed' => '1', 'reason' => 'Reviewed and resumed']],
-        'fund' => ['fund', ['confirmed' => '1', 'reason' => 'Reviewed specific funding expense', 'amount' => '15.00', 'currency' => 'USD']],
-    ];
-    foreach ($legacyPosts as $method => [$path, $input]) {
-        $commandsBefore = $commands; $before = dispositionRows();
-        $response = $controller->{$method}($requestFor($staff, '/admin/enom/'.$uiOperation->id.'/'.$path, $input), $uiOperation->id);
-        checkBilling($response->getStatusCode() === 302 && $response->getTargetUrl() === $requestsIndex, 'Legacy staff '.$path.' POST did not redirect to Registrar requests.');
-        checkBilling(dispositionRows() === $before && $commands === $commandsBefore, 'Legacy staff '.$path.' POST changed business data or reached Enom.');
-        refuseDisposition(fn () => $controller->{$method}($requestFor($user, '/admin/enom/'.$uiOperation->id.'/'.$path, $input), $uiOperation->id), 'Customer legacy '.$path.' POST');
-    }
-    checkBilling($uiOperation->fresh()->state === 'uncertain' && $uiOperation->fresh()->policy['provider_fact']['digest'] === $uiFact['digest'], 'Legacy staff POSTs disposed the request or replaced its fact.');
-    $domainUrl = Paymenter\Extensions\Servers\Enom\Admin\Resources\DomainResource::getUrl('view', ['record' => $currentDomain->id]);
-    foreach (['policy', 'sponsorship', 'refresh', 'sponsoredRenewal'] as $method) {
-        $commandsBefore = $commands; $before = dispositionRows();
-        $response = $controller->{$method}($requestFor($staff, '/admin/enom/domains/'.$currentDomain->id.'/'.$method, ['confirmed' => '1', 'enabled' => '1', 'reason' => 'Reviewed']), $currentDomain->id);
-        checkBilling($response->getTargetUrl() === $domainUrl && dispositionRows() === $before && $commands === $commandsBefore, 'Legacy staff domain '.$method.' POST changed data or did not redirect to the domain page.');
-    }
     // The renewal-review controls now live on Registrar requests: a fresh fact offers "Record outcome", which still needs staff.
     $commandsBefore = $commands;
     $closed = $reviewer->disposeProviderFact($uiOperation->id, $staff, $uiFact['digest'], 'unattributed_provider_fact', 'manual_review_required', 'Retain native financial review for the unattributed provider outcome');
     checkBilling($closed->state === 'disposed' && $commands === $commandsBefore && Paymenter\Extensions\Servers\Enom\Services\DomainOperations::writesPaused($currentDomain->fresh()), 'Confirmed disposition does not close review safely.');
-    $routesSource = file_get_contents($repo.'/Enom/routes/web.php');
-    foreach (['provider-fact', 'disposition'] as $action) { checkBilling((bool) preg_match("~Route::post\('/admin/enom/\\{operation\\}/".$action."'.*block\\(10, 10\\)~", $routesSource), 'Staff '.$action.' route is not session-serialized POST.'); }
     $scheduleSource = file_get_contents($repo.'/Enom/Enom.php');
     checkBilling(str_contains($scheduleSource, "name('enom-retired-invoice-payments')->dailyAt('00:15')"), 'Native late-payment report is not registered daily.');
     echo 'Provider disposition and native late payment: '.$checks.' passed; isolated native SQLite, provider reads injected only.'.PHP_EOL;

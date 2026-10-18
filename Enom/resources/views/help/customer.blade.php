@@ -18,7 +18,7 @@
         </details>
         <details>
             <summary>Can I register a domain for more than a year?</summary>
-            <div><p>Yes. Choose the term next to <strong>Register</strong>, from 1 to 10 years for most endings. The first year is at the registration price and each extra year at the renewal price. See <a class="enom-a" href="{{ route('enom.domains.pricing') }}">domain prices</a>.</p></div>
+            <div><p>Yes. Choose the term at checkout, from 1 to 10 years for most endings. Checkout shows the total for your chosen term. After that term, renewals are billed yearly at the current renewal price. See <a class="enom-a" href="{{ route('enom.domains.pricing') }}">domain prices</a>.</p></div>
         </details>
         <details>
             <summary>What are child nameservers?</summary>
@@ -34,7 +34,7 @@
         </details>
         <details>
             <summary>How do I transfer a domain here?</summary>
-            <div><p>Unlock the domain at your current registrar and get its transfer code. Then use <a class="enom-a" href="{{ route('enom.domains.transfer') }}">Transfer a domain</a>. Most transfers finish within 5 to 7 days and add a year to the expiry date.</p></div>
+            <div><p>Unlock the domain at your current registrar and get its transfer code. Then use <a class="enom-a" href="{{ route('enom.domains.transfer') }}">Transfer a domain</a>. After checkout, open the domain page to enter the transfer code. Once the invoice is paid and the code is received, most transfers finish within 5 to 7 days and add a year. If no code is received within 30 days after payment, the amount paid for this domain is returned as account credit.</p></div>
         </details>
         <details>
             <summary>Why is my domain “Awaiting payment”?</summary>

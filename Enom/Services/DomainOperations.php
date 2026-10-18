@@ -19,10 +19,11 @@ use Paymenter\Extensions\Servers\Enom\Jobs\ExecuteOperation;
 use Paymenter\Extensions\Servers\Enom\Jobs\ReconcileOperation;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Models\Operation;
-use Paymenter\Extensions\Servers\Enom\Models\OrderIntent;
 use Paymenter\Extensions\Servers\Enom\Models\Tld;
 use RuntimeException;
 use Throwable;
+
+use Paymenter\Extensions\Servers\Enom\Models\OrderIntent;
 
 class DomainOperations
 {
@@ -63,72 +64,25 @@ class DomainOperations
 
     public function bindInvoiceItem(InvoiceItem $item): ?Operation
     {
-        // Native cron does not lock a domain row here.
-        if ($item->reference_type !== Service::class) { return null; }
-        $service = $item->reference;
-        if (!$service || $service->product?->server?->extension !== 'Enom') { return null; }
+        if ($item->reference_type !== Service::class || !($service = $item->reference)
+            || $service->product?->server?->extension !== 'Enom') { return null; }
         $domain = Domain::where('service_id', $service->id)->first();
-        if (!$domain || (int) $domain->user_id !== (int) $service->user_id) { return null; }
-        $key = 'invoice-item:'.$item->id;
-        if ($existing = Operation::where('operation_key', $key)->first()) { return $existing; }
-        if ($item->invoice->status !== Invoice::STATUS_PENDING) { return null; }
-        $intent = OrderIntent::where('service_id', $service->id)->first();
-        $initial = $service->status === Service::STATUS_PENDING && $intent && !$intent->invoice_item_id;
-        $renewal = $service->status === Service::STATUS_ACTIVE && $domain->status === 'active' && $domain->provider_expires_at;
-        $action = $initial ? $intent->action : 'renew';
-        $valid = ($initial || $renewal) && $this->validService($service, $domain)
-            && (int) $item->quantity === 1 && $item->invoice->user_id == $domain->user_id
-            && $item->invoice->currency_code === $service->currency_code
-            && $this->cents($item->price) === $this->cents($initial ? $intent->amount : $service->price);
-        // Managed renewals have their own unreferenced native obligations.
-        // A stray stock-linked renewal item cannot authorize registrar work.
-        if ($domain->billing_managed && !$initial) { $valid = false; }
-        $policy = $domain->billing_managed ? array_replace($domain->renewal_policy ?? [], [
-            'billing_managed' => true, 'dispatch_marker_version' => 1, 'domain' => $domain->domain, 'user_id' => (int) $domain->user_id,
-            'service_id' => (int) $service->id, 'server_id' => (int) $domain->server_id,
-            'authority_generation' => $domain->authority_generation, 'confirmed_revision' => $domain->confirmed_revision,
-            'currency' => $service->currency_code, 'term' => $initial ? max(1, (int) $intent->term) : 1, 'retail_minor' => $this->cents($item->price),
-        ]) : null;
-        try {
-            $operation = Operation::firstOrCreate(['operation_key' => $key], [
-                'domain_id' => $domain->id, 'service_id' => $service->id,
-                'invoice_id' => $item->invoice_id, 'invoice_item_id' => $item->id,
-                'action' => $action, 'term' => $initial ? max(1, (int) $intent->term) : 1, 'funding_basis' => 'paid_invoice',
-                'state' => $valid ? 'awaiting_payment' : 'held', 'safe_code' => $valid ? null : 'binding_invalid',
-                'amount' => $item->price, 'currency' => $item->invoice->currency_code,
-                'base_expires_at' => $domain->provider_expires_at,
-                'expected_expires_at' => $domain->provider_expires_at?->addYearNoOverflow(),
-                'payload' => $initial ? ($intent->payload ?? []) : [],
-                'policy' => $policy,
-            ]);
-        } catch (\Illuminate\Database\UniqueConstraintViolationException $error) {
-            $operation = Operation::where('operation_key', $key)->first();
-            if (!$operation) { throw $error; }
+        if (!$domain || $service->status === Service::STATUS_PENDING || Operation::where('operation_key', 'invoice-item:'.$item->id)->whereIn('action', ['register', 'transfer'])->exists()) {
+            return app(CartOrdering::class)->bind($item);
         }
-        if ($initial) {
-            $intent->update(['invoice_id' => $item->invoice_id, 'invoice_item_id' => $item->id]);
-        }
-        return $operation;
+        throw new RuntimeException('Domain renewal binding is invalid.');
     }
 
     public function acceptPaidInvoice(Invoice $invoice): array
     {
         try {
             $ids = [];
-            foreach (Operation::where('invoice_id', $invoice->id)->where('state', 'succeeded')->get() as $done) {
-                if (in_array($done->action, ['register', 'transfer', 'renew'], true) && $invoice->fresh()->status === Invoice::STATUS_PAID
-                    && $this->cents($invoice->fresh()->remaining) === 0 && $this->funded($done)) {
-                    $domain = $done->domain;
-                    if ($domain->provider_expires_at && !$domain->billing_managed && $domain->service?->status === Service::STATUS_ACTIVE) {
-                        $service = $domain->service;
-                        $service->expires_at = $domain->provider_expires_at->subDays(RuntimeGuard::leadDays((int) $domain->server_id))->format('Y-m-d');
-                        $service->save();
-                    }
-                }
-            }
-            foreach (Operation::where('invoice_id', $invoice->id)->where('state', 'awaiting_payment')->get() as $operation) {
+            foreach (Operation::where('invoice_id', $invoice->id)->whereIn('state', ['awaiting_payment', 'awaiting_code', 'held'])->get() as $operation) {
                 if (!$this->funded($operation)) { continue; }
-                if (Operation::whereKey($operation->id)->where('state', 'awaiting_payment')->update(['state' => 'queued']) === 1) {
+                if (in_array($operation->action, ['register', 'transfer'], true)) {
+                    $this->resumeInitial($operation->id);
+                    if ($operation->fresh()->state === 'queued') { $ids[] = $operation->id; }
+                } elseif (Operation::whereKey($operation->id)->where('state', 'awaiting_payment')->update(['state' => 'queued']) === 1) {
                     ExecuteOperation::dispatch($operation->id)->afterCommit();
                     $ids[] = $operation->id;
                 }
@@ -140,23 +94,87 @@ class DomainOperations
     public function enqueueService(Service $service): array
     {
         $ids = [];
-        try {
-            foreach (Operation::where('service_id', $service->id)->whereIn('state', ['awaiting_payment', 'queued'])->get() as $operation) {
-                if (!$this->funded($operation)) { continue; }
-                Operation::whereKey($operation->id)->where('state', 'awaiting_payment')->update(['state' => 'queued']);
+        foreach (Operation::where('service_id', $service->id)->whereIn('state', ['awaiting_payment', 'awaiting_code', 'held', 'queued'])->get() as $operation) {
+            if (!$this->funded($operation)) { continue; }
+            if (in_array($operation->action, ['register', 'transfer'], true)) {
+                $this->resumeInitial($operation->id);
+                if ($operation->fresh()->state === 'queued') { $ids[] = $operation->id; }
+            } elseif ($operation->state !== 'held') {
+                $operation->update(['state' => 'queued']);
                 ExecuteOperation::dispatch($operation->id)->afterCommit();
                 $ids[] = $operation->id;
             }
-        } catch (Throwable) {}
+        }
         return $ids;
+    }
+
+    public function resumeInitial(int $operationId): void
+    {
+        $ownerId = Operation::findOrFail($operationId)->domain->user_id;
+        DB::transaction(function () use ($operationId, $ownerId) {
+            User::whereKey($ownerId)->lockForUpdate()->firstOrFail();
+            $domainId = Operation::whereKey($operationId)->value('domain_id');
+            $domain = Domain::whereKey($domainId)->lockForUpdate()->firstOrFail();
+            $operation = Operation::whereKey($operationId)->lockForUpdate()->firstOrFail();
+            $operation->setRelation('domain', $domain);
+            if (!in_array($operation->action, ['register', 'transfer'], true)
+                || !in_array($operation->state, ['awaiting_payment', 'awaiting_code', 'held', 'queued'], true)
+                || !$this->definitelyUnsent($operation)
+                || !$this->funded($operation) || !$this->executionLifecycleValid($operation)) { return; }
+            // Only local-input holds may resume automatically. Staff/margin holds retain their authority.
+            if ($operation->state === 'held' && !in_array($operation->safe_code, ['contact_details_required', 'transfer_code_required'], true)) { return; }
+            if ($operation->action === 'transfer') { app(TransferOrders::class)->paymentAccepted($operation); $operation->refresh(); }
+            elseif (empty($operation->policy['paid_at'])) {
+                $operation->update(['policy' => array_replace($operation->policy ?? [], ['paid_at' => now()->utc()->toIso8601String()])]);
+            }
+            if (!$this->initialReady($operation)) { return; }
+            if ($operation->state !== 'queued') {
+                $operation->update(['state' => 'queued', 'safe_code' => null]);
+                ExecuteOperation::dispatch($operation->id)->afterCommit();
+            }
+        });
+    }
+
+    /** Check local input again at enqueue, claim and the dispatch boundary. */
+    private function initialReady(Operation $operation): bool
+    {
+        if (!in_array($operation->action, ['register', 'transfer'], true)) { return true; }
+        try {
+            app(RegistrationSetup::class)->validate($operation);
+            if ($operation->action === 'transfer') { app(TransferOrders::class)->assertReady($operation); }
+            $domain = $operation->domain;
+            $tld = Tld::where('server_id', $domain->server_id)->where('tld', $domain->tld)->first();
+            // A paid initial order keeps its purchased terms when staff stop new sales.
+            if (!$tld || $operation->action === 'register' && $tld->tld === 'de'
+                || $operation->action === 'transfer' && !TransferOrders::supported($tld)) {
+                $operation->update(['state' => 'held', 'safe_code' => 'catalogue_unavailable']);
+                return false;
+            }
+            RegistryFields::validate(app(Catalogue::class)->attributesFor($tld), $operation->payload['registry'] ?? []);
+            return true;
+        } catch (InputValidationException $error) {
+            $keys = array_keys($error->errors);
+            $code = $keys[0] ?? 'initial_details_review_required';
+            if (str_starts_with($code, 'contacts.')) {
+                app(RegistrationSetup::class)->hold($operation);
+            } else {
+                $waiting = in_array($code, ['transfer_code_required', 'transfer_code_timeout'], true);
+                $operation->update(['state' => $waiting ? 'awaiting_code' : 'held', 'safe_code' => $code, 'lease_expires_at' => null]);
+            }
+            return false;
+        } catch (\Throwable) {
+            $operation->update(['state' => 'held', 'safe_code' => 'initial_details_review_required', 'lease_expires_at' => null]);
+            return false;
+        }
     }
 
     public function validService(Service $service, Domain $domain): bool
     {
         return (int) $service->user_id === (int) $domain->user_id && $service->product?->server?->extension === 'Enom'
             && (int) $service->product->server_id === (int) $domain->server_id
-            && ($this->cents($service->price) > 0 || $domain->billing_managed && $this->cents($service->price) === 0)
-            && (int) $service->quantity === 1 && $service->coupon_id === null
+            && $domain->billing_managed && $this->cents($service->price) >= 0
+            && (int) $service->quantity === 1
+            && $service->plan?->priceable_type === $service->product->getMorphClass() && (int) $service->plan->priceable_id === (int) $service->product_id
             && $service->plan?->type === 'recurring' && $service->plan->billing_unit === 'year' && (int) $service->plan->billing_period === 1;
     }
 
@@ -169,69 +187,55 @@ class DomainOperations
             || $service->currency_code !== $operation->currency || (int) $operation->term < 1 || (int) $operation->term > 10
             || $operation->action === 'transfer' && (int) $operation->term !== 1) { return false; }
         $policy = $operation->policy ?? [];
+        if (in_array($operation->action, ['register', 'transfer', 'renew'], true) && ($policy['billing_managed'] ?? false) !== true) { return false; }
         if (!empty($policy['billing_managed']) && (!$domain->billing_managed
             || (int) ($policy['authority_generation'] ?? -1) !== $domain->authority_generation
             || (int) ($policy['confirmed_revision'] ?? -1) !== $domain->confirmed_revision
             || ($policy['currency'] ?? null) !== $operation->currency
             || (int) ($policy['term'] ?? 0) !== (int) $operation->term)) { return false; }
         if (!empty($policy['billing_managed'])) {
-            if (($policy['domain'] ?? null) !== $domain->domain || ($policy['user_id'] ?? (int) $domain->user_id) !== (int) $domain->user_id
+            if (($policy['domain'] ?? null) !== $domain->domain || ($policy['user_id'] ?? null) !== (int) $domain->user_id
                 || ($policy['service_id'] ?? null) !== (int) $service->id || ($policy['server_id'] ?? null) !== (int) $domain->server_id
                 || isset($policy['provider_domain_id']) && $policy['provider_domain_id'] !== $domain->provider_domain_id) { return false; }
-            if (isset($policy['account_fingerprint']) || isset($policy['provider_account_identity'])) {
+            if (isset($policy['account_fingerprint'])) {
                 try {
                     $configuration = $this->guard ? ($this->guard)((int) $domain->server_id, true) : RuntimeGuard::configuration((int) $domain->server_id);
                     $uid = $configuration['uid'] ?? null;
                     if (!is_string($uid) || $uid === ''
-                        || isset($policy['account_fingerprint']) && $policy['account_fingerprint'] !== RuntimeGuard::accountFingerprint($configuration)
-                        || isset($policy['provider_account_identity']) && $policy['provider_account_identity'] !== hash('sha256', strtolower(trim($uid)))) { return false; }
+                        || isset($policy['account_fingerprint']) && $policy['account_fingerprint'] !== RuntimeGuard::accountFingerprint($configuration)) { return false; }
                 } catch (Throwable) { return false; }
             }
+        }
+        if (!empty($policy['billing_managed']) && in_array($operation->action, ['register', 'transfer'], true)) {
+            $initialPlan = \App\Models\Plan::find($policy['checkout_plan_id'] ?? 0);
+            if (($policy['checkout_product_id'] ?? null) !== (int) $service->product_id
+                || ($policy['checkout_years'] ?? null) !== (int) $operation->term
+                || ($policy['retail_minor'] ?? null) !== $this->cents($operation->amount)
+                || !$initialPlan || $initialPlan->priceable_type !== $service->product->getMorphClass()
+                || (int) $initialPlan->priceable_id !== (int) $service->product_id
+                || $initialPlan->billing_unit !== 'year' || (int) $initialPlan->billing_period !== (int) $operation->term) { return false; }
         }
         if ($operation->funding_basis === 'non_billable_management') {
             return $domain->status === 'active' && ((int) $operation->authorized_by === (int) $domain->user_id
                 || (bool) User::find($operation->authorized_by)?->hasPermission('admin.enom.manage'));
         }
-        if ($operation->funding_basis === 'operator_funded') {
-            $staff = User::find($operation->authorized_by);
-            return $staff && $staff->hasPermission('admin.enom.manage') && $staff->hasPermission('admin.enom.fund')
-                && filled($operation->funding_reason) && $this->cents($operation->amount) > 0;
-        }
-        if ($operation->funding_basis === 'sponsored') {
-            $sponsorship = $domain->sponsorship ?? [];
-            $approval = $policy['sponsorship'] ?? [];
-            $staff = User::find($approval['approved_by'] ?? 0);
-            $executor = User::find($operation->authorized_by ?? 0);
-            return $domain->billing_managed && $service->status === Service::STATUS_ACTIVE
-                && $this->cents($service->price) === 0 && $this->cents($operation->amount) === 0
-                && $operation->invoice_id === null && $operation->invoice_item_id === null
-                && !empty($sponsorship['enabled']) && $approval === $sponsorship
-                && $staff && $staff->hasPermission('admin.enom.fund')
-                && $executor && $executor->hasPermission('admin.enom.fund')
-                && (!empty($approval['standing']) || !empty($policy['single_cycle_authorized'])
-                    && ($policy['sponsorship_cycle'] ?? null) === $operation->base_expires_at?->format('Y-m-d')
-                    && ($approval['base_expires_at'] ?? null) === $operation->base_expires_at?->format('Y-m-d'))
-                && filled($approval['reason'] ?? null) && ($approval['currency'] ?? null) === $operation->currency
-                && (int) ($approval['term'] ?? 0) === (int) $operation->term
-                && is_int($approval['limit_minor'] ?? null) && $approval['limit_minor'] > 0
-                && !$service->cancellation()->exists();
-        }
         if ($operation->funding_basis === 'complimentary') {
             // The reseller pays. Still complimentary right now, nothing billed, and a cost cap recorded at creation.
             // Once sent, a later change of who pays must not stop the outcome being recorded.
-            $sent = array_key_exists('dispatch_attempted_at', $policy) || isset($operation->cost['execution']) || $operation->provider_order_id !== null;
-            return in_array($operation->action, ['register', 'transfer', 'renew'], true)
+            $sent = array_key_exists('dispatch_attempted_at', $policy) || array_key_exists('execution', $operation->cost ?? []) || $operation->provider_order_id !== null;
+            return $operation->action === 'renew'
                 && ($sent || Pricing::isComplimentary($domain) && $this->cents($service->price) === 0) && $domain->billing_managed
                 && $operation->invoice_id === null && $operation->invoice_item_id === null
                 && $this->cents($operation->amount) === 0
                 && is_int($policy['complimentary_cap_minor'] ?? null)
                 && ($operation->action !== 'renew' || $service->status === Service::STATUS_ACTIVE && !$service->cancellation()->exists());
         }
+        if ($operation->funding_basis !== 'paid_invoice') { return false; }
         $invoice = Invoice::with('items', 'transactions')->find($operation->invoice_id);
         $item = $invoice?->items->firstWhere('id', $operation->invoice_item_id);
         if (!$invoice || !$item || $invoice->status !== Invoice::STATUS_PAID || $invoice->user_id != $domain->user_id
             || $invoice->currency_code !== $operation->currency || $service->currency_code !== $operation->currency
-            || $this->cents($invoice->remaining) !== 0 || (int) $item->quantity !== 1
+            || $this->cents($invoice->remaining) > 0 || (int) $item->quantity !== 1
             || $this->cents($item->price) !== $this->cents($operation->amount) || $this->cents($operation->amount) <= 0) { return false; }
         if (str_starts_with($operation->action, 'privacy_')) {
             if ($item->reference_id !== null || $item->reference_type !== null) { return false; }
@@ -240,16 +244,14 @@ class DomainOperations
                 || $service->status !== Service::STATUS_ACTIVE
                 || (int) ($policy['retail_minor'] ?? -1) !== $this->cents($operation->amount)) { return false; }
         } elseif ($item->reference_type !== Service::class || $item->reference_id != $service->id) { return false; }
-        if ($operation->action === 'renew' && empty($policy['billing_managed'])
-            && $this->cents($service->price) !== $this->cents($operation->amount)) { return false; }
         $total = 0;
         foreach ($invoice->transactions as $transaction) {
             // Gateway, account-credit and staff-recorded payments all count. An invoice switched to
             // "paid" with no recorded payment does not, so it never funds a registrar purchase.
-            if ($transaction->status !== InvoiceTransactionStatus::Succeeded || $this->cents($transaction->amount) <= 0) { continue; }
+            if ($transaction->status !== InvoiceTransactionStatus::Succeeded) { continue; }
             $total += $this->cents($transaction->amount);
         }
-        return $total === $this->cents($invoice->total);
+        return $total >= $this->cents($invoice->total);
     }
 
     public function execute(int $operationId): Operation
@@ -260,6 +262,7 @@ class DomainOperations
         $api = $this->apiForServer((int) $operation->domain->server_id);
         $claimed = DB::transaction(function () use ($operationId) {
             $operation = Operation::findOrFail($operationId);
+            User::whereKey($operation->domain->user_id)->lockForUpdate()->firstOrFail();
             $domain = Domain::whereKey($operation->domain_id)->lockForUpdate()->firstOrFail();
             $operation = Operation::whereKey($operationId)->lockForUpdate()->firstOrFail();
             if ($operation->state === 'running') {
@@ -273,6 +276,7 @@ class DomainOperations
                 $operation->update(['state' => 'held', 'safe_code' => 'staff_disposition_review_required']);
                 return null;
             }
+            if (!$this->initialReady($operation)) { return null; }
             if (Operation::where('domain_id', $domain->id)->where('id', '!=', $operationId)->whereIn('state', ['running', 'pending', 'uncertain'])->exists()) { return null; }
             if (!$this->funded($operation) || !$this->executionLifecycleValid($operation)) {
                 $operation->update(['state' => 'held', 'safe_code' => 'funding_or_preference_invalid']);
@@ -284,7 +288,7 @@ class DomainOperations
                 return null;
             }
             $policy = $operation->policy ?? [];
-            if (($policy['dispatch_marker_version'] ?? null) === 1) { $policy['dispatch_claim_token'] = bin2hex(random_bytes(16)); }
+            $policy['dispatch_claim_token'] = bin2hex(random_bytes(16));
             $operation->update(['policy' => $policy, 'state' => 'running', 'started_at' => now(), 'lease_expires_at' => now()->addSeconds(ExecuteOperation::CLAIM_LEASE_SECONDS),
                 'expected_expires_at' => $operation->action === 'privacy_purchase' ? now()->addYearNoOverflow()->format('Y-m-d') : $operation->expected_expires_at,
                 'request_fingerprint' => hash('sha256', json_encode([$domain->domain, $operation->action, $operation->term, $operation->operation_key], JSON_THROW_ON_ERROR))]);
@@ -303,31 +307,32 @@ class DomainOperations
                     || ($claimed->action === 'transfer' && (!empty($check['available']) || empty($check['transferable'])))) {
                     return $this->finish($claimed, 'rejected', 'domain_unavailable_or_premium');
                 }
-                $node = $result->value('domains.domain');
-                if (is_array($node) && array_is_list($node)) { $node = count($node) === 1 ? $node[0] : null; }
-                $amount = is_array($node) && ($node['name'] ?? null) === $domain->domain
-                    ? RegistrarMoney::decimal($check['prices'][$claimed->action === 'register' ? 'registration' : 'transfer'] ?? null) : null;
-                // A multi-year registration costs the first year plus renewal years; bind the total to the term.
-                if ($amount !== null && $claimed->action === 'register' && (int) $claimed->term > 1) {
-                    $renewal = RegistrarMoney::decimal($check['prices']['renewal'] ?? null);
-                    $amount = $renewal === null ? null : self::money($this->cents($amount) + $this->cents($renewal) * ((int) $claimed->term - 1));
+                $tld = Tld::where('server_id', $domain->server_id)->where('tld', $domain->tld)->first();
+                if (!$tld || $claimed->action === 'register' && ((int) $claimed->term > (int) ($check['max_reg_year'] ?? 10)
+                    || (int) $claimed->term < max(1, (int) ($check['min_reg_year'] ?? 1)) || (int) $claimed->term > 10)) { return $this->finish($claimed, 'held', 'registration_term_changed'); }
+                $price = $api->productPrice($domain->tld, $claimed->action, (int) $claimed->term);
+                $raw = $price->value('productprice.price');
+                $amount = null;
+                if ($price->status === 'success' && in_array(strtolower((string) $price->value('productprice.productenabled')), ['true', '1'], true)
+                    && ($units = $this->costUnits($raw)) !== null) {
+                    $totalUnits = $units * (int) $claimed->term;
+                    $amount = intdiv($totalUnits, 10000).'.'.str_pad((string) ($totalUnits % 10000), 4, '0', STR_PAD_LEFT);
                 }
-                $currency = is_array($node) ? RegistrarMoney::checkPriceCurrency($node['prices'] ?? null) : null;
+                $currency = $amount === null ? null : 'USD';
+                if ($amount === null || $totalUnits > $this->cents($claimed->amount) * 100) {
+                    return $this->finish($claimed, 'held', 'registrar_cost_unavailable_or_above_price');
+                }
                 $updated = $this->updateClaimEvidence($claimed, ['quote' => [
-                    'state' => $amount !== null && $currency !== null ? 'advisory' : 'unconfirmed', 'source' => 'Check',
+                    'state' => $amount !== null && $currency !== null ? 'advisory' : 'unconfirmed', 'source' => 'PE_GetProductPrice',
                     'domain' => $domain->domain, 'action' => $claimed->action, 'term' => (int) $claimed->term,
                     'amount' => $amount, 'currency' => $currency, 'complete' => false,
                     'observed_at' => now()->toIso8601String(), 'reason' => 'preflight_price_not_final_charge',
                 ]]);
                 if (!$updated) { return $claimed->fresh(); }
                 $claimed = $updated;
-                // The reseller pays for complimentary orders: hold anything without a known cost under the cap.
-                if ($claimed->funding_basis === 'complimentary' && ($amount === null || $currency !== 'USD'
-                    || $this->cents($amount) > (int) ($claimed->policy['complimentary_cap_minor'] ?? -1))) {
-                    return $this->finish($claimed, 'held', 'complimentary_cost_above_limit');
-                }
+
             }
-            if ($claimed->action === 'renew' && $domain->billing_managed) {
+            if ($claimed->action === 'renew') {
                 $admission = (new RenewalAdmission($this))->check($claimed, $api);
                 $updated = $this->updateClaimEvidence($claimed, ['quote' => $admission['quote']],
                     $admission['allowed'] ? ['provider_command' => $admission['command']] : []);
@@ -337,14 +342,6 @@ class DomainOperations
                     $state = $claimed->funding_basis === 'paid_invoice' && $admission['code'] === 'grace_renewal_one_year_only' ? 'rejected' : 'held';
                     return $this->finish($claimed, $state, $admission['code']);
                 }
-            } elseif ($claimed->action === 'renew') {
-                $pre = $api->expiry($domain->domain);
-                $expiry = $pre->confirmedExpiry();
-                if ($pre->status !== 'success' || !$expiry || $expiry->format('Y-m-d') !== $claimed->base_expires_at->format('Y-m-d')) {
-                    return $this->finish($claimed, 'held', 'provider_expiry_changed');
-                }
-                $info = $api->renewalInfo($domain->domain);
-                if ($info->status !== 'success') { return $this->finish($claimed, 'held', 'renewal_unavailable'); }
             }
             if (in_array($claimed->action, ['privacy_purchase', 'privacy_renew'], true)) {
                 $privacyResult = $api->privacy($domain->domain);
@@ -487,7 +484,7 @@ class DomainOperations
             'transfer' => $api->transfer($domain->domain, $payload['contacts'] ?? [], $payload['epp'] ?? '', $payload['registry'] ?? []),
             'renew' => ($operation->policy['provider_command'] ?? null) === 'UpdateExpiredDomains'
                 ? $api->expiredRenew($domain->domain, (int) $operation->term)
-                : ($domain->billing_managed ? $api->existingRenew($domain->domain, (int) $operation->term) : $api->renew($domain->domain, (int) $operation->term)),
+                : $api->renew($domain->domain, (int) $operation->term),
             'privacy_purchase' => $api->purchasePrivacy($domain->domain, 1),
             'privacy_renew' => $api->renewPrivacy($domain->domain, 1),
             'nameservers' => $api->setNameservers($domain->domain, $payload['nameservers']),
@@ -581,7 +578,7 @@ class DomainOperations
     public function reconcile(int $operationId): Operation
     {
         $operation = Operation::findOrFail($operationId);
-        if ($operation->state === 'succeeded' && isset($operation->cost['execution'])
+        if ($operation->state === 'succeeded' && array_key_exists('execution', $operation->cost ?? [])
             && ($operation->cost['actual']['state'] ?? null) !== 'confirmed') {
             $this->recordActualCost($operation, $this->apiForServer((int) $operation->domain->server_id, true));
             return $operation->fresh();
@@ -688,7 +685,7 @@ class DomainOperations
     private function recordActualCost(Operation $operation, EnomApi $api, ?RegistrarResult $order = null): void
     {
         if (!in_array($operation->action, ['register', 'renew'], true) || !$operation->provider_order_id
-            || !isset($operation->cost['execution'])) { return; }
+            || !array_key_exists('execution', $operation->cost ?? [])) { return; }
         $cost = $operation->cost ?? [];
         if (($cost['actual']['state'] ?? null) === 'confirmed'
             || in_array($cost['actual']['reason'] ?? null, ['renewal_item_contract_unaccepted', 'cost_poll_limit_reached'], true)) { return; }
@@ -731,12 +728,11 @@ class DomainOperations
                 $cost['actual']['reason'] = 'cost_poll_limit_reached';
             }
             $current->update(['cost' => $cost]);
-            $limit = $current->funding_basis === 'sponsored' ? ($current->policy['sponsorship']['limit_minor'] ?? null)
-                : ($current->funding_basis === 'complimentary' ? ($current->policy['complimentary_cap_minor'] ?? null) : (($cost['quote']['currency'] ?? null) === $actual['currency'] && RegistrarMoney::decimal($cost['quote']['amount'] ?? null) !== null
-                    ? $this->cents($cost['quote']['amount']) : null));
+            $limit = $current->funding_basis === 'complimentary' ? (isset($current->policy['complimentary_cap_minor']) ? $current->policy['complimentary_cap_minor'] * 100 : null) : (($cost['quote']['currency'] ?? null) === $actual['currency']
+                    ? $this->costUnits($cost['quote']['amount'] ?? null) : null);
             if ($actual['state'] === 'confirmed' && is_int($limit)
-                && (!in_array($current->funding_basis, ['sponsored', 'complimentary'], true) || $actual['currency'] === $current->currency)
-                && $this->cents($actual['amount']) > $limit) {
+                && ($current->funding_basis !== 'complimentary' || $actual['currency'] === $current->currency)
+                && $this->costUnits($actual['amount']) > $limit) {
                 $policy = $domain->renewal_policy ?? [];
                 $policy['automatic_spend_paused'] = true;
                 $observation = $domain->observation ?? [];
@@ -750,6 +746,7 @@ class DomainOperations
     private function confirm(Operation $operation, \DateTimeImmutable $expiry, ?string $anchor = null): Operation
     {
         return DB::transaction(function () use ($operation, $expiry, $anchor) {
+            User::whereKey($operation->domain->user_id)->lockForUpdate()->firstOrFail();
             $domain = Domain::whereKey($operation->domain_id)->lockForUpdate()->firstOrFail();
             $operation = Operation::whereKey($operation->id)->lockForUpdate()->firstOrFail();
             if (!in_array($operation->state, ['running', 'pending', 'uncertain'], true)) { return $operation; }
@@ -772,26 +769,17 @@ class DomainOperations
             $domain->update(['status' => 'active', 'provider_expires_at' => $expiry->format('Y-m-d'),
                 'provider_domain_id' => $anchor ?? $domain->provider_domain_id,
                 'capabilities' => array_merge($domain->capabilities ?? [], ['renew' => true]),
-                'provider_order_id' => $operation->provider_order_id, 'last_synced_at' => now(), 'drift_detected_at' => null,
+                'provider_order_id' => $operation->provider_order_id, 'last_synced_at' => now(),
                 'confirmed_revision' => $domain->confirmed_revision + 1]);
             $service->status = Service::STATUS_ACTIVE;
-            $service->expires_at = $domain->billing_managed ? null : \Carbon\Carbon::instance($expiry)->subDays(RuntimeGuard::leadDays((int) $domain->server_id))->format('Y-m-d');
+            $service->expires_at = null;
             $service->save();
-            OrderIntent::where('service_id', $service->id)->update(['payload' => null]);
             if (in_array($operation->action, ['register', 'transfer'], true)) {
                 \Paymenter\Extensions\Servers\Enom\Jobs\RefreshDomain::dispatch((int) $domain->id)->afterCommit()->delay(now()->addSeconds(20));
             }
-            $chosen = $operation->action === 'register' ? ($operation->payload['nameservers'] ?? []) : [];
-            if (is_array($chosen) && count($chosen) >= 2) {
-                $follow = Operation::firstOrCreate(['operation_key' => 'initial-nameservers:'.$operation->id], [
-                    'domain_id' => $domain->id, 'service_id' => $service->id, 'action' => 'nameservers', 'term' => 1,
-                    'funding_basis' => 'non_billable_management', 'authorized_by' => $domain->user_id, 'state' => 'queued',
-                    'currency' => $service->currency_code, 'amount' => 0, 'payload' => ['nameservers' => array_values($chosen)],
-                    'policy' => $domain->billing_managed ? ['dispatch_marker_version' => 1] : null]);
-                ExecuteOperation::dispatch($follow->id)->afterCommit()->delay(now()->addSeconds(45));
-            }
             $operation->confirmed_expires_at = $expiry->format('Y-m-d');
-            return $this->finish($operation, 'succeeded', 'expiry_confirmed');
+            $result = $this->finish($operation, 'succeeded', 'expiry_confirmed');
+            return $result->fresh();
         });
     }
 
@@ -801,11 +789,10 @@ class DomainOperations
         return $code !== null && preg_match('/^[0-9]{1,6}$/D', $code) === 1 ? 'provider_rejected:'.$code : 'provider_rejected';
     }
 
-    /** New managed requests persist this contract at creation; old rows remain conservative. */
-    private function definitelyUnsent(Operation $operation, Domain $domain): bool
+    /** A persisted claim is unsent until the dispatch seal or provider evidence exists. */
+    private function definitelyUnsent(Operation $operation): bool
     {
-        return $domain->billing_managed && ($operation->policy['dispatch_marker_version'] ?? null) === 1
-            && !array_key_exists('dispatch_attempted_at', $operation->policy ?? [])
+        return !array_key_exists('dispatch_attempted_at', $operation->policy ?? [])
             && !array_key_exists('execution', $operation->cost ?? []) && $operation->provider_order_id === null;
     }
 
@@ -819,7 +806,7 @@ class DomainOperations
 
     private function classifyInterruptedLocked(Operation $operation, Domain $domain, string $code): Operation
     {
-        $unsent = $this->definitelyUnsent($operation, $domain);
+        $unsent = $this->definitelyUnsent($operation);
         $operation->update(['state' => $unsent ? 'held' : 'uncertain',
             'safe_code' => $unsent ? 'pre_send_interrupted' : $code, 'lease_expires_at' => null]);
         return $operation;
@@ -854,7 +841,7 @@ class DomainOperations
         // Owner read before the transaction so no snapshot predates the lock.
         $ownerId = Domain::whereKey($claimed->domain_id)->value('user_id');
         return DB::transaction(function () use ($claimed, $ownerId) {
-            // Same authority lock as complimentary grants: user, then domain.
+            // Lock the owner before the domain and request.
             User::whereKey($ownerId)->lockForUpdate()->first();
             $domain = Domain::whereKey($claimed->domain_id)->lockForUpdate()->firstOrFail();
             $current = Operation::whereKey($claimed->id)->lockForUpdate()->firstOrFail();
@@ -873,6 +860,7 @@ class DomainOperations
                 $this->finish($current, 'held', 'dispatch_authority_changed');
                 return null;
             }
+            if (!$this->initialReady($current)) { return null; }
             $policy = $current->policy ?? [];
             $policy['dispatch_attempted_at'] = now()->toIso8601String();
             $current->setAttribute('policy', $policy);
@@ -913,9 +901,16 @@ class DomainOperations
                 // Contacts and transfer codes are purged; a glue request keeps only its (public) host name.
                 $updates['payload'] = in_array($current->action, DomainManager::GLUE_ACTIONS, true) && is_string($current->payload['host'] ?? null)
                     ? ['host' => $current->payload['host']] : null;
-                if (in_array($operation->action, ['register', 'transfer'], true)) { OrderIntent::where('service_id', $operation->service_id)->update(['payload' => null]); }
             }
+            $payload = $updates['payload'] ?? null;
+            unset($updates['payload']);
             $current->update($updates);
+            if ($state === 'succeeded' && $current->action === 'register') {
+                // Persist the encrypted follow-up before purging the only registration snapshot.
+                // Its execution job is deferred until this entire confirmation commits.
+                app(RegistrationSetup::class)->queueNameservers($current);
+            }
+            if (in_array($state, ['succeeded', 'rejected'], true)) { $current->update(['payload' => $payload]); }
             if ($state === 'rejected' && in_array($current->action, ['register', 'transfer'], true)) {
                 Domain::whereKey($current->domain_id)->where('service_id', $current->service_id)
                     ->where('status', $current->action === 'register' ? 'registration_pending' : 'transfer_pending')
@@ -926,11 +921,34 @@ class DomainOperations
         });
     }
 
+    /** Native cleanup may cancel a shared invoice. Preserve history; a definitely unsent terminal attempt may be reordered. */
+    public function retireCancelledInitials(): void
+    {
+        foreach (Operation::whereIn('action', ['register', 'transfer'])->whereIn('state', ['awaiting_payment', 'awaiting_code', 'held', 'queued'])->get() as $candidate) {
+            $ownerId = $candidate->domain?->user_id;
+            DB::transaction(function () use ($candidate, $ownerId) {
+                User::whereKey($ownerId)->lockForUpdate()->first();
+                $domain = Domain::whereKey($candidate->domain_id)->lockForUpdate()->first();
+                $operation = Operation::whereKey($candidate->id)->lockForUpdate()->first();
+                if (!$domain || !$operation || !$this->definitelyUnsent($operation)
+                    || !in_array($operation->state, ['awaiting_payment', 'awaiting_code', 'held', 'queued'], true)) { return; }
+                $invoice = Invoice::with('transactions')->find($operation->invoice_id);
+                if ($domain->service?->status !== Service::STATUS_CANCELLED && $invoice?->status !== Invoice::STATUS_CANCELLED) { return; }
+                // Any payment history needs financial review; cancellation never refunds or sends it.
+                $paid = $invoice && $invoice->transactions->contains(fn ($tx) => $tx->status === InvoiceTransactionStatus::Succeeded && $this->cents($tx->amount) !== 0);
+                $operation->update(['state' => 'rejected', 'safe_code' => $paid ? 'initial_cancelled_payment_review' : 'initial_cancelled_unpaid',
+                    'payload' => null, 'completed_at' => now(), 'lease_expires_at' => null]);
+                $domain->update(['status' => 'cancelled']);
+            });
+        }
+    }
+
     public function sweep(): array
     {
-        $summary = ['queued' => 0, 'uncertain' => 0, 'drift' => 0];
+        $this->retireCancelledInitials();
+        $summary = ['queued' => 0, 'uncertain' => 0];
         $cursor = (int) Cache::get('enom:sweep:operations', 0);
-        $query = fn ($cursor) => Operation::whereIn('state', ['awaiting_payment', 'queued', 'running', 'pending', 'uncertain'])->where('id', '>', $cursor)->orderBy('id')->limit(50)->get();
+        $query = fn ($cursor) => Operation::whereIn('state', ['awaiting_payment', 'awaiting_code', 'queued', 'running', 'pending', 'uncertain'])->where('id', '>', $cursor)->orderBy('id')->limit(50)->get();
         $batch = $query($cursor);
         if ($batch->isEmpty() && $cursor > 0) { $batch = $query(0); }
         foreach ($batch as $operation) {
@@ -940,7 +958,7 @@ class DomainOperations
                 if ($operation->state === 'running' && (!$operation->lease_expires_at || $operation->lease_expires_at->isPast())) {
                     $current = $this->interruptedClaim($operation, 'stale_claim', true);
                     if ($current->state === 'uncertain') { $summary['uncertain']++; }
-                } elseif ($operation->state === 'awaiting_payment' && $operation->invoice_id) {
+                } elseif (in_array($operation->state, ['awaiting_payment', 'awaiting_code'], true) && $operation->invoice_id) {
                     $invoice = Invoice::find($operation->invoice_id);
                     if ($invoice) { $summary['queued'] += count($this->acceptPaidInvoice($invoice)); }
                 } elseif ($operation->state === 'queued') {
@@ -966,22 +984,6 @@ class DomainOperations
             ReconcileOperation::dispatch($operation->id)->afterCommit();
         }
         Cache::put('enom:sweep:costs', (int) ($costBatch->last()?->id ?? 0), now()->addDay());
-        $domainCursor = (int) Cache::get('enom:sweep:domains', 0);
-        $domainQuery = fn ($cursor) => Domain::whereNotNull('provider_expires_at')->where('id', '>', $cursor)->orderBy('id')->limit(100)->get();
-        $domains = $domainQuery($domainCursor);
-        if ($domains->isEmpty() && $domainCursor > 0) { $domains = $domainQuery(0); }
-        foreach ($domains as $domain) {
-            try {
-            if ($domain->billing_managed) { continue; }
-            if (!$this->scheduledProviderEnabled($domain)) { continue; }
-            $expected = $domain->provider_expires_at->subDays(RuntimeGuard::leadDays((int) $domain->server_id));
-            if (!$domain->service || !$this->validService($domain->service, $domain) || !$domain->service->expires_at?->equalTo($expected)) {
-                $domain->update(['drift_detected_at' => $domain->drift_detected_at ?? now()]);
-                $summary['drift']++;
-            }
-            } catch (Throwable) {}
-        }
-        Cache::put('enom:sweep:domains', (int) ($domains->last()?->id ?? 0), now()->addDay());
         return $summary;
     }
 
@@ -1062,11 +1064,11 @@ class DomainOperations
         try {
             $operation = $operation->fresh() ?? $operation;
             if ($actor && (!$actor->hasPermission('admin.enom.manage')
-                || in_array($operation->funding_basis, ['sponsored', 'complimentary'], true) && !$actor->hasPermission('admin.enom.fund'))) { return false; }
+                || $operation->funding_basis === 'complimentary' && !$actor->hasPermission('admin.enom.fund'))) { return false; }
             return $operation->state === 'held' && $operation->action === 'renew' && $operation->domain?->billing_managed
-                && in_array($operation->funding_basis, ['paid_invoice', 'sponsored', 'complimentary'], true)
-                && $operation->provider_order_id === null && !isset($operation->cost['execution'])
-                && !isset($operation->policy['dispatch_attempted_at'])
+                && in_array($operation->funding_basis, ['paid_invoice', 'complimentary'], true)
+                && $operation->provider_order_id === null && !array_key_exists('execution', $operation->cost ?? [])
+                && !array_key_exists('dispatch_attempted_at', $operation->policy ?? [])
                 && count($operation->policy['readmissions'] ?? []) < 10
                 && !($operation->domain->renewal_policy['automatic_spend_paused'] ?? false)
                 && $this->funded($operation) && $this->executionLifecycleValid($operation)
@@ -1084,7 +1086,7 @@ class DomainOperations
         $operation = $operation->fresh() ?? $operation;
         return $operation->action === 'renew' && in_array($operation->state, ['uncertain', 'pending'], true)
             && $operation->domain?->billing_managed && ($operation->policy['billing_managed'] ?? false) === true
-            && (isset($operation->policy['dispatch_attempted_at']) || isset($operation->cost['execution']))
+            && (array_key_exists('dispatch_attempted_at', $operation->policy ?? []) || array_key_exists('execution', $operation->cost ?? []))
             && ($operation->policy['domain'] ?? null) === $operation->domain->domain
             && ($operation->policy['server_id'] ?? null) === (int) $operation->domain->server_id
             && (int) $operation->term >= 1 && (int) $operation->term <= 10 && ($operation->policy['term'] ?? null) === (int) $operation->term
@@ -1287,9 +1289,7 @@ class DomainOperations
             $uid = $service->product?->server?->settings->firstWhere('key', 'uid')?->value;
             if (isset($operation->policy['account_fingerprint']) && (!is_string($uid) || $uid === ''
                 || $operation->policy['account_fingerprint'] !== RuntimeGuard::serverFingerprint($service->product?->server))) { continue; }
-            if (isset($operation->policy['provider_account_identity']) && (!is_string($uid) || $uid === ''
-                || $operation->policy['provider_account_identity'] !== hash('sha256', strtolower(trim($uid))))) { continue; }
-            if ($operation->provider_order_id || isset($operation->policy['dispatch_attempted_at']) || isset($operation->cost['execution'])) { continue; }
+            if ($operation->provider_order_id || array_key_exists('dispatch_attempted_at', $operation->policy ?? []) || array_key_exists('execution', $operation->cost ?? [])) { continue; }
             $invoice = Invoice::whereKey($operation->invoice_id)->lockForUpdate()->first();
             $item = $invoice?->items()->whereKey($operation->invoice_item_id)->first();
             if (!$invoice || !$item || $invoice->status !== Invoice::STATUS_PENDING || $invoice->transactions()->exists()
@@ -1344,7 +1344,7 @@ class DomainOperations
                 'domain_id' => $domain->id, 'service_id' => $domain->service_id, 'action' => $action, 'term' => 1,
                 'funding_basis' => 'non_billable_management', 'authorized_by' => $actor->id,
                 'state' => 'queued', 'currency' => $domain->service->currency_code, 'amount' => 0, 'payload' => $payload,
-                'policy' => $domain->billing_managed ? ['dispatch_marker_version' => 1] : null,
+                'policy' => [],
             ]);
             ExecuteOperation::dispatch($operation->id)->afterCommit();
 
@@ -1421,11 +1421,18 @@ class DomainOperations
         });
     }
 
-    private function cents($amount): int { return (int) round((float) $amount * 100); }
+    private function costUnits(mixed $amount): ?int
+    {
+        if (!is_string($amount) || !preg_match('/^(?:0|[1-9][0-9]{0,9})(?:\.[0-9]{1,4})?$/D', $amount)) { return null; }
+        $parts = explode('.', $amount, 2);
+        return (int) $parts[0] * 10000 + (int) str_pad($parts[1] ?? '', 4, '0');
+    }
 
-    private static function money(int $minor): string { return intdiv($minor, 100).'.'.str_pad((string) ($minor % 100), 2, '0', STR_PAD_LEFT); }
+    private function cents($amount): int { return PricingRule::minor($amount); }
 
     /** Same address whatever its spelling (IPv6 compression, case). */
+    private static function money(int $minor): string { return intdiv($minor, 100).'.'.str_pad((string) ($minor % 100), 2, '0', STR_PAD_LEFT); }
+
     private static function sameIp(?string $a, ?string $b): bool
     {
         $x = is_string($a) ? @inet_pton(trim($a)) : false;
@@ -1524,8 +1531,7 @@ class DomainOperations
         if (in_array('privacy', $sections, true)) {
             $privacy = ($status['privacy'] ?? null) === 'success' && ($snapshot['privacy']['allowed'] ?? false) === true;
             foreach (['privacy_enable', 'privacy_disable'] as $action) { $capabilities[$action] = $privacy && ($snapshot['privacy']['exists'] ?? false) === true; }
-            $privacyPrice = RuntimeGuard::setting((int) $domain->server_id, 'privacy_price')
-                ?? $domain->service->product->settings()->where('key', 'enom_privacy_price')->first()?->value;
+            $privacyPrice = RuntimeGuard::setting((int) $domain->server_id, 'privacy_price');
             $priced = is_numeric($privacyPrice) && (float) $privacyPrice > 0;
             $capabilities['privacy_purchase'] = $priced && $privacy && ($snapshot['privacy']['exists'] ?? null) === false;
             $capabilities['privacy_renew'] = $priced && $privacy && ($snapshot['privacy']['exists'] ?? null) === true && !empty($snapshot['privacy']['expires_at']);

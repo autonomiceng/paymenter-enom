@@ -35,7 +35,8 @@ return new class extends Migration {
             $table->unsignedBigInteger('service_id')->unique();
             $table->unsignedBigInteger('user_id')->index();
             $table->unsignedBigInteger('server_id');
-            $table->string('domain', 253)->unique();
+            $table->string('domain', 253)->index();
+            $table->string('reservation_name', 253)->nullable()->unique();
             $table->string('sld', 63);
             $table->string('tld', 63);
             $table->string('status', 32);

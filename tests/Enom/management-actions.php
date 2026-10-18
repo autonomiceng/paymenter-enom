@@ -202,7 +202,7 @@ refuses(fn () => $staffDomains->requestChange($staff, $clientDomain->id, 'lock',
 $blocker->update(['state' => 'rejected']);
 Illuminate\Database\Eloquent\Model::withoutEvents(fn () => $clientDomain->update(['billing_managed' => true, 'renewal_policy' => ['enabled' => true, 'staff_disposition_hold' => true]]));
 refuses(fn () => $staffDomains->requestChange($staff, $clientDomain->id, 'lock', ['locked' => '1']), 'on hold for staff review', 'Staff bypassed a staff disposition hold.');
-Illuminate\Database\Eloquent\Model::withoutEvents(fn () => $clientDomain->update(['billing_managed' => false, 'renewal_policy' => null]));
+Illuminate\Database\Eloquent\Model::withoutEvents(fn () => $clientDomain->update(['billing_managed' => true, 'renewal_policy' => ['enabled' => true]]));
 // A staff request queued before the staff member lost the permission is no longer funded.
 $queued = $staffDomains->requestChange($staff, $clientDomain->id, 'lock', ['locked' => '1']);
 $managerRole->update(['permissions' => ['admin.tickets.view']]);
@@ -211,5 +211,5 @@ verify(!$operations->funded($queued->fresh()), 'Staff request stayed funded afte
 $requests = [];
 verify($operations->execute($queued->id)->state === 'held' && $requests === [], 'Unauthorized staff request reached Enom.');
 
-echo 'Management actions: '.$checks.' passed; known runtime bugs: '.($knownBugs ? implode(', ', $knownBugs) : 'none').'; injected provider only; SQLite in memory.'.PHP_EOL;
+echo 'Management actions: '.$checks.' passed; injected provider only; SQLite in memory.'.PHP_EOL;
 $successful = true;

@@ -15,7 +15,6 @@ use Illuminate\Support\Facades\RateLimiter;
 use InvalidArgumentException;
 use Paymenter\Extensions\Servers\Enom\Http\FormKeys;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
-use Paymenter\Extensions\Servers\Enom\Models\OrderIntent;
 use Paymenter\Extensions\Servers\Enom\Services\Catalogue;
 use Paymenter\Extensions\Servers\Enom\Services\DomainAdministration;
 use Paymenter\Extensions\Servers\Enom\Services\DomainManager;
@@ -23,10 +22,11 @@ use Paymenter\Extensions\Servers\Enom\Services\DomainOperations;
 use Paymenter\Extensions\Servers\Enom\Services\DomainOrders;
 use Paymenter\Extensions\Servers\Enom\Services\InputValidationException;
 use Paymenter\Extensions\Servers\Enom\Services\Pricing;
-use Paymenter\Extensions\Servers\Enom\Services\PriceChangedException;
 use Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard;
 use RuntimeException;
 use Throwable;
+use Paymenter\Extensions\Servers\Enom\Models\OrderIntent;
+use Paymenter\Extensions\Servers\Enom\Services\PriceChangedException;
 
 /** Client area: domain list, search, order and management. */
 class DomainController extends Controller
@@ -107,10 +107,6 @@ class DomainController extends Controller
     public function search(Request $request)
     {
         $user = $request->user();
-        // A guest who chose Register signs in first, then returns here with the choice kept.
-        if (!$user && $request->query('go') === '1') {
-            return redirect()->guest(route('login'));
-        }
         $endings = $this->endings();
         $raw = self::queryString($request, 'name', 300);
         $chosen = self::queryString($request, 'tld', 63);
@@ -131,7 +127,9 @@ class DomainController extends Controller
         if ($parsed['sld'] !== null && $parsed['error'] === null && $endings->isNotEmpty()) {
             $ordered = $endings->sortBy(fn ($tld) => $tld->tld === $preferred ? -1 : 0, SORT_REGULAR, false)->values()->take(self::MAX_RESULTS);
             foreach ($ordered as $tld) {
-                $results[] = ['domain' => $parsed['sld'].'.'.$tld->tld, 'sld' => $parsed['sld'], 'tld' => $tld->tld, 'terms' => self::termsFor($tld)];
+                $results[] = ['domain' => $parsed['sld'].'.'.$tld->tld, 'sld' => $parsed['sld'], 'tld' => $tld->tld, 'terms' => self::termsFor($tld),
+                    'register_url' => DomainOrders::checkoutUrl($tld, 'register', $parsed['sld'].'.'.$tld->tld, $tld->terms()[0] ?? null),
+                    'transfer_url' => DomainOrders::checkoutUrl($tld, 'transfer', $parsed['sld'].'.'.$tld->tld, 1)];
             }
         }
         $years = (int) self::queryString($request, 'years', 2);
@@ -139,9 +137,8 @@ class DomainController extends Controller
         return view('enom::search', [
             'endings' => $this->endingOptions($user, $endings, 'register'), 'name' => $raw, 'preferred' => $preferred,
             'sld' => $parsed['sld'], 'error' => $parsed['error'], 'notice' => $notice, 'results' => $results,
-            'quoteKey' => $user ? FormKeys::issue($request, 'quote') : null, 'testEnvironment' => $this->catalogueInTest($endings),
+            'testEnvironment' => $this->catalogueInTest($endings),
             'guest' => !$user, 'years' => $years >= 1 && $years <= 10 ? $years : null,
-            'resume' => $user && $request->query('go') === '1' && $results ? $results[0]['domain'] : null,
         ]);
     }
 
@@ -157,47 +154,47 @@ class DomainController extends Controller
         $endings = $this->endings();
         $rows = [];
         try {
-            $public = method_exists(Catalogue::class, 'publicPrices') ? app(Catalogue::class)->publicPrices() : null;
+            $public = app(Catalogue::class)->publicPrices();
         } catch (Throwable $exception) {
             report($exception);
-            $public = null;
+            $public = [];
         }
-        if (is_array($public)) {
-            foreach ($public as $row) {
-                $rows[] = ['tld' => (string) ($row['tld'] ?? ''), 'register' => self::money($row['register'] ?? null), 'renew' => self::money($row['renew'] ?? null),
-                    'transfer' => self::money($row['transfer'] ?? null), 'min_years' => (int) ($row['min_years'] ?? 1), 'max_years' => (int) ($row['max_years'] ?? 10)];
-            }
-        } else {
-            foreach ($endings as $tld) {
-                $terms = self::termsFor($tld);
-                $rows[] = ['tld' => $tld->tld, 'register' => self::money($tld->price('register')), 'renew' => self::money($tld->price('renew')),
-                    'transfer' => self::money($tld->price('transfer')), 'min_years' => $terms[0], 'max_years' => end($terms)];
-            }
+        foreach ($public as $row) {
+            $rows[] = ['tld' => (string) ($row['tld'] ?? ''), 'register' => self::money($row['register'] ?? null), 'renew' => self::money($row['renew'] ?? null),
+                'transfer' => self::money($row['transfer'] ?? null), 'min_years' => (int) ($row['min_years'] ?? 1), 'max_years' => (int) ($row['max_years'] ?? 10)];
         }
         $user = $request->user();
 
         return view('enom::pricing', [
             'rows' => array_values(array_filter($rows, fn ($row) => $row['tld'] !== '')), 'guest' => !$user,
-            'complimentary' => $user ? Pricing::clientComplimentary($user) : false, 'testEnvironment' => $this->catalogueInTest($endings),
+            'testEnvironment' => $this->catalogueInTest($endings),
         ]);
     }
 
     /** @return list<int> registration terms on sale for an ending */
     public static function termsFor(mixed $tld): array
     {
-        $terms = method_exists($tld, 'terms') ? $tld->terms() : [1];
+        $terms = $tld->terms();
 
         return $terms ?: [1];
     }
 
     public function transfer(Request $request)
     {
-        $endings = $this->endings();
+        $endings = $this->endings()->filter(fn ($tld) => $tld->orderable('transfer') && app(\Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class)->allowed($tld));
 
+        $name = self::queryString($request, 'name', 253);
+        $ending = self::queryString($request, 'tld', 63);
+        if ($name !== '' && !str_contains($name, '.') && $ending !== '') { $name .= '.'.$ending; }
+        $result = null;
+        if ($name !== '') {
+            try { $result = $this->orders->check($request->user(), $name); }
+            catch (\Throwable) { $result = ['error' => 'This domain could not be checked. Try again.']; }
+        }
         return view('enom::transfer', [
             'endings' => $this->endingOptions($request->user(), $endings, 'transfer'),
-            'name' => (string) old('domain', self::queryString($request, 'name', 253)),
-            'quoteKey' => FormKeys::issue($request, 'quote'), 'testEnvironment' => $this->catalogueInTest($endings),
+            'name' => $name, 'result' => $result,
+            'testEnvironment' => $this->catalogueInTest($endings),
         ]);
     }
 
@@ -208,9 +205,15 @@ class DomainController extends Controller
         if (!is_string($domain) || strlen($domain) > 253 || !preg_match('/\A[a-z0-9-]{1,63}(\.[a-z0-9]{1,63}){1,3}\z/', $domain = strtolower(trim($domain)))) {
             return response()->json(['status' => 'invalid', 'message' => 'Enter a valid domain name.'], 422);
         }
+        foreach (\App\Classes\Cart::get()->items()->with('product.server')->get() as $line) {
+            if ($line->product?->server?->extension === 'Enom' && ($line->checkout_config['domain'] ?? null) === $domain) {
+                return response()->json(['domain' => $domain, 'status' => 'in_cart', 'url' => route('cart')]);
+            }
+        }
         $user = $request->user();
         if ($user) {
-            $owned = Domain::query()->where('user_id', $user->id)->where('domain', $domain)->value('id');
+            $reservation = \Paymenter\Extensions\Servers\Enom\Services\DomainReservations::blocking($domain);
+            $owned = $reservation && (int) $reservation->user_id === (int) $user->id ? $reservation->id : null;
             if ($owned) {
                 return response()->json(['domain' => $domain, 'status' => 'yours', 'url' => route('enom.domains.show', $owned)]);
             }
@@ -236,7 +239,6 @@ class DomainController extends Controller
 
             return response()->json(['domain' => $domain, 'status' => 'error', 'message' => 'Couldn’t check this name.']);
         }
-        $complimentary = (bool) ($result['complimentary'] ?? false);
         $status = match (true) {
             !empty($result['available']) => 'available',
             !empty($result['existing']) => 'managed',
@@ -245,22 +247,31 @@ class DomainController extends Controller
             default => 'taken',
         };
         $currency = is_string($result['currency'] ?? null) ? $result['currency'] : 'USD';
-        // Terms on sale for this name, each with its total: the first year at the registration price, later years at the renewal price.
+        // Each offered term has its own catalogue total.
         $available = array_values(array_filter(array_map('intval', (array) ($result['terms'] ?? [1])), fn ($y) => $y >= 1 && $y <= 10)) ?: [1];
         $terms = [];
         foreach ($available as $years) {
-            $total = $result['register_totals'][$years] ?? (is_numeric($result['register_price'] ?? null) && is_numeric($result['renew_price'] ?? null)
-                ? number_format(((int) round((float) $result['register_price'] * 100) + (int) round((float) $result['renew_price'] * 100) * ($years - 1)) / 100, 2, '.', '')
-                : null);
-            $terms[(string) $years] = $complimentary ? 'Complimentary' : self::money($total, $currency);
+            $total = $result['register_totals'][$years] ?? null;
+            $terms[(string) $years] = self::money($total, $currency);
         }
         [$min, $max] = [min($available), max($available)];
+        $alternative = null;
+        $primary = $result['register_totals'][$min] ?? null;
+        foreach ($available as $years) {
+            $total = $result['register_totals'][$years] ?? null;
+            if ($years > $min && is_numeric($primary) && is_numeric($total) && (float) $total / $years <= (float) $primary / $min * 0.9) {
+                $alternative = ['years' => $years, 'total' => self::money($total, $currency)];
+                break;
+            }
+        }
         $payload = [
-            'domain' => $result['domain'] ?? $domain, 'status' => $status, 'complimentary' => $complimentary,
-            'price' => $complimentary ? 'Complimentary' : self::money($result['register_price'] ?? null, $currency),
-            'transfer_price' => $complimentary ? 'Complimentary' : self::money($result['transfer_price'] ?? null, $currency),
-            'renew_price' => $complimentary ? null : self::money($result['renew_price'] ?? null, $currency),
-            'min_years' => $min, 'max_years' => $max, 'terms' => $terms,
+            'domain' => $result['domain'] ?? $domain, 'status' => $status,
+            'price' => self::money($result['register_price'] ?? null, $currency),
+            'transfer_price' => self::money($result['transfer_price'] ?? null, $currency),
+            'renew_price' => self::money($result['renew_price'] ?? null, $currency),
+            'register_url' => $result['register_url'] ?? null, 'transfer_url' => $result['transfer_url'] ?? null,
+            'warning' => $result['warning'] ?? null,
+            'min_years' => $min, 'max_years' => $max, 'terms' => $terms, 'alternative' => $alternative,
         ];
         if (!$user) {
             Cache::put('enom.domains.check.guest:'.$domain, $payload, now()->addSeconds(60));
@@ -269,8 +280,11 @@ class DomainController extends Controller
         return response()->json($payload);
     }
 
-    // ---------------------------------------------------------------- order
-
+    /**
+     * The ending's registry details schema: [{name, label, required, parent?, text, options: [{value, label, requires}]}].
+     *
+     * @return list<array>
+     */
     public function quote(Request $request)
     {
         FormKeys::verify($request, 'quote');
@@ -490,7 +504,6 @@ class DomainController extends Controller
             ->with('enom_status', $result->status === 'transfer_pending' ? 'Transfer started. We’ll update this page as it progresses.' : 'Order placed. We’re registering '.$result->domain.' now.');
     }
 
-    /** @return array<string, array> contacts for all four roles */
     private function orderContacts(Request $request): array
     {
         $owner = $this->validContact($request->input('contact'), 'contact', 'registrant');
@@ -555,17 +568,12 @@ class DomainController extends Controller
             'nameservers' => is_string($nameservers) ? substr($nameservers, 0, 4096) : ''];
     }
 
-    /**
-     * The ending's registry details schema: [{name, label, required, parent?, text, options: [{value, label, requires}]}].
-     *
-     * @return list<array>
-     */
     public static function registryFields(array $quote, mixed $tld): array
     {
         $fields = $quote['registry_fields'] ?? null;
         if (!is_array($fields) && $tld) {
             try {
-                $fields = method_exists(Catalogue::class, 'attributesFor') ? app(Catalogue::class)->attributesFor($tld) : ($tld->registry_fields ?? null);
+                $fields = app(Catalogue::class)->attributesFor($tld);
             } catch (Throwable $exception) {
                 report($exception);
                 $fields = null;
@@ -645,16 +653,15 @@ class DomainController extends Controller
     {
         $user = $request->user();
         $model = $this->manager->owned($user, $domain);
-        $snapshot = $this->manager->snapshot($user, $domain) + $this->snapshotDefaults($model);
+        $snapshot = $this->manager->snapshot($user, $domain);
         $keys = [];
         foreach (array_unique([...DomainManager::ACTIONS, ...self::GLUE_ACTIONS, 'refresh', 'renew', 'privacy_purchase', 'privacy_renew', 'renewal_preference']) as $action) {
             $keys[$action] = FormKeys::issue($request, 'domain:'.$domain.':'.$action);
         }
-        $privacyPrice = RuntimeGuard::setting((int) $model->server_id, 'privacy_price')
-            ?? $model->service?->product?->settings->firstWhere('key', 'enom_privacy_price')?->value;
+        $privacyPrice = RuntimeGuard::setting((int) $model->server_id, 'privacy_price');
 
         return view('enom::show', [
-            'snapshot' => $snapshot, 'keys' => $keys, 'renewal' => $this->renewalChoices($user, $model, $snapshot),
+            'domain' => $model, 'snapshot' => $snapshot, 'keys' => $keys, 'renewal' => $this->renewalChoices($user, $model, $snapshot),
             'creditsUrl' => \Illuminate\Support\Facades\Route::has('account.credits') ? route('account.credits') : null,
             'privacyPrice' => is_numeric($privacyPrice) && (float) $privacyPrice > 0 ? self::money(Pricing::taxed($user, number_format((float) $privacyPrice, 2, '.', ''), $model->service?->currency_code ?? 'USD')) : null,
             'supportUrl' => \Illuminate\Support\Facades\Route::has('tickets.create') ? route('tickets.create') : null,
@@ -662,7 +669,7 @@ class DomainController extends Controller
     }
 
     /**
-     * Renew-now terms with their totals, from DomainOrders::renewalOptions when available.
+     * Renew-now terms with their totals, from DomainOrders::renewalOptions.
      *
      * @return array{options: list<array{years: int, total: ?string}>, per_year: ?string}
      */
@@ -673,7 +680,7 @@ class DomainController extends Controller
         $years = [1];
         $totals = [];
         $open = null;
-        if (method_exists($this->orders, 'renewalOptions') && !empty($snapshot['capabilities']['renew'])) {
+        if (!empty($snapshot['capabilities']['renew'])) {
             try {
                 $options = $this->orders->renewalOptions($user, (int) $domain->id);
                 $years = array_values(array_filter(array_map('intval', (array) ($options['years'] ?? [])), fn ($y) => $y >= 1 && $y <= 10));
@@ -693,7 +700,6 @@ class DomainController extends Controller
         return ['options' => $open ? [] : $choices, 'per_year' => self::money($perYear, $currency), 'open_invoice' => $open];
     }
 
-    /** Fallbacks for snapshot keys added in 0.3, so the page renders against older services. */
     private function snapshotDefaults(Domain $domain): array
     {
         $server = (int) $domain->server_id;
@@ -923,12 +929,11 @@ class DomainController extends Controller
     /** @return list<array{tld: string, price: ?string}> */
     private function endingOptions(?User $user, Collection $endings, string $action): array
     {
-        $complimentary = $user && Pricing::clientComplimentary($user);
         $options = [];
         foreach ($endings as $tld) {
             try {
                 // Guests see public pre-tax prices; clients see their own, tax included.
-                $price = $complimentary ? 'Complimentary' : self::money($user ? Pricing::taxed($user, $tld->price($action), 'USD') : $tld->price($action));
+                $price = self::money($user ? Pricing::taxed($user, $tld->price($action), 'USD') : $tld->price($action));
             } catch (Throwable) {
                 $price = null;
             }
@@ -1091,10 +1096,16 @@ class DomainController extends Controller
         $kind = $status === 'transfer_pending' ? 'Transferring' : 'Registering';
         if (in_array($status, ['registration_pending', 'transfer_pending'], true)) {
             return match (true) {
+                $label === 'Needs your code' => ['Needs your code', 'warn'],
+                $label === 'Needs your details' => ['Needs your details', 'warn'],
                 !empty($progress['awaiting_payment']) => ['Awaiting payment', 'warn'],
                 is_string($label) && str_ends_with($label, 'needs review') => ['Delayed', 'warn'],
                 default => [$kind, 'info'],
             };
+        }
+
+        if ($status === 'transfer_rejected' && ($progress['safe_code'] ?? null) === 'transfer_code_timeout') {
+            return ['Transfer cancelled', 'muted'];
         }
 
         return match ($status) {
@@ -1131,8 +1142,10 @@ class DomainController extends Controller
             $what .= ', '.self::yearsLabel($term);
         }
         [$label, $tone] = match (true) {
-            $state === 'rejected' && $outcome === 'cancelled_unpaid' => ['Cancelled', 'muted'],
+            $state === 'rejected' && in_array($outcome, ['cancelled_unpaid', 'code_timeout'], true) => ['Cancelled', 'muted'],
             $state === 'awaiting_payment' => ['Awaiting payment', 'warn'],
+            $state === 'awaiting_code' => ['Needs your code', 'warn'],
+            $state === 'held' && $outcome === 'needs_details' => ['Needs your details', 'warn'],
             in_array($state, ['queued', 'running', 'pending'], true) => ['In progress', 'info'],
             in_array($state, ['uncertain', 'held'], true) => ['Being checked', 'warn'],
             $state === 'succeeded' => ['Done', 'ok'],

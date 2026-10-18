@@ -2,14 +2,13 @@
 require_once dirname(__DIR__).'/paymenter-test-app.php';
 
 // Real stock models, in-memory database, provider simulator only. No installed app or network.
-require __DIR__.'/reconciliation-rejection.php';
+require dirname(__DIR__).'/enom-reconciliation-fixture.php';
 $successful = false;
 $checks = 0;
 require_once dirname(__DIR__).'/enom-domain-page.php';
 function domainActions($domain, $user): array { return enomFormActions(enomDomainPage($user, $domain->id)); }
 $user->update(['email' => 'demo@example.com']);
-$product->settings()->create(['key' => 'enom_privacy_price', 'value' => '5.00']);
-$server->settings()->create(['key' => 'privacy_price', 'value' => '5.00']); // 0.3 server-level ID Protect price, read by the page.
+$server->settings()->updateOrCreate(['key' => 'privacy_price'], ['value' => '5.00']);
 // 0.3: DNS records, SRV and DNSSEC are offered only when the server's DNS tools setting is on.
 $server->settings()->create(['key' => 'dns_tools', 'value' => '1', 'type' => 'boolean']);
 [$domain, $seed] = fixture('register');

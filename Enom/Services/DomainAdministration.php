@@ -5,20 +5,20 @@ namespace Paymenter\Extensions\Servers\Enom\Services;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\Service;
-use App\Models\User;
 use Carbon\CarbonImmutable;
-use Closure;
-use Illuminate\Support\Facades\DB;
-use Paymenter\Extensions\Servers\Enom\Api\DomainName;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Models\Operation;
 use Throwable;
+use App\Models\User;
+use Closure;
+use Illuminate\Support\Facades\DB;
+use Paymenter\Extensions\Servers\Enom\Api\DomainName;
 
-/** Explicit per-domain configuration. Observation and approval never purchase a renewal. */
+/** Customer-safe observation, progress and invoice projections. */
 class DomainAdministration
 {
     private const BLOCKING_STATES = ['awaiting_payment', 'queued', 'running', 'pending', 'uncertain', 'held'];
-
+    /** An explicit allowlist prevents private observation and cost serialization. */
     public function __construct(private DomainOperations $operations, private ?DomainBilling $billing = null,
         private ?DomainObservation $observer = null, private ?Closure $readGuard = null) {}
 
@@ -28,6 +28,7 @@ class DomainAdministration
     }
 
     private function billing(): DomainBilling { return $this->billing ?? app(DomainBilling::class); }
+
     private function observer(): DomainObservation { return $this->observer ?? app(DomainObservation::class); }
 
     public function get(User $user, int $domainId): array
@@ -249,7 +250,6 @@ class DomainAdministration
         return null;
     }
 
-    /** An explicit allowlist prevents private observation, sponsorship and cost serialization. */
     public static function customer(Domain $domain): array
     {
         $observation = $domain->observation ?? [];
@@ -353,21 +353,28 @@ class DomainAdministration
             $label = DomainPresentation::progress($status, $request);
             $awaiting = $label === DomainPresentation::AWAITING_PAYMENT;
             return ['label' => $label, 'kind' => match ($status) { 'registration_pending' => 'registration', 'transfer_pending' => 'transfer', default => null },
-                'awaiting_payment' => $awaiting, 'invoice_id' => $awaiting ? $invoiceId : null];
+                'awaiting_payment' => $awaiting, 'invoice_id' => $awaiting ? $invoiceId : null,
+                'state' => $request['state'] ?? null, 'safe_code' => in_array($request['safe_code'] ?? null, ['contact_details_required', 'transfer_code_required', 'transfer_code_timeout'], true) ? $request['safe_code'] : null];
         };
-        $result = []; $pending = []; $owners = [];
+        $result = []; $pending = []; $owners = []; $refused = [];
         foreach ($domains as $domain) {
             if (!($domainId = self::key(data_get($domain, 'id')))) { continue; }
             $status = is_string(data_get($domain, 'status')) ? data_get($domain, 'status') : null;
             $result[$domainId] = $entry($status, null, null);
+            if ($status === 'transfer_rejected') { $refused[] = $domainId; }
             if ($status !== null && isset($actions[$status])) {
                 $pending[$domainId] = $status;
                 $owners[$domainId] = ['service_id' => (int) data_get($domain, 'service_id'), 'user_id' => (int) data_get($domain, 'user_id')];
             }
         }
+        // A transfer cancelled for a missing code reads differently from one the registrar refused.
+        foreach ($refused ? Operation::query()->whereIn('domain_id', $refused)->where('action', 'transfer')
+            ->orderByDesc('id')->toBase()->get(['domain_id', 'safe_code'])->unique('domain_id') : [] as $request) {
+            if ($request->safe_code === 'transfer_code_timeout') { $result[(int) $request->domain_id]['safe_code'] = $request->safe_code; }
+        }
         if (!$pending) { return $result; }
         $latest = [];
-        foreach (Operation::query()->select(['id', 'domain_id', 'service_id', 'invoice_id', 'invoice_item_id', 'action', 'state'])
+        foreach (Operation::query()->select(['id', 'domain_id', 'service_id', 'invoice_id', 'invoice_item_id', 'action', 'state', 'safe_code'])
             ->whereIn('domain_id', array_keys($pending))->whereIn('action', array_values($actions))->orderByDesc('id')->toBase()->get() as $request) {
             $domainId = (int) $request->domain_id;
             if (isset($latest[$domainId]) || $request->action !== $actions[$pending[$domainId]]
@@ -378,7 +385,7 @@ class DomainAdministration
         foreach ($latest as $domainId => $request) {
             $link = $links[(int) $request->id] ?? null;
             $result[$domainId] = $entry($pending[$domainId], ['state' => is_string($request->state) ? $request->state : null,
-                'invoiced' => $request->invoice_id !== null, 'invoice_status' => $link['status'] ?? null], $link['id'] ?? null);
+                'safe_code' => $request->safe_code, 'invoiced' => $request->invoice_id !== null, 'invoice_status' => $link['status'] ?? null], $link['id'] ?? null);
         }
         return $result;
     }
@@ -397,26 +404,33 @@ class DomainAdministration
         if (!$amount || !is_string($currency) || !preg_match('/^[A-Z]{3}$/D', $currency)) { return null; }
         return ['amount' => $amount, 'currency' => $currency, 'state' => self::safeCode($value['state'] ?? null) ?? 'unconfirmed'];
     }
+
     private static function boolean(mixed $value, string $field, array &$errors): ?bool
     {
         if (in_array($value, ['1', 1, true], true)) { return true; }
         if (in_array($value, ['0', 0, false], true)) { return false; }
         $errors[$field] = 'Choose an explicit enabled or disabled value.'; return null;
     }
+
     private static function integer(mixed $value, string $field, array &$errors): ?int
     {
         if (is_int($value) || is_string($value) && preg_match('/^(?:0|[1-9][0-9]{0,2})$/D', $value)) { return (int) $value; }
         $errors[$field] = 'Enter a whole number of days or years.'; return null;
     }
+
     private static function minor(string $amount): int { return (int) str_replace('.', '', $amount); }
+
     private static function decimal(int $minor): string { return intdiv($minor, 100).'.'.str_pad((string) ($minor % 100), 2, '0', STR_PAD_LEFT); }
+
     private static function safeCode(mixed $value): ?string { return is_string($value) && preg_match('/^[a-z][a-z0-9_]{0,63}$/D', $value) ? $value : null; }
+
     private static function clock(mixed $value): ?CarbonImmutable
     {
         if (!is_string($value) || !preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/D', $value)) { return null; }
         try { return CarbonImmutable::parse($value); } catch (Throwable) { return null; }
     }
     private static function timestamp(mixed $value): ?string { return self::clock($value)?->toIso8601String(); }
+
     private static function day(mixed $value): ?string
     {
         if ($value instanceof \DateTimeInterface) { return $value->format('Y-m-d'); }

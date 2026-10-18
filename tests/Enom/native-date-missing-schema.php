@@ -1,10 +1,8 @@
 <?php
 require_once dirname(__DIR__).'/paymenter-test-app.php';
-// Existing isolated official-runtime bootstrap, synthetic SQLite, no installed app environment.
-$bootstrap=file_get_contents(__DIR__.'/domain-billing.php');
-$prefix=explode('$checks = 0;',$bootstrap,2)[0];
-if(!str_starts_with($prefix,'<?php')||!str_contains($prefix,':memory:'))throw new RuntimeException('Synthetic bootstrap required');
-eval(substr($prefix,strlen('<?php')));
+$enomBootExtension = false;
+$enomCreateCurrency = false;
+require dirname(__DIR__).'/enom-native-app.php';
 $billing=new Paymenter\Extensions\Servers\Enom\Services\DomainBilling(new Paymenter\Extensions\Servers\Enom\Services\DomainOperations);
 App\Models\Service::updating(fn($service)=>$billing->preserveNativeDate($service));
 App\Models\Currency::create(['code'=>'USD','name'=>'Dollar','format'=>'1,000.00']);

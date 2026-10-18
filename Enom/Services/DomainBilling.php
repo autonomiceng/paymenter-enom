@@ -108,7 +108,7 @@ final class DomainBilling
                 if ($existing->state !== 'rejected' || $existing->funding_basis !== 'paid_invoice'
                     || $existingInvoice->status !== Invoice::STATUS_CANCELLED || $existingInvoice->transactions()->exists()
                     || $existingInvoice->items->count() !== 1 || $existing->provider_order_id
-                    || isset($existing->policy['dispatch_attempted_at']) || isset($existing->cost['execution'])
+                    || array_key_exists('dispatch_attempted_at', $existing->policy ?? []) || array_key_exists('execution', $existing->cost ?? [])
                     || !preg_match('/^'.preg_quote($key, '/').'(?:\:replacement\:[1-9][0-9]*)?$/D', $existing->operation_key)) {
                     throw new RuntimeException('Retired renewal billing requires financial review.');
                 }
@@ -128,6 +128,7 @@ final class DomainBilling
             if (!$policy['enabled']) { throw new RuntimeException('Domain renewal billing is disabled.'); }
             if (!empty($policy['automatic_spend_paused'])) { throw new RuntimeException('Domain renewal spending requires review.'); }
             if (Pricing::isComplimentary($domain)) { throw new RuntimeException('Complimentary domains renew without an invoice.'); }
+            if ($this->minor($service->price) === 0) { throw new RuntimeException('A zero-price renewal requires complimentary pricing chosen by staff.'); }
             // New invoices charge the current catalogue price; issued invoices above keep theirs.
             if (Pricing::mode($domain) === 'standard') {
                 if (Pricing::renewalPrice($domain) === null) { throw new RuntimeException('The renewal price for this ending is missing. Set it in TLDs & pricing.'); }
@@ -135,7 +136,7 @@ final class DomainBilling
                 $service->refresh();
             }
             $amount = $this->minor($service->price) * $years;
-            if ($amount <= 0) { throw new RuntimeException('A zero-price renewal requires explicit sponsorship.'); }
+            if ($amount <= 0) { throw new RuntimeException('A zero-price renewal requires complimentary pricing chosen by staff.'); }
             $lockedPolicy = $this->lockedPolicy($domain, $service, $policy, $calendar, $years);
             $invoice = new Invoice(['user_id' => $domain->user_id, 'currency_code' => $service->currency_code,
                 'status' => Invoice::STATUS_PENDING, 'due_at' => $calendar['due']]);
@@ -143,7 +144,7 @@ final class DomainBilling
             $invoice->save();
             $item = $invoice->items()->create(['reference_type' => null, 'reference_id' => null,
                 'quantity' => 1, 'price' => $this->decimal($amount),
-                'description' => 'Renew '.$domain->domain.' ('.$years.' '.($years === 1 ? 'year' : 'years').'; expires '.$calendar['expiry'].')']);
+                'description' => 'Renew '.$domain->domain.' ('.$years.' '.($years === 1 ? 'year' : 'years').')']);
             Operation::create(['domain_id' => $domain->id, 'service_id' => $service->id, 'invoice_id' => $invoice->id,
                 'invoice_item_id' => $item->id, 'operation_key' => $key, 'action' => 'renew', 'term' => $years,
                 'funding_basis' => 'paid_invoice', 'state' => 'awaiting_payment', 'amount' => $this->decimal($amount),
@@ -172,10 +173,9 @@ final class DomainBilling
     private function lockedPolicy(Domain $domain, Service $service, array $policy, array $calendar, int $years = 1): array
     {
         $price = new Price(['price' => $service->price, 'currency' => $service->currency, 'tax' => Settings::tax($service->user)]);
-        unset($policy['sponsorship']);
         $uid = $service->product?->server?->settings->firstWhere('key', 'uid')?->value;
         $account = $policy['account_fingerprint'] ?? (is_string($uid) && $uid !== '' ? RuntimeGuard::serverFingerprint($service->product?->server) : null);
-        return array_merge($policy, ['billing_managed' => true, 'dispatch_marker_version' => 1, 'calendar' => $calendar,
+        return array_merge($policy, ['billing_managed' => true, 'calendar' => $calendar,
             // A multi-year obligation is the yearly price times its term.
             'term' => $years, 'retail_minor' => $this->minor($service->price) * $years, 'original_net_minor' => $this->minor($price->subtotal) * $years,
             'currency' => $service->currency_code, 'authority_generation' => (int) $domain->authority_generation,
@@ -196,14 +196,10 @@ final class DomainBilling
             || !hash_equals($policy['account_fingerprint'], RuntimeGuard::serverFingerprint($service->product?->server)))) {
             throw new RuntimeException('Registrar account authority requires review.');
         }
-        if (isset($policy['provider_account_identity']) && (!is_string($uid) || $uid === ''
-            || !hash_equals($policy['provider_account_identity'], hash('sha256', strtolower(trim($uid)))))) {
-            throw new RuntimeException('Registrar account authority requires review.');
-        }
         if (!$domain->billing_managed || (int) $domain->user_id !== (int) $service->user_id
             || (int) $domain->server_id !== (int) $service->product?->server_id
             || $service->product?->server?->extension !== 'Enom' || $service->expires_at !== null
-            || (int) $service->quantity !== 1 || $service->coupon_id !== null
+            || (int) $service->quantity !== 1
             || $service->plan?->type !== 'recurring' || $service->plan?->billing_unit !== 'year'
             || (int) $service->plan?->billing_period !== 1 || !$domain->provider_expires_at
             || !preg_match('/^[A-Z]{3}$/D', (string) $service->currency_code)) {
@@ -242,7 +238,10 @@ final class DomainBilling
         ExtensionHelper::addPayment($invoice, null, $this->decimal($remaining), isCreditTransaction: true);
     }
 
-    /** Explicit standing sponsorship never fabricates a customer payment. */
+    /**
+     * Queue this cycle's renewal at the reseller's cost. One renewal per expiry cycle,
+     * whatever paid for it. Staff may pass themselves as the actor; the daily run passes null.
+     */
     public function sponsor(int $domainId, ?User $actor = null): ?Operation
     {
         // Read the owner before the transaction: a plain read inside it would fix an older snapshot.
@@ -293,10 +292,6 @@ final class DomainBilling
         });
     }
 
-    /**
-     * Queue this cycle's renewal at the reseller's cost. One renewal per expiry cycle,
-     * whatever paid for it. Staff may pass themselves as the actor; the daily run passes null.
-     */
     public function complimentary(int $domainId, ?User $actor = null, int $years = 1): ?Operation
     {
         // Read the owner before the transaction: a plain read inside it would fix an older snapshot.
@@ -380,16 +375,6 @@ final class DomainBilling
                 $this->assertBinding($domain, $domain->service);
                 return $this->health($domainId, $this->complimentary($domainId) ? 'complimentary' : 'review');
             }
-            if ($this->minor($domain->service?->price) === 0) {
-                $this->assertBinding($domain, $domain->service);
-                if (!$this->sponsorshipApproved($domain, $domain->service, $policy)) { return $this->health($domainId, 'sponsorship_review'); }
-                if ($existing = Operation::where('operation_key', 'sponsored:'.$domain->id.':'.$domain->provider_expires_at->format('Y-m-d'))->first()) {
-                    return $this->health($domainId, in_array($existing->state, ['queued', 'running', 'pending', 'succeeded'], true) ? 'sponsored' : 'sponsorship_review');
-                }
-                $this->assertEligible($domain, $domain->service);
-                if (app(DomainObservation::class)->observeRenewalQuote($domainId) !== 'quoted') { return $this->health($domainId, 'sponsorship_review'); }
-                return $this->health($domainId, $this->sponsor($domainId) ? 'sponsored' : 'sponsorship_review');
-            }
             $this->invoice($domainId);
             return $this->health($domainId, 'invoiced');
         } catch (RuntimeException $error) {
@@ -442,9 +427,7 @@ final class DomainBilling
                     || ($policy['domain'] ?? null) !== $domain->domain || ($policy['user_id'] ?? null) !== (int) $domain->user_id
                     || ($policy['service_id'] ?? null) !== (int) $service->id || ($policy['server_id'] ?? null) !== (int) $domain->server_id
                     || isset($policy['account_fingerprint']) && (!is_string($uid) || !is_string($policy['account_fingerprint'])
-                        || !hash_equals($policy['account_fingerprint'], RuntimeGuard::serverFingerprint($service->product?->server)))
-                    || isset($policy['provider_account_identity']) && (!is_string($uid) || !is_string($policy['provider_account_identity'])
-                        || !hash_equals($policy['provider_account_identity'], hash('sha256', strtolower(trim($uid)))))) {
+                        || !hash_equals($policy['account_fingerprint'], RuntimeGuard::serverFingerprint($service->product?->server)))) {
                     return 'review';
                 }
             }
@@ -453,7 +436,6 @@ final class DomainBilling
         });
     }
 
-    /** An actionable explicit approval is required before refreshing its quote. */
     private function sponsorshipApproved(Domain $domain, Service $service, array $policy, ?User $actor = null): bool
     {
         $approval = $domain->sponsorship;
@@ -498,18 +480,9 @@ final class DomainBilling
         });
     }
 
-    private function minor(mixed $amount): int
-    {
-        if (is_float($amount) && is_finite($amount) && abs($amount - round($amount, 2)) < 0.0000001) {
-            $amount = number_format($amount, 2, '.', '');
-        }
-        $decimal = RegistrarMoney::decimal(is_string($amount) ? $amount : (is_int($amount) ? (string) $amount : null));
-        if ($decimal === null) { throw new RuntimeException('Domain renewal amount requires review.'); }
-        [$whole, $fraction] = explode('.', $decimal);
-        return ((int) $whole * 100) + (int) $fraction;
-    }
+    private function minor(mixed $amount): int { return PricingRule::minor($amount); }
 
-    private function decimal(int $minor): string { return intdiv($minor, 100).'.'.str_pad((string) ($minor % 100), 2, '0', STR_PAD_LEFT); }
+    private function decimal(int $minor): string { return PricingRule::decimal($minor); }
 
     private function billingLifecycleEnabled(Domain $domain): bool
     {

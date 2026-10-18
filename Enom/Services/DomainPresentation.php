@@ -15,7 +15,7 @@ final class DomainPresentation
     public const FINANCIAL_ACTIONS = ['register', 'transfer', 'renew', 'privacy_purchase', 'privacy_renew'];
 
     /** Safe codes a customer may see, mapped to a short outcome key. Everything else stays hidden. */
-    private const OUTCOMES = ['renewal_cancelled_unpaid' => 'cancelled_unpaid', 'epp_sync_acknowledged' => 'acknowledged'];
+    private const OUTCOMES = ['renewal_cancelled_unpaid' => 'cancelled_unpaid', 'initial_cancelled_unpaid' => 'cancelled_unpaid', 'transfer_code_timeout' => 'code_timeout', 'epp_sync_acknowledged' => 'acknowledged', 'contact_details_required' => 'needs_details'];
 
     public static function outcome(mixed $safeCode): ?string
     {
@@ -34,13 +34,13 @@ final class DomainPresentation
         return $date ? $date->utc()->format('M j, Y, H:i').' UTC' : null;
     }
 
+    /** The later of two timestamps, for showing one "last checked" time. */
     public static function isPastDay(mixed $value): bool
     {
         $date = self::parse($value);
         return $date !== null && $date->format('Y-m-d') < CarbonImmutable::now()->utc()->format('Y-m-d');
     }
 
-    /** The later of two timestamps, for showing one "last checked" time. */
     public static function latest(mixed ...$values): mixed
     {
         $best = null;
@@ -57,7 +57,7 @@ final class DomainPresentation
         if ($state === 'rejected' && $outcome === 'cancelled_unpaid') { return 'Cancelled, invoice unpaid'; }
         if ($state === 'succeeded' && $outcome === 'acknowledged') { return 'Accepted by the registrar'; }
         return match ($state) {
-            'awaiting_payment' => 'Awaiting payment', 'queued' => 'Queued', 'running' => 'Sending',
+            'awaiting_payment' => 'Awaiting payment', 'awaiting_code' => 'Needs your code', 'queued' => 'Queued', 'running' => 'Sending',
             'pending' => 'Waiting for the registrar', 'uncertain' => 'Needs review', 'held' => 'On hold',
             'succeeded' => 'Completed', 'rejected' => 'Declined', 'disposed' => 'Closed by support',
             default => self::readable($state, 'Not recorded'),
@@ -77,6 +77,13 @@ final class DomainPresentation
         };
     }
 
+    public const AWAITING_PAYMENT = 'Awaiting payment';
+
+    /**
+     * Status for a domain row or header. A pending registration or transfer uses its exact-bound request
+     * and verified invoice status ($request: state, invoiced, invoice_status), never the domain status alone.
+     * Missing or unverified links stay "not confirmed". No label promises registrar completion.
+     */
     public static function invoiceStatus(?string $status): string
     {
         return match ($status) {
@@ -85,13 +92,6 @@ final class DomainPresentation
         };
     }
 
-    public const AWAITING_PAYMENT = 'Awaiting payment';
-
-    /**
-     * Status for a domain row or header. A pending registration or transfer uses its exact-bound request
-     * and verified invoice status ($request: state, invoiced, invoice_status), never the domain status alone.
-     * Missing or unverified links stay "not confirmed". No label promises registrar completion.
-     */
     public static function progress(?string $status, ?array $request): string
     {
         $kind = match ($status) { 'registration_pending' => 'Registration', 'transfer_pending' => 'Transfer', default => null };
@@ -102,6 +102,8 @@ final class DomainPresentation
         $settled = $request !== null && (($request['invoiced'] ?? true) === false || $invoice === 'paid');
         return match (true) {
             $state === 'awaiting_payment' && $invoice === 'pending' => self::AWAITING_PAYMENT,
+            $state === 'awaiting_code' && $settled => 'Needs your code',
+            $state === 'held' && ($request['safe_code'] ?? null) === 'contact_details_required' => 'Needs your details',
             $state === 'queued' && $settled => $kind.' waiting to be sent',
             in_array($state, ['running', 'pending'], true) && $settled => $kind.' in progress',
             in_array($state, ['uncertain', 'held', 'disposed'], true), $state === 'awaiting_payment' && $invoice === 'paid' => $kind.' needs review',
@@ -112,7 +114,7 @@ final class DomainPresentation
     public static function domainStatus(?string $status): string
     {
         return match ($status) {
-            'active' => 'Active', 'registration_pending' => 'Registration in progress', 'transfer_pending' => 'Transfer in progress',
+            'cancelled' => 'Cancelled', 'active' => 'Active', 'registration_pending' => 'Registration in progress', 'transfer_pending' => 'Transfer in progress',
             'registration_rejected' => 'Registration declined', 'transfer_rejected' => 'Transfer declined',
             'expired' => 'Expired', 'grace' => 'Expired, in grace period', 'redemption' => 'In redemption', 'needs_review' => 'Needs review',
             default => self::readable($status, 'Unknown'),
@@ -122,7 +124,7 @@ final class DomainPresentation
     public static function funding(?string $basis): string
     {
         return match ($basis) {
-            'paid_invoice' => 'Customer invoice', 'operator_funded' => 'Operator funded', 'sponsored' => 'Sponsored',
+            'paid_invoice' => 'Customer invoice',
             'non_billable_management' => 'No charge, management change',
             default => self::readable($basis, 'Not recorded'),
         };
@@ -176,7 +178,6 @@ final class DomainPresentation
         };
     }
 
-    /** Turns a local enrollment reason into the next staff step. Reasons are local strings, never provider text. */
     public static function eligibilityStep(?string $reason): ?string
     {
         return match ($reason) {

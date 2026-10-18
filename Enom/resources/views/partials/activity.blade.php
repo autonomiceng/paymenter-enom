@@ -13,6 +13,7 @@
         return [$operation, ...$row];
     });
     $states = $rows->pluck(2)->unique();
+    $invoiceNumbers = \App\Models\Invoice::whereIn('id', $rows->pluck('0.invoice_id')->filter()->unique())->pluck('number', 'id');
 @endphp
 <section class="enom-panel" aria-labelledby="enom-activity-heading">
     <div class="enom-section" style="padding-bottom:.25rem">
@@ -34,7 +35,7 @@
                             </td>
                             <td><span class="enom-badge enom-tone-{{ $tone }}">{{ $label }}</span></td>
                             <td class="enom-muted enom-nowrap">@include('enom::partials.moment', ['at' => $operation['created_at'] ?? null, 'fallback' => '—'])</td>
-                            <td class="enom-end">@if (!empty($operation['invoice_id']))<a class="enom-a enom-small" href="{{ route('invoices.show', $operation['invoice_id']) }}">Invoice #{{ $operation['invoice_id'] }}</a>@endif</td>
+                            <td class="enom-end">@if (!empty($operation['invoice_id']))<a class="enom-a enom-small" href="{{ route('invoices.show', $operation['invoice_id']) }}">Invoice {{ $invoiceNumbers[$operation['invoice_id']] ?? '#'.$operation['invoice_id'] }}</a>@endif</td>
                         </tr>
                     @endforeach
                 </tbody>

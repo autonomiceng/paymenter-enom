@@ -23,13 +23,10 @@
     @if (!$endings)
         <div class="enom-notice enom-notice--warn" role="status"><x-ri-information-fill aria-hidden="true" /><div>Domain transfers aren’t open yet. Check back soon.</div></div>
     @else
-        <form method="POST" action="{{ route('enom.domains.quote') }}">
-            @csrf
-            <input type="hidden" name="_request_key" value="{{ $quoteKey }}">
-            <input type="hidden" name="action" value="transfer">
+        <form method="GET" action="{{ route('enom.domains.transfer') }}">
             <div class="enom-searchbar">
                 <label for="enom-transfer-name" class="enom-sr">Domain name</label>
-                <input id="enom-transfer-name" name="domain" type="text" value="{{ $typedSld }}" placeholder="yourbusiness" autocomplete="off" autocapitalize="none"
+                <input id="enom-transfer-name" name="name" type="text" value="{{ $typedSld }}" placeholder="yourbusiness" autocomplete="off" autocapitalize="none"
                     spellcheck="false" maxlength="253" required autofocus @if ($errors->has('domain')) aria-invalid="true" aria-describedby="enom-transfer-error" @endif>
                 <label for="enom-transfer-tld" class="enom-sr">Ending</label>
                 <select id="enom-transfer-tld" name="tld" class="enom-input">
@@ -42,19 +39,34 @@
             @if ($errors->has('domain'))<p id="enom-transfer-error" class="enom-error" role="alert">{{ $errors->first('domain') }}</p>@endif
         </form>
 
+        @if ($result)
+            <div class="enom-notice" role="status"><div>
+                @if (!empty($result['transferable']) && !empty($result['transfer_url']))
+                    <a class="enom-btn enom-btn--primary" href="{{ $result['transfer_url'] }}">Transfer {{ $result['domain'] }}</a>
+                    @if (!empty($result['warning']))<p>{{ $result['warning'] }}</p>@endif
+                @elseif (!empty($result['error']))
+                    <p>{{ $result['error'] }}</p>
+                @elseif (!empty($result['existing']))
+                    <p>{{ $result['domain'] }} is already in your account.</p>
+                    <a class="enom-btn enom-btn--secondary" style="margin-top:.75rem" href="{{ route('enom.domains.index') }}">Go to your domains</a>
+                @elseif (!empty($result['available']))
+                    <p>{{ $result['domain'] }} isn’t registered yet, so there’s nothing to transfer. You can register it instead.</p>
+                    @if (!empty($result['register_url']))<a class="enom-btn enom-btn--primary" style="margin-top:.75rem" href="{{ $result['register_url'] }}">Register {{ $result['domain'] }}</a>@endif
+                @else
+                    <p>{{ $result['transfer_reason'] ?? 'We can’t transfer '.$result['domain'].' right now. Check with its current registrar.' }}</p>
+                @endif
+            </div></div>
+        @endif
         <div class="enom-panel">
             <section class="enom-section" aria-labelledby="enom-before-heading">
                 <div class="enom-section__head"><div><h2 id="enom-before-heading" class="enom-h2">Before you start</h2><p>Do these at your current registrar.</p></div></div>
                 <ol class="enom-steps2">
                     <li><span>Turn off the domain’s transfer lock (sometimes called registrar lock).</span></li>
-                    <li><span>Get the transfer code, also called an auth or EPP code. You’ll enter it on the next page.</span></li>
+                    <li><span>Get the transfer code, also called an auth or EPP code. You’ll enter it on the domain page after checkout.</span></li>
                     <li><span>Make sure the owner email address is current. The registrar may send an approval email there.</span></li>
                 </ol>
                 <p class="enom-small enom-muted" style="margin-top:1rem">Domains registered or transferred in the last 60 days can’t be transferred yet. Most transfers finish within 5 to 7 days.</p>
             </section>
-            @if (collect($endings)->every(fn ($e) => $e['price'] === 'Complimentary'))
-            <section class="enom-section"><p class="enom-small enom-muted">Transfers are complimentary on your account. We offer {{ \Paymenter\Extensions\Servers\Enom\Http\Controllers\DomainController::listEndings(array_column($endings, 'tld')) }}.</p></section>
-            @else
             <section class="enom-section" aria-labelledby="enom-prices-heading">
                 <div class="enom-section__head"><h2 id="enom-prices-heading" class="enom-h2">Transfer prices</h2></div>
                 <div class="enom-tablewrap">
@@ -68,7 +80,6 @@
                     </table>
                 </div>
             </section>
-            @endif
         </div>
     @endif
 </div>

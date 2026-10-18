@@ -9,6 +9,7 @@ use Paymenter\Extensions\Servers\Enom\Api\RegistrarResult;
 use Paymenter\Extensions\Servers\Enom\Api\RegistrarClient;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Models\Operation;
+use Paymenter\Extensions\Servers\Enom\Models\Tld;
 use Throwable;
 
 /** Fresh read admission only. The executor owns claims, persistence and writes. */
@@ -33,14 +34,9 @@ final class RenewalAdmission
             if (isset($policy['account_fingerprint']) && $policy['account_fingerprint'] !== $account) {
                 return $this->refuse('renewal_account_changed');
             }
-            if (isset($policy['provider_account_identity'])
-                && $policy['provider_account_identity'] !== hash('sha256', strtolower(trim($configuration['uid'])))) {
-                return $this->refuse('renewal_account_changed');
-            }
             $binding = $this->binding($operation, $domain);
             $clock = now()->toImmutable();
-            // Complimentary renewals have the same quote-under-limit rule as legacy sponsorship.
-            $sponsored = in_array($operation->funding_basis, ['sponsored', 'complimentary'], true);
+            $complimentary = $operation->funding_basis === 'complimentary';
             if ($domain->renewal_policy['automatic_spend_paused'] ?? false) {
                 return $this->refuse('automatic_spend_paused');
             }
@@ -88,16 +84,15 @@ final class RenewalAdmission
                 return $this->refuse('renewal_currency_unaccepted', $quote);
             }
             $complete = ($quote['complete'] ?? false) === true;
-            if (($expired || $sponsored) && (!$complete || $quote['currency'] !== 'USD' || $operation->currency !== 'USD'
+            if (($expired || $complimentary) && (!$complete || $quote['currency'] !== 'USD' || $operation->currency !== 'USD'
                 || ($expired && ($quote['grace_eligible'] ?? null) !== true))) {
-                return $this->refuse($expired ? 'grace_evidence_unconfirmed' : ($operation->funding_basis === 'complimentary' ? 'complimentary_quote_unconfirmed' : 'sponsorship_quote_unconfirmed'), $quote);
+                return $this->refuse($expired ? 'grace_evidence_unconfirmed' : 'complimentary_quote_unconfirmed', $quote);
             }
-            if ($expired || $sponsored) {
+            if ($expired || $complimentary) {
                 $cost = self::minor($quote['amount']);
-                $limit = $sponsored ? ($operation->funding_basis === 'complimentary' ? ($policy['complimentary_cap_minor'] ?? null)
-                    : ($policy['sponsorship']['limit_minor'] ?? null)) : ($policy['original_net_minor'] ?? null);
+                $limit = $complimentary ? ($policy['complimentary_cap_minor'] ?? null) : ($policy['original_net_minor'] ?? null);
                 if ($cost === null || !is_int($limit) || $limit < 0 || $cost > $limit) {
-                    return $this->refuse($sponsored ? ($operation->funding_basis === 'complimentary' ? 'complimentary_cost_above_limit' : 'sponsorship_budget_exceeded')
+                    return $this->refuse($complimentary ? 'complimentary_cost_above_limit'
                         : 'grace_original_price_exceeded', $quote);
                 }
             }
@@ -162,6 +157,8 @@ final class RenewalAdmission
             || (int) $operation->service_id !== (int) $service->id
             || $service->status !== Service::STATUS_ACTIVE || !in_array($domain->status, ['active', 'expired', 'grace'], true)
             || $service->cancellation()->exists()) { return 'renewal_lifecycle_invalid'; }
+        $tld = Tld::where('server_id', $domain->server_id)->where('tld', $domain->tld)->first();
+        if ($domain->billing_managed && (!$tld || $tld->price('renew') === null)) { return 'renewal_catalogue_unavailable'; }
         if (!$domain->provider_expires_at || !$operation->base_expires_at
             || !$operation->base_expires_at->equalTo($domain->provider_expires_at)
             || !$operation->expected_expires_at || !$operation->expected_expires_at->equalTo($operation->base_expires_at->addYearsNoOverflow(max(1, (int) $operation->term)))) {
@@ -176,14 +173,14 @@ final class RenewalAdmission
                 || ($policy['domain'] ?? null) !== $domain->domain
                 || ($policy['service_id'] ?? null) !== (int) $service->id
                 || ($policy['server_id'] ?? null) !== (int) $domain->server_id
-                || (isset($policy['user_id']) && $policy['user_id'] !== (int) $domain->user_id)
+                || (($policy['user_id'] ?? null) !== (int) $domain->user_id)
                 || ($policy['authority_generation'] ?? null) !== $domain->authority_generation
                 || ($policy['confirmed_revision'] ?? null) !== $domain->confirmed_revision
                 || ($policy['currency'] ?? null) !== $operation->currency || ($policy['term'] ?? null) !== (int) $operation->term) {
                 return 'renewal_policy_binding_changed';
             }
         }
-        if (!in_array($operation->funding_basis, ['paid_invoice', 'sponsored', 'complimentary'], true) || !$this->operations->funded($operation)) {
+        if (!in_array($operation->funding_basis, ['paid_invoice', 'complimentary'], true) || !$this->operations->funded($operation)) {
             return 'renewal_funding_invalid';
         }
         if (DomainOperations::hasRenewalBlocker($domain, $operation->id)) {
@@ -240,7 +237,7 @@ final class RenewalAdmission
     private static function minor(mixed $amount): ?int
     {
         $decimal = RegistrarMoney::decimal($amount);
-        return $decimal === null ? null : (int) str_replace('.', '', $decimal);
+        return $decimal === null ? null : PricingRule::minor($decimal);
     }
 
     private function refuse(string $code, ?array $quote = null): array

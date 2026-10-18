@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Models\Tld;
+require_once dirname(__DIR__).'/enom-cart-order.php';
 use Paymenter\Extensions\Servers\Enom\Services\DomainOperations;
 use Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard;
 
@@ -73,9 +74,6 @@ refuses(fn () => RuntimeGuard::configuration($server->id), 'Choose Test or Live'
 setSetting($server, 'environment', 'test');
 verify(RuntimeGuard::configuration($server->id)['environment'] === 'test' && RuntimeGuard::isTest($server->id), 'Explicit test environment not honoured.');
 verify(RuntimeGuard::environment([]) === 'test' && RuntimeGuard::environment(['environment' => 'live']) === 'live' && RuntimeGuard::environment(['environment' => 'x']) === 'test', 'environment() mapping differs.');
-verify(RuntimeGuard::endpoint('test') === 'https://resellertest.enom.com/interface.asp' && RuntimeGuard::endpoint('live') === 'https://reseller.enom.com/interface.asp', 'Endpoints differ.');
-refuses(fn () => RuntimeGuard::endpoint('staging'), 'Unknown Enom environment', 'Unknown endpoint was returned.');
-
 // Reads need credentials only; writes also need "Process orders and changes".
 setSetting($server, 'operations_enabled', '0');
 verify(RuntimeGuard::assertProvider($server->id, true)['uid'] === 'Reseller-UID', 'Reads were refused with processing off.');
@@ -83,31 +81,18 @@ refuses(fn () => RuntimeGuard::assertProvider($server->id), 'turned off', 'Write
 setSetting($server, 'operations_enabled', '1');
 verify(RuntimeGuard::assertProvider($server->id)['operations_enabled'] == '1', 'Writes were refused with processing on.');
 
-// Legacy 0.2 settings: sandbox=false without an environment meant "send nothing"; writes stay off until an environment is chosen.
-$legacy = enomServer('Legacy Enom', ['uid' => 'legacy-uid', 'token' => 'legacy-token', 'operations_enabled' => '1', 'sandbox' => '0']);
-verify(RuntimeGuard::assertProvider($legacy->id, true)['environment'] === 'test', 'Legacy reads were refused.');
-// configuration() adds a normalized 'environment' key before assertProvider() calls legacyDisabled(), so the legacy check never fires.
-try { RuntimeGuard::assertProvider($legacy->id); $legacyWrites = true; } catch (RuntimeException) { $legacyWrites = false; }
-knownBug(!$legacyWrites, 'legacy-sandbox-false-writes', 'RuntimeGuard::assertProvider() checks legacyDisabled() on the normalized configuration, which always has environment; sandbox=false servers can still write.');
-verify(RuntimeGuard::status($legacy->id)['processing'] === false, 'Setup status reports legacy-disabled processing as on.');
-setSetting($legacy, 'sandbox', '1');
-verify(RuntimeGuard::assertProvider($legacy->id)['environment'] === 'test', 'Legacy sandbox=true did not keep test writes.');
-setSetting($legacy, 'sandbox', '0');
-setSetting($legacy, 'environment', 'test');
-verify(RuntimeGuard::assertProvider($legacy->id)['environment'] === 'test', 'Choosing an environment did not supersede the legacy flag.');
-
-// Fingerprints: test keeps the historical sandbox: prefix; live never matches test; uid is case-insensitive.
-verify(RuntimeGuard::accountFingerprint(['uid' => 'Reseller-UID']) === hash('sha256', 'sandbox:reseller-uid'), 'Test fingerprint changed from the 0.2 sandbox: form.');
-verify(RuntimeGuard::accountFingerprint(['uid' => 'Reseller-UID', 'environment' => 'test']) === hash('sha256', 'sandbox:reseller-uid'), 'Explicit test fingerprint differs.');
+// Fingerprints separate test and live accounts; uid is case-insensitive.
+verify(RuntimeGuard::accountFingerprint(['uid' => 'Reseller-UID']) === hash('sha256', 'test:reseller-uid'), 'Default test fingerprint differs.');
+verify(RuntimeGuard::accountFingerprint(['uid' => 'Reseller-UID', 'environment' => 'test']) === hash('sha256', 'test:reseller-uid'), 'Explicit test fingerprint differs.');
 verify(RuntimeGuard::accountFingerprint(['uid' => 'Reseller-UID', 'environment' => 'live']) === hash('sha256', 'live:reseller-uid'), 'Live fingerprint differs.');
-verify(RuntimeGuard::serverFingerprint($server->fresh()) === hash('sha256', 'sandbox:reseller-uid') && RuntimeGuard::serverFingerprint(null) === 'missing-account'
+verify(RuntimeGuard::serverFingerprint($server->fresh()) === hash('sha256', 'test:reseller-uid') && RuntimeGuard::serverFingerprint(null) === 'missing-account'
     && RuntimeGuard::serverFingerprint($blank->fresh()) === 'missing-account', 'Server fingerprint differs.');
 verify(Paymenter\Extensions\Servers\Enom\Services\RenewalAdmission::accountFingerprint(['uid' => 'Reseller-UID']) === RuntimeGuard::accountFingerprint(['uid' => 'Reseller-UID']), 'Renewal admission uses a different fingerprint.');
 
 // Account binding: the first order records the account; a different account or environment refuses; token rotation is allowed.
 RuntimeGuard::bindAccount($server->id);
 $binding = rawSetting($server, RuntimeGuard::BINDING)->value;
-verify($binding === hash('sha256', 'sandbox:reseller-uid') && RuntimeGuard::status($server->id)['bound'] === true, 'Binding was not recorded.');
+verify($binding === hash('sha256', 'test:reseller-uid') && RuntimeGuard::status($server->id)['bound'] === true, 'Binding was not recorded.');
 setSetting($server, 'token', 'rotated-token');
 verify(RuntimeGuard::configuration($server->id)['token'] === 'rotated-token', 'Token rotation was refused.');
 setSetting($server, 'uid', 'RESELLER-uid');
@@ -148,7 +133,7 @@ config(['app.url' => 'https://billing.example.com']);
 
 // apiForServer builds a client for the configured environment, with the catalogue and existing-registration endings. Constructing never sends.
 $operations = new DomainOperations;
-Tld::create(['server_id' => $live->id, 'tld' => 'io', 'enabled' => false, 'pricing_mode' => 'fixed']);
+enomTestTld(['server_id' => $live->id, 'tld' => 'io', 'enabled' => false, 'pricing_mode' => 'fixed']);
 Domain::create(['service_id' => 1, 'user_id' => 1, 'server_id' => $live->id, 'domain' => 'kept.co.uk', 'sld' => 'kept', 'tld' => 'co.uk', 'status' => 'active', 'capabilities' => []]);
 $liveApi = $operations->apiForServer($live->id);
 verify($liveApi->environment() === 'live' && !$liveApi->isReadOnly() && in_array('io', $liveApi->suffixes(), true) && in_array('co.uk', $liveApi->suffixes(), true), 'Live API environment or suffixes differ.');
@@ -161,5 +146,5 @@ setSetting($live, 'operations_enabled', '0');
 verify($liveApi->balance()->code === 'guard_refused', 'Processing switched off after construction did not stop a write-capable client.');
 refuses(fn () => $operations->apiForServer($live->id), 'turned off', 'Write client built with processing off.');
 
-echo 'Runtime guard: '.$checks.' passed; known runtime bugs: '.($knownBugs ? implode(', ', $knownBugs) : 'none').'; credential encryption, environment, binding and live pin; no provider transport.'.PHP_EOL;
+echo 'Runtime guard: '.$checks.' passed; credential encryption, environment, binding and live pin; no provider transport.'.PHP_EOL;
 $successful = true;

@@ -43,7 +43,7 @@ function expiring(int $days, bool $renew = false, array $attributes = [], ?User 
     $service = Service::create(['user_id' => $user->id, 'product_id' => $product->id, 'plan_id' => $plan->id, 'price' => '14.00', 'quantity' => 1, 'currency_code' => 'USD', 'status' => Service::STATUS_ACTIVE]);
     if (!$renew) { ServiceCancellation::create(['service_id' => $service->id, 'reason' => 'Renewal off', 'type' => 'end_of_period']); }
     return Domain::create($attributes + ['service_id' => $service->id, 'user_id' => $user->id, 'server_id' => $server->id, 'domain' => 'remind'.$counter.'.com', 'sld' => 'remind'.$counter,
-        'tld' => 'com', 'status' => 'active', 'provider_expires_at' => now()->addDays($days)->toDateString(), 'billing_managed' => false, 'capabilities' => []]);
+        'tld' => 'com', 'status' => 'active', 'provider_expires_at' => now()->addDays($days)->toDateString(), 'billing_managed' => true, 'capabilities' => []]);
 }
 function latestNote(): ?Notification { global $owner; return Notification::where('user_id', $owner->id)->latest('id')->first(); }
 function noteCount(): int { return Notification::count(); }
@@ -170,5 +170,5 @@ verify($statsBefore > 0 && app(StaffDomains::class)->reminderStats() === $statsB
 setReminderTestDate('2027-02-01');
 verify(Reminders::stats() < $statsBefore, 'Reminder count did not age out.');
 
-echo 'Reminders: '.$checks.' passed; known runtime bugs: '.($knownBugs ? implode(', ', $knownBugs) : 'none').'; native templates and notifications; SQLite in memory.'.PHP_EOL;
+echo 'Reminders: '.$checks.' passed; native templates and notifications; SQLite in memory.'.PHP_EOL;
 $successful = true;

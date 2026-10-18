@@ -25,9 +25,6 @@
             </div>
         </form>
 
-        @if ($complimentary)
-            <div class="enom-notice" role="status"><x-ri-information-fill aria-hidden="true" /><div>Domains are complimentary on your account, so you won’t pay these prices.</div></div>
-        @endif
 
         <section class="enom-panel" aria-labelledby="enom-prices-heading">
             <h2 id="enom-prices-heading" class="enom-sr">Prices by ending</h2>
@@ -56,7 +53,7 @@
                 </table>
             </div>
         </section>
-        <p class="enom-small enom-muted">Prices plus tax where applicable. A registration for more than one year costs the first-year price plus the renewal price for each extra year.</p>
+        <p class="enom-small enom-muted">Prices plus tax where applicable. Each registration term has its own total. Choose a term at checkout to see its price.</p>
     @endif
 </div>
 </div>

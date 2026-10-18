@@ -169,7 +169,7 @@ class Reminders
     private static function templates(): array
     {
         $button = fn (string $url, string $label) => "<div class=\"action\">\n\t<a class=\"button button-blue\" href=\"{{ {$url} }}\">{$label}</a>\n</div>";
-        return [
+        return TransferNotifications::templates() + [
             'enom_domain_expiring' => [
                 'name' => 'Domain expiring soon', 'subject' => '{{ $domain }} expires on {{ $expires }}', 'enabled' => true,
                 'mail_enabled' => 'choice_on', 'in_app_enabled' => 'choice_on',

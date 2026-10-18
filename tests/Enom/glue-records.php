@@ -205,5 +205,5 @@ verify(($domain->fresh()->snapshot['registry'] ?? null) === ['us_nexus' => 'C11'
 $readHosts = array_values(array_map(fn ($r) => $r[1]['CheckNSName'], array_filter($requests, fn ($r) => $r[0] === 'CheckNSStatus')));
 verify(count($readHosts) >= 4, 'Refresh did not re-check the known hosts.');
 
-echo 'Glue records: '.$checks.' passed; known runtime bugs: '.($knownBugs ? implode(', ', $knownBugs) : 'none').'; injected transport, sanitized TEST write captures; SQLite in memory.'.PHP_EOL;
+echo 'Glue records: '.$checks.' passed; injected transport, sanitized TEST write captures; SQLite in memory.'.PHP_EOL;
 $successful = true;

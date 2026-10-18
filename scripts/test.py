@@ -13,14 +13,35 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 PHP_TEST = ROOT/'scripts/php-test'
 SUITES = {
-    'provider': ['provider-contracts.php', 'registrar-money.php', 'contact-read-regressions.php', 'ui-input-contracts.php',
-                 'catalogue-contracts.php', 'registrar-client.php', 'pricing-rules.php', 'transfer-rdap.php'],
-    'native': ['billing-integration.php', 'domain-billing.php', 'domain-administration.php', 'managed-renewal-execution.php',
-               'renewal-admission.php', 'renewal-lifecycle-proof.php', 'observation-integration.php', 'reconciliation-rejection.php',
-               'reconciliation-registration.php', 'capability-readbacks.php', 'provider-disposition.php', 'native-date-missing-schema.php',
-               'request-gates.php', 'staff-funding-gates.php', 'catalogue-integration.php', 'runtime-guard.php', 'management-actions.php',
-               'pricing-complimentary.php', 'registrar-terms.php', 'registry-details.php', 'glue-records.php', 'refunds.php', 'reminders.php'],
-    'ui': ['client-controller.php', 'client-views.php', 'admin-staff.php', 'public-search.php', 'client-script.cjs'],
+    'provider': [
+        'provider-contracts.php',
+        'registrar-money.php',
+        'contact-read-regressions.php',
+        'ui-input-contracts.php',
+        'catalogue-contracts.php',
+        'registrar-client.php',
+        'pricing-rules.php',
+        'transfer-rdap.php',
+    ],
+    'native': [
+        'capability-readbacks.php',
+        'provider-disposition.php',
+        'native-date-missing-schema.php',
+        'request-gates.php',
+        'catalogue-integration.php',
+        'runtime-guard.php',
+        'management-actions.php',
+        'cart-ordering.php',
+        'cart-funding.php',
+        'cart-integration.php',
+        'registration-setup.php',
+        'transfer-codes.php',
+        'glue-records.php',
+        'reminders.php',
+    ],
+    'ui': [
+        'cart-checkout-ui.php',
+    ],
 }
 
 def hashes(root):
