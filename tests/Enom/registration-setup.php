@@ -175,14 +175,17 @@ verify($commands === [], 'Contact hold made a registrar request.');
 $notices = App\Models\Notification::where('user_id', $staff->id)->get();
 verify($notices->count() === 1 && str_contains($notices->sole()->body, 'phone number') && !str_contains($notices->sole()->body, 'private-value'), 'Staff notice duplicated or leaked contact data.');
 verify(App\Models\Notification::where('user_id', $other->id)->count() === 0, 'Customer received staff notice.');
+verify(App\Models\Notification::where('user_id', $owner->id)->count() === 0, 'Order owner received staff notice.');
 verify($hosting->fresh()->getAttributes() === $hostingBefore && $hosting->properties()->where('key', 'domain')->value('value') === 'contact-hold.com', 'Contact hold changed same-domain hosting.');
 $raw = DB::table('enom_operations')->where('id', $held->id)->first();
 verify(!str_contains($raw->payload, 'private-value') && !str_contains($raw->payload, 'contact@example.com')
     && !str_contains($raw->policy, 'contact_hold_notified_at') && !array_key_exists('payload', $held->toArray()), 'Snapshot is not encrypted and hidden.');
 verify($held->domain->service->properties()->pluck('key')->all() === ['domain'], 'Contacts leaked into service properties.');
 setupProperty($owner, 'address', '2 Updated Street');
-RegistrationSetup::validate(new Operation(['action' => 'register', 'payload' => $payload]));
-verify($held->fresh()->payload === $beforePayload && $payload['contacts']['registrant']['address1'] === '1 Main Street', 'Account edit replaced the bound snapshot.');
+RegistrationSetup::hold($held->fresh());
+$held->refresh();
+verify($held->payload === $beforePayload && $held->state === 'held'
+    && $held->payload['contacts']['registrant']['address1'] === '1 Main Street', 'Account edit replaced the bound snapshot.');
 
 $unpaid = setupOrder($owner, 'unpaid-contacts.com', $invalid, paid: false);
 RegistrationSetup::hold($unpaid);
@@ -235,15 +238,20 @@ try {
 } finally { DB::rollBack(); }
 
 verify($hosting->fresh()->getAttributes() === $hostingBefore, 'Contact recovery changed same-domain hosting.');
-// An expired transfer can update only its contacts; the transfer gate still decides whether it can resume.
+// A saved code passes the deadline gate; recovery still waits for commit before enqueueing.
 $waitingTransfer = setupOrder($owner, 'waiting-transfer.com', $invalid + ['epp' => 'SYNTHETIC-CODE', 'registry' => []], 'transfer');
 RegistrationSetup::hold($waitingTransfer);
+$jobsBeforeRecovery = tableRows(['jobs']);
 DB::beginTransaction();
 try {
     $waitingTransfer->refresh();
     $waitingTransfer->update(['policy' => array_replace($waitingTransfer->policy, ['paid_at' => now()->subDays(31)->toIso8601String()])]);
     $updated = RegistrationSetup::replaceContacts($owner, $waitingTransfer->domain_id);
     verify($updated->payload['epp'] === 'SYNTHETIC-CODE' && $updated->policy['paid_at'] === $waitingTransfer->policy['paid_at'], 'Contact recovery reset the transfer code or paid deadline.');
+    app(Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class)->assertReady($updated);
+    $updated->refresh();
+    verify($updated->state === 'held' && $updated->safe_code === 'contact_details_required', 'Uncommitted contact recovery changed the transfer hold.');
+    verify(tableRows(['jobs']) === $jobsBeforeRecovery, 'Contact recovery queued a transfer before commit.');
 } finally { DB::rollBack(); }
 
 // Render the owned partial through web middleware so the form key is session-bound.

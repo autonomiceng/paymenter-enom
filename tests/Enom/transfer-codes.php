@@ -251,7 +251,15 @@ $boundaryHtml = view('enom::partials.transfer-code', ['domain' => $boundary->dom
 verify(str_contains($boundaryHtml, 'datetime="2026-11-16T00:30:00+00:00" data-enom-time="zone">Nov 16, 2026, 12:30 AM UTC</time>')
     && TransferOrders::deadline($boundary)->setTimezone('America/Los_Angeles')->format('M j, Y, g:i A') === 'Nov 15, 2026, 4:30 PM', 'Date-boundary cutoff lacks an exact, localizable timestamp.');
 verify(str_contains(html_entity_decode($html), Rdap::UNCHECKED), 'Lookup-unavailable warning is missing from the domain page.');
-verify(!str_contains($html, 'value="'.$secret.'"'), 'Form redisplayed the code.');
+// The earlier secret was rolled back; render a code committed through owner submission.
+$codeReceived = transferFixture(false);
+$codeReceived = $transfers->submitCode($owner, $codeReceived->domain_id, $secret);
+verify(DB::transactionLevel() === 0 && $codeReceived->fresh()->payload['epp'] === $secret, 'Redisplay fixture lacks a committed code.');
+app()->instance('request', $request);
+auth()->login($owner);
+$codeReceivedHtml = view('enom::partials.transfer-code', ['domain' => $codeReceived->domain])->render();
+verify(str_contains($codeReceivedHtml, 'Code saved.') && str_contains($codeReceivedHtml, 'id="transfer-code-input"'), 'Saved-code form did not render.');
+verify(!str_contains($codeReceivedHtml, $secret) && !str_contains($codeReceivedHtml, 'value="'.$secret.'"'), 'Form redisplayed the code.');
 verify(!str_contains((string) @file_get_contents($testRoot.'/storage/logs/laravel.log'), 'NEVER-FLASH-THIS'), 'Code reached application logs.');
 echo 'Transfer codes: '.$checks.' passed; SQLite in memory; native cart and ordering resume integrated.'.PHP_EOL;
 $successful = true;
