@@ -124,13 +124,15 @@ class TldResource extends Resource
         if ($enabled && $action === 'transfer' && !app(TransferOrders::class)->allowed($record)) {
             if (!$confirmedTransfer) { throw new \InvalidArgumentException('Confirm a tested transfer before enabling this ending.'); }
             DB::transaction(function () use ($record) {
-                $value = RuntimeGuard::setting((int) $record->server_id, 'transfer_allowlist', 'com,net,org');
+                $server = Server::whereKey($record->server_id)->lockForUpdate()->first();
+                if (!$server) { throw new \InvalidArgumentException('The Enom server no longer exists. Reload the page.'); }
+                $value = $server->settings()->where('key', 'transfer_allowlist')->first()?->value ?? 'com,net,org';
                 if (!is_string($value)) { throw new \InvalidArgumentException('The transfer allowlist is invalid.'); }
-                $record->server->settings()->updateOrCreate(['key' => 'transfer_allowlist'],
+                $server->settings()->updateOrCreate(['key' => 'transfer_allowlist'],
                     ['value' => trim($value, ', ').','.$record->tld, 'type' => 'string', 'encrypted' => false]);
                 if (!app(TransferOrders::class)->allowed($record)) { throw new \InvalidArgumentException('Transfers are not supported for this ending.'); }
             });
-            app(Catalogue::class)->syncCosts((int) $record->server_id);
+            app(Catalogue::class)->syncTld($record);
             $record->refresh();
         }
         $record->{$action.'_enabled'} = $enabled;

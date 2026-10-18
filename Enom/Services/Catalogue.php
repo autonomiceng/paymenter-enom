@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 use Paymenter\Extensions\Servers\Enom\Admin\Resources\TldResource;
 use Paymenter\Extensions\Servers\Enom\Api\DomainName;
+use Paymenter\Extensions\Servers\Enom\Api\EnomApi;
 use Paymenter\Extensions\Servers\Enom\Api\RegistrarResult;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Models\Tld;
@@ -75,35 +76,50 @@ class Catalogue
         $api = $this->operations->apiForServer($serverId, true);
         $summary = ['tlds' => 0, 'changed' => [], 'missing' => [], 'held' => [], 'renewals_below_cost' => [], 'failed' => []];
         foreach (Tld::where('server_id', $serverId)->orderBy('id')->get() as $tld) {
-            try {
-                $terms = [];
-                // Provider reads finish before taking any catalogue row lock.
-                for ($years = max(1, (int) $tld->min_years); $years <= min(10, (int) $tld->max_years); $years++) {
-                    $terms[$years] = self::productCost($api->productPrice($tld->tld, 'register', $years));
-                }
-                $renew = self::productCost($api->productPrice($tld->tld, 'renew'));
-                $transfer = app(TransferOrders::class)->allowed($tld) ? self::productCost($api->productPrice($tld->tld, 'transfer')) : null;
-            } catch (Throwable $exception) {
-                report($exception);
+            $result = $this->syncTld($tld, $api);
+            if ($result === null) {
                 $summary['failed'][] = '.'.$tld->tld;
                 continue;
             }
-            $before = [$tld->cost_register_terms ?? [], $tld->cost_renew, $tld->cost_transfer];
-            $this->publishChanges($tld, ['cost_register_terms' => $terms, 'cost_renew' => $renew,
-                'cost_transfer' => $transfer, 'costs_synced_at' => now()]);
             $summary['tlds']++;
-            $tld->refresh();
             $ending = '.'.$tld->tld;
-            if (self::costKey($before) !== self::costKey([$terms, $renew, $transfer])) { $summary['changed'][] = $ending; }
+            if ($result['changed']) { $summary['changed'][] = $ending; }
             if ($tld->price('renew') !== null && str_starts_with((string) ($tld->sale_holds['renew'] ?? ''), 'Price is below cost.')) {
                 $summary['renewals_below_cost'][] = $ending;
             }
             if (!$tld->enabled) { continue; }
-            if (in_array(null, $terms, true) || $renew === null) { $summary['missing'][] = $ending; }
+            if ($result['missing']) { $summary['missing'][] = $ending; }
             $holds = array_intersect_key($tld->sale_holds ?? [], ['register' => true, 'transfer' => true]);
             if (collect($holds)->contains(fn ($hold) => str_starts_with((string) $hold, 'Price is below cost.'))) { $summary['held'][] = $ending; }
         }
         return $summary;
+    }
+
+    /**
+     * Sync one ending, retaining its last known costs when provider reads fail.
+     * @return array{changed: bool, missing: bool}|null
+     */
+    public function syncTld(Tld $tld, ?EnomApi $api = null): ?array
+    {
+        try {
+            $api ??= $this->operations->apiForServer((int) $tld->server_id, true);
+            $terms = [];
+            // Provider reads finish before taking any catalogue row lock.
+            for ($years = max(1, (int) $tld->min_years); $years <= min(10, (int) $tld->max_years); $years++) {
+                $terms[$years] = self::productCost($api->productPrice($tld->tld, 'register', $years));
+            }
+            $renew = self::productCost($api->productPrice($tld->tld, 'renew'));
+            $transfer = app(TransferOrders::class)->allowed($tld) ? self::productCost($api->productPrice($tld->tld, 'transfer')) : null;
+        } catch (Throwable $exception) {
+            report($exception);
+            return null;
+        }
+        $before = [$tld->cost_register_terms ?? [], $tld->cost_renew, $tld->cost_transfer];
+        $this->publishChanges($tld, ['cost_register_terms' => $terms, 'cost_renew' => $renew,
+            'cost_transfer' => $transfer, 'costs_synced_at' => now()]);
+        $tld->refresh();
+        return ['changed' => self::costKey($before) !== self::costKey([$terms, $renew, $transfer]),
+            'missing' => in_array(null, $terms, true) || $renew === null];
     }
 
     /** Staff notification for a sync summary: [title, body, warn]. */

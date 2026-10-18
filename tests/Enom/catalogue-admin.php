@@ -114,6 +114,70 @@ verify($page->instance()->getErrorBag()->isEmpty() && $io->fresh()->orderable('t
 $allowlist = Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard::setting($server->id, 'transfer_allowlist');
 refuses(fn () => TldResource::setAction($ai, 'transfer', true, true), 'not supported', 'Unsupported transfer ending was enabled.');
 verify(Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard::setting($server->id, 'transfer_allowlist') === $allowlist, 'Unsupported transfer changed the allowlist.');
+// A single toggle preserves a prior committed append despite a stale server/settings relation.
+$toggleServer = App\Models\Server::create(['name' => 'Transfer toggle', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
+$toggleServer->settings()->create(['key' => 'transfer_allowlist', 'value' => 'com,net,org', 'type' => 'string', 'encrypted' => false]);
+$toggleEnding = Tld::create(['server_id' => $toggleServer->id, 'tld' => 'xyz', 'enabled' => true, 'min_years' => 2, 'max_years' => 3,
+    'register_enabled' => true, 'renew_enabled' => true, 'transfer_enabled' => false, 'use_default_rule' => false, 'pricing_mode' => 'fixed',
+    'fixed_register' => '20.00', 'fixed_renew' => '20.00', 'fixed_transfer' => '20.00']);
+$untouchedEnding = Tld::create(['server_id' => $toggleServer->id, 'tld' => 'dev', 'min_years' => 1, 'max_years' => 1]);
+$toggleEnding->load('server.settings');
+$toggleServer->settings()->where('key', 'transfer_allowlist')->update(['value' => 'com,net,org,dev']);
+$untouchedBefore = (array) Illuminate\Support\Facades\DB::table('enom_tlds')->where('id', $untouchedEnding->id)->sole();
+$commands = [];
+$connection = Illuminate\Support\Facades\DB::connection();
+$originalGrammar = $connection->getQueryGrammar();
+// SQLite cannot execute FOR UPDATE. Observe the actual builder lock and transaction at compilation instead.
+$lockGrammar = new class($connection) extends Illuminate\Database\Query\Grammars\SQLiteGrammar {
+    public array $reads = [];
+    public function compileSelect(Illuminate\Database\Query\Builder $query)
+    {
+        if (Illuminate\Support\Facades\DB::transactionLevel() > 0) {
+            $this->reads[] = [$query->from, $query->lock, Illuminate\Support\Facades\DB::transactionLevel()];
+        }
+        return parent::compileSelect($query);
+    }
+};
+$connection->setQueryGrammar($lockGrammar);
+try { TldResource::setAction($toggleEnding, 'transfer', true, true); }
+finally { $connection->setQueryGrammar($originalGrammar); }
+verify(($lockGrammar->reads[0] ?? null) === ['extensions', true, 1],
+    'Transfer allowlist did not lock the server inside the transaction before reading fresh settings.');
+verify(Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard::setting($toggleServer->id, 'transfer_allowlist') === 'com,net,org,dev,xyz',
+    'Transfer toggle lost a committed prior allowlist append through a stale relation.');
+$priceReads = array_values(array_filter($commands, fn ($command) => $command[0] === 'PE_GetProductPrice'));
+verify(array_map(fn ($command) => $command[1]['TLD'].':'.$command[1]['ProductType'].':'.$command[1]['Years'], $priceReads)
+    === ['xyz:10:2', 'xyz:10:3', 'xyz:16:1', 'xyz:19:1'], 'Transfer toggle read prices for another ending or skipped an exact term/action.');
+verify((array) Illuminate\Support\Facades\DB::table('enom_tlds')->where('id', $untouchedEnding->id)->sole() === $untouchedBefore,
+    'Transfer toggle published costs or timestamps for another ending.');
+verify($toggleEnding->fresh()->orderable('transfer') && $toggleEnding->fresh()->price('transfer') === '20.00'
+    && $toggleEnding->fresh()->cost('transfer') === '8.9500', 'Per-ending sync did not publish the enabled transfer at the existing margin.');
+
+// Full sync still visits every ending, publishes costs and emits the same exact summary and notice.
+$commands = [];
+$costOverride['dev:10:1'] = '9.50';
+$toggleSummary = $catalogue->sync($toggleServer->id);
+verify($toggleSummary === ['tlds' => 2, 'changed' => ['.dev'], 'missing' => [], 'held' => [], 'renewals_below_cost' => [], 'failed' => []]
+    && \Paymenter\Extensions\Servers\Enom\Services\Catalogue::syncMessage($toggleSummary)
+        === ['Costs synced for 2 TLDs.', '1 TLD had cost changes. Nothing on sale is below cost.', false], 'Full sync changed its summary or staff notification.');
+verify(array_map(fn ($command) => $command[1]['TLD'].':'.$command[1]['ProductType'].':'.$command[1]['Years'], $commands)
+    === ['xyz:10:2', 'xyz:10:3', 'xyz:16:1', 'xyz:19:1', 'dev:10:1', 'dev:16:1', 'dev:19:1']
+    && $untouchedEnding->fresh()->cost('register') === '9.5000' && $untouchedEnding->fresh()->costs_synced_at !== null,
+    'Full sync skipped an ending, exact price read or publication.');
+unset($costOverride['dev:10:1']);
+
+// The public per-ending path reports provider failure and retains every published byte.
+$beforeFailedSync = tableRows(['enom_tlds', 'products', 'plans', 'prices']);
+$failedReads = ['xyz:19:1' => 'transport'];
+$reportedBefore = count($reportedRules);
+verify($catalogue->syncTld($toggleEnding) === null && count($reportedRules) === $reportedBefore + 1
+    && end($reportedRules) === 'Could not read prices from Enom.', 'Per-ending price failure was not reported and returned as a failure.');
+verify(tableRows(['enom_tlds', 'products', 'plans', 'prices']) === $beforeFailedSync,
+    'Per-ending price failure changed known costs, timestamps, holds or native prices.');
+$failedReads = [];
+refuses(fn () => TldResource::setAction(new Tld(['server_id' => 999999, 'tld' => 'missingserver']), 'transfer', true, true),
+    'The Enom server no longer exists. Reload the page.', 'Missing transfer server did not fail clearly.', [InvalidArgumentException::class]);
+
 $code = CatalogueRuntime::config();
 verify(count($code) === 1 && $code[0]['type'] === 'placeholder' && !str_contains($code[0]['name'], 'pricing_default_rule'), 'Native server note would overwrite the stored nested rule.');
 CatalogueRuntime::boot();
