@@ -7,29 +7,6 @@ use Illuminate\Support\Facades\Schema;
 return new class extends Migration {
     public function up(): void
     {
-        Schema::create('enom_order_intents', function (Blueprint $table) {
-            $table->string('id', 64)->primary();
-            $table->unsignedBigInteger('user_id');
-            $table->unsignedBigInteger('server_id');
-            $table->unsignedBigInteger('product_id');
-            $table->unsignedBigInteger('plan_id');
-            $table->string('domain', 253);
-            $table->string('sld', 63);
-            $table->string('tld', 63);
-            $table->string('action', 32);
-            $table->unsignedSmallInteger('term')->default(1);
-            $table->decimal('amount', 12, 2);
-            $table->decimal('renewal_amount', 12, 2);
-            $table->string('currency', 3);
-            $table->longText('payload')->nullable();
-            $table->timestamp('expires_at');
-            $table->timestamp('claimed_at')->nullable();
-            $table->unsignedBigInteger('service_id')->nullable()->unique();
-            $table->unsignedBigInteger('invoice_id')->nullable();
-            $table->unsignedBigInteger('invoice_item_id')->nullable();
-            $table->timestamps();
-            $table->index(['user_id', 'expires_at']);
-        });
         Schema::create('enom_domains', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('service_id')->unique();
@@ -45,7 +22,14 @@ return new class extends Migration {
             $table->longText('snapshot')->nullable();
             $table->json('capabilities')->nullable();
             $table->timestamp('last_synced_at')->nullable();
-            $table->timestamp('drift_detected_at')->nullable();
+            $table->string('provider_domain_id', 128)->nullable();
+            $table->boolean('billing_managed')->default(true);
+            $table->longText('renewal_policy')->nullable();
+            $table->longText('observation')->nullable();
+            $table->unsignedBigInteger('authority_generation')->default(0);
+            $table->unsignedBigInteger('confirmed_revision')->default(0);
+            $table->string('price_mode', 32)->default('standard');
+            $table->longText('reminders')->nullable();
             $table->timestamps();
         });
         Schema::create('enom_operations', function (Blueprint $table) {
@@ -65,6 +49,8 @@ return new class extends Migration {
             $table->date('expected_expires_at')->nullable();
             $table->date('confirmed_expires_at')->nullable();
             $table->longText('payload')->nullable();
+            $table->longText('policy')->nullable();
+            $table->longText('cost')->nullable();
             $table->string('request_fingerprint', 64)->nullable();
             $table->string('safe_code', 64)->nullable();
             $table->string('provider_order_id', 128)->nullable();
@@ -87,8 +73,6 @@ return new class extends Migration {
             $table->string('pricing_mode', 32)->default('markup_percent');
             $table->decimal('markup', 12, 2)->nullable();
             foreach (['register', 'renew', 'transfer'] as $action) { $table->decimal('fixed_'.$action, 12, 2)->nullable(); }
-            // Temporary legacy-row columns; removed by the consolidated fresh schema.
-            foreach (['register_price', 'transfer_price', 'cost_register'] as $column) { $table->decimal($column, 12, 2)->nullable(); }
             $table->json('cost_register_terms')->nullable();
             $table->json('sale_holds')->nullable();
             $table->decimal('renew_price', 12, 2)->nullable();
