@@ -41,9 +41,10 @@
                 </tbody>
             </table>
         </div>
-        @if ($states->contains('In progress') || $states->contains('Being checked'))
+        @if ($states->contains('In progress') || $states->contains('Being checked') || $states->contains($controller::NOT_SENT))
             <div class="enom-section">
                 <p class="enom-small enom-muted">
+                    @if ($states->contains($controller::NOT_SENT))<strong>{{ $controller::NOT_SENT }}</strong> means we’ve saved the change but haven’t sent it to the registrar yet. @endif
                     @if ($states->contains('In progress'))<strong>In progress</strong> means we’ve sent the change and are waiting for the registrar to confirm it. @endif
                     @if ($states->contains('Being checked'))<strong>Being checked</strong> means we couldn’t confirm the result yet, so our team is checking it. Please don’t submit it again.@endif
                 </p>

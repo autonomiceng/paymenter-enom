@@ -195,7 +195,14 @@ $request = Illuminate\Http\Request::create('/domains/'.$operation->domain_id);
 $request->setLaravelSession(app('session')->driver());
 app()->instance('request', $request);
 $html = view('enom::partials.transfer-code', ['domain' => $operation->domain])->render();
-verify(str_contains($html, 'auth code or EPP code') && str_contains($html, 'Nov 16, 2026</time>') && !str_contains($html, ' UTC') && !str_contains($html, 'old('), 'Transfer form lacks an exact deadline or safely empty input.');
+verify(str_contains($html, 'auth code or EPP code') && str_contains($html, 'Nov 16, 2026, 12:00 PM UTC</time>') && str_contains($html, 'data-enom-time="zone"') && !str_contains($html, 'old('), 'Transfer form lacks an exact deadline or safely empty input.');
+// The UTC cutoff falls on the previous calendar day for a customer in Los Angeles.
+$boundary = transferFixture(true, '2026-10-17T00:30:00+00:00');
+app()->instance('request', $request);
+auth()->login($owner);
+$boundaryHtml = view('enom::partials.transfer-code', ['domain' => $boundary->domain])->render();
+verify(str_contains($boundaryHtml, 'datetime="2026-11-16T00:30:00+00:00" data-enom-time="zone">Nov 16, 2026, 12:30 AM UTC</time>')
+    && TransferOrders::deadline($boundary)->setTimezone('America/Los_Angeles')->format('M j, Y, g:i A') === 'Nov 15, 2026, 4:30 PM', 'Date-boundary cutoff lacks an exact, localizable timestamp.');
 verify(str_contains($html, "transfer status in advance"), 'Lookup-unavailable warning is missing from the domain page.');
 verify(!str_contains($html, 'value="'.$secret.'"'), 'Form redisplayed the code.');
 verify(!str_contains((string) @file_get_contents($testRoot.'/storage/logs/laravel.log'), 'NEVER-FLASH-THIS'), 'Code reached application logs.');

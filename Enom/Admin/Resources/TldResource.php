@@ -14,7 +14,7 @@ use Filament\Forms\Components\TextInput;
 use Filament\Resources\Resource;
 use Filament\Schemas\Components\Text;
 use Filament\Schemas\Components\Utilities\Get;
-use Filament\Tables\Columns\IconColumn;
+use Filament\Tables\Columns\ColumnGroup;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\Filter;
 use Filament\Tables\Filters\TernaryFilter;
@@ -57,8 +57,15 @@ class TldResource extends Resource
         $costs = Staff::can(Staff::COSTS);
         return $table->columns([
             TextColumn::make('tld')->label('TLD')->formatStateUsing(fn (string $state) => '.'.$state)->searchable()->sortable()
-                ->description(fn (Tld $record) => $record->use_default_rule ? 'Default rule' : 'Own rule'.($costs ? ': '.(self::MODE_LABELS[$record->pricing_mode] ?? '') : '')),
-            ...array_map(fn (string $action) => IconColumn::make($action.'_enabled')->label(ucfirst($action))->boolean()
+                ->description(fn (Tld $record) => $record->use_default_rule ? 'Default rule' : 'Own rule')
+                ->tooltip(fn (Tld $record) => $costs && !$record->use_default_rule ? 'Own rule: '.(self::MODE_LABELS[$record->pricing_mode] ?? '') : null),
+            ColumnGroup::make('On sale', array_map(fn (string $action) => TextColumn::make($action.'_sale')->label(ucfirst($action))->badge()
+                ->state(fn (Tld $record) => self::saleState($record, $action))
+                ->formatStateUsing(fn (string $state) => ['on' => 'On', 'off' => 'Off', 'none' => 'Not offered'][$state])
+                ->color(fn (string $state) => ['on' => 'success', 'off' => 'gray', 'none' => 'warning'][$state])
+                // Registration terms and registry needs sit under the Register switch.
+                ->description(fn (Tld $record) => $action === 'register' && $record->terms()
+                    ? self::termRange($record).(($needs = self::registryNeeds($record)) ? ', needs '.self::shortList($needs) : '') : null)
                 ->tooltip(fn (Tld $record) => $record->sale_holds[$action] ?? ($record->{$action.'_enabled'} ? 'Click to turn off.' : 'Click to turn on.'))
                 ->action(Action::make('toggle'.ucfirst($action))
                     ->requiresConfirmation(fn (Tld $record) => $action === 'transfer' && !$record->transfer_enabled && !app(TransferOrders::class)->allowed($record))
@@ -67,26 +74,26 @@ class TldResource extends Resource
                     ->schema(fn (Tld $record) => $action === 'transfer' && !$record->transfer_enabled && !app(TransferOrders::class)->allowed($record)
                         ? [Checkbox::make('tested_transfer')->label('I tested a transfer for this ending on the Enom test system')->accepted()->required()] : [])
                     ->action(fn (Tld $record, array $data) => Staff::attempt(
-                        fn () => self::setAction($record, $action, !$record->{$action.'_enabled'}, (bool) ($data['tested_transfer'] ?? false)), 'Sale settings updated.'))), Tld::ACTIONS),
-            TextColumn::make('term')->label('Terms on sale')->state(fn (Tld $record) => self::termRange($record))
-                ->description(fn (Tld $record) => ($needs = self::registryNeeds($record)) ? 'Needs '.self::shortList($needs) : null)->wrap(),
-            ...array_map(fn (string $action) => TextColumn::make($action.'_retail')->label(ucfirst($action).' price')
-                ->state(fn (Tld $record) => Labels::money($record->price($action)))->placeholder('Not offered')->alignEnd()
-                ->description(fn (Tld $record) => $costs && $record->cost($action) !== null ? 'Cost '.Labels::money($record->cost($action)) : null), Tld::ACTIONS),
-            TextColumn::make('holds')->label('Needs attention')->state(fn (Tld $record) => implode(' ', array_map(
-                fn ($action, $reason) => (['register' => 'Registration', 'renew' => 'Renewal', 'transfer' => 'Transfer'][$action] ?? ucfirst($action)).': '.$reason,
-                array_keys($record->sale_holds ?? []), $record->sale_holds ?? [])))->wrap(),
-            TextColumn::make('margin')->label('Renewal margin')->visible($costs)
+                        fn () => self::setAction($record, $action, !$record->{$action.'_enabled'}, (bool) ($data['tested_transfer'] ?? false)), 'Sale settings updated.'))), Tld::ACTIONS)),
+            ColumnGroup::make('Price', array_map(fn (string $action) => TextColumn::make($action.'_retail')->label(ucfirst($action))
+                ->state(fn (Tld $record) => Labels::money($record->price($action)))->placeholder('—')->alignEnd()
+                ->description(fn (Tld $record) => $costs && $record->cost($action) !== null ? 'Cost '.Labels::money($record->cost($action)) : null), Tld::ACTIONS)),
+            TextColumn::make('holds')->label('Needs attention')->badge()->listWithLineBreaks()
+                ->state(fn (Tld $record) => array_values(array_map(fn (string $action) => ucfirst($action).': '.self::holdLabel($record->sale_holds[$action]), array_keys(self::attention($record)))))
+                ->color(fn (string $state) => str_contains($state, 'below cost') ? 'danger' : 'warning')
+                ->tooltip(fn (Tld $record) => implode(' ', array_map(fn (string $action, string $reason) => ucfirst($action).': '.$reason, array_keys($holds = self::attention($record)), $holds)) ?: null)
+                ->placeholder('—'),
+            TextColumn::make('margin')->label('Margin')->visible($costs)->alignEnd()
                 ->tooltip('Renewal price minus Enom renewal cost, per year.')
                 ->state(fn (Tld $record) => $record->price('renew') !== null && $record->cost('renew') !== null
                     ? Labels::money(((PricingRule::units($record->price('renew'), 2) * 100) - PricingRule::units($record->cost('renew'))) / 10000) : null)->placeholder('—'),
             TextColumn::make('server.name')->label('Enom server')->visible(Server::where('extension', 'Enom')->count() > 1),
-            TextColumn::make('costs_synced_at')->label('Costs synced')->since()->dateTimeTooltip()->placeholder('Never'),
+            TextColumn::make('costs_synced_at')->label('Costs synced')->since()->dateTimeTooltip()->placeholder('Never')->toggleable(isToggledHiddenByDefault: true),
         ])->filters([
             TernaryFilter::make('enabled')->label('Listed'),
             Filter::make('below_cost')->label('Priced below cost')->visible($costs)->query(fn (Builder $query) => $query->where('sale_holds', 'like', '%Price is below cost.%')),
         ])->recordActions([
-            EditAction::make()->label('Pricing')->visible($costs)->modalHeading(fn (Tld $record) => 'Pricing for .'.$record->tld)->modalWidth('4xl')
+            EditAction::make()->label('Pricing')->iconButton()->tooltip('Pricing')->visible($costs)->modalHeading(fn (Tld $record) => 'Pricing for .'.$record->tld)->modalWidth('4xl')
                 ->fillForm(function (Tld $record) {
                     Staff::require(Staff::COSTS);
                     return ['use_default_rule' => $record->use_default_rule ? '1' : '0'] + self::ruleData(app(Catalogue::class)->rule($record));
@@ -135,7 +142,45 @@ class TldResource extends Resource
     public static function termRange(Tld $record): string
     {
         $terms = $record->terms();
-        return $terms ? implode(', ', $terms).' year'.($terms === [1] ? '' : 's') : 'Not offered';
+        if (!$terms) { return 'Not offered'; }
+        $run = count($terms) > 1 && end($terms) - reset($terms) === count($terms) - 1;
+        return ($run ? reset($terms).'–'.end($terms) : implode(', ', $terms)).' year'.($terms === [1] ? '' : 's');
+    }
+
+    /** 'on', 'off', or 'none' when the action is on but nothing can be sold (no term or price). Unlisted endings show the switch only. */
+    public static function saleState(Tld $record, string $action): string
+    {
+        if (!$record->{$action.'_enabled'}) { return 'off'; }
+        if (!$record->enabled) { return 'on'; }
+        return match ($action) {
+            'register' => $record->terms() !== [],
+            'renew' => $record->price('renew') !== null,
+            default => $record->price('transfer') !== null,
+        } ? 'on' : 'none';
+    }
+
+    /**
+     * Holds staff must act on. Unlisted endings and actions staff switched off are left out; a price below cost
+     * stays because the guard, not staff, turned the action off.
+     * @return array<string, string>
+     */
+    public static function attention(Tld $record): array
+    {
+        if (!$record->enabled) { return []; }
+        return array_filter($record->sale_holds ?? [], fn ($reason, string $action) => is_string($reason)
+            && ($record->{$action.'_enabled'} || str_starts_with($reason, 'Price is below cost.')), ARRAY_FILTER_USE_BOTH);
+    }
+
+    /** Short badge text for a hold; the full reason is in the tooltip. */
+    public static function holdLabel(string $reason): string
+    {
+        return match (true) {
+            str_starts_with($reason, 'Price is below cost.') => 'below cost',
+            str_starts_with($reason, 'Not on the transfer list.') => 'not on list',
+            str_starts_with($reason, 'An annual renewal price') => 'no renewal price',
+            str_starts_with($reason, 'No current price') || str_starts_with($reason, 'No positive price') => 'no price',
+            default => 'unsupported',
+        };
     }
 
     public static function ruleData(array $rule): array
@@ -189,8 +234,10 @@ class TldResource extends Resource
     public static function preview(Tld $tld, array $rule): HtmlString
     {
         Staff::require(Staff::COSTS);
-        $html = '<div class="overflow-x-auto"><table><caption>Price preview for '.e('.'.$tld->tld).'</caption><thead><tr>';
-        foreach (['Action', 'Term', 'Enom cost', 'Your price', 'Per year', 'Margin'] as $heading) { $html .= '<th scope="col" class="px-2 py-1">'.$heading.'</th>'; }
+        // Text columns start-aligned, money end-aligned, so headings sit over their figures.
+        $align = fn (int $column) => 'class="px-2 py-1" style="white-space: nowrap; '.($column < 2 ? 'text-align: start' : 'text-align: end; font-variant-numeric: tabular-nums').'"';
+        $html = '<div class="overflow-x-auto"><table><caption class="px-2 py-1" style="text-align: start">Price preview for '.e('.'.$tld->tld).'</caption><thead><tr>';
+        foreach (['Action', 'Term', 'Enom cost', 'Your price', 'Per year', 'Margin'] as $column => $heading) { $html .= '<th scope="col" '.$align($column).'>'.$heading.'</th>'; }
         $html .= '</tr></thead><tbody>';
         foreach (Tld::ACTIONS as $action) {
             $terms = $action === 'register' ? range(max(1, (int) $tld->min_years), min(10, max((int) $tld->min_years, (int) $tld->max_years))) : [1];
@@ -200,16 +247,16 @@ class TldResource extends Resource
                 if ($cost === null) {
                     $retained = $action === 'renew' ? $tld->price('renew') : null;
                     $cells = [...$cells, $action === 'renew' ? 'No current Enom price' : 'No Enom price — not offered',
-                        $retained ? '$'.$retained.' retained' : '—', $retained ? '$'.$retained : '—', '—'];
+                        $retained ? Labels::money($retained).' retained' : '—', $retained ? Labels::money($retained) : '—', '—'];
                 }
                 else {
                     $price = PricingRule::price($cost, $rule, $action);
                     $margin = PricingRule::units($price, 2) * 100 - PricingRule::units($cost);
-                    $cells = [...$cells, '$'.PricingRule::decimal(PricingRule::units($cost) * $years, 4), '$'.PricingRule::total($price, $years), '$'.$price,
-                        PricingRule::covers($price, $cost) ? '$'.number_format($margin * $years / 10000, 2, '.', '') : 'Below cost'];
+                    $cells = [...$cells, Labels::money(PricingRule::decimal(PricingRule::units($cost) * $years, 4)), Labels::money(PricingRule::total($price, $years)),
+                        Labels::money($price), PricingRule::covers($price, $cost) ? Labels::money(PricingRule::decimal($margin * $years, 4)) : 'Below cost'];
                 }
                 $html .= '<tr>';
-                foreach ($cells as $cell) { $html .= '<td class="px-2 py-1">'.e($cell).'</td>'; }
+                foreach (array_values($cells) as $column => $cell) { $html .= '<td '.$align($column).'>'.e($cell).'</td>'; }
                 $html .= '</tr>';
             }
         }

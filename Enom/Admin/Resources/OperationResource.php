@@ -53,13 +53,13 @@ class OperationResource extends Resource
     public static function getNavigationBadge(): ?string
     {
         if (!Staff::can(Staff::MANAGE)) { return null; }
-        $count = Operation::query()->whereIn('state', Labels::ATTENTION_STATES)->count();
+        $count = Labels::needsStaff(Operation::query())->count();
         return $count > 0 ? (string) $count : null;
     }
 
     public static function getNavigationBadgeColor(): ?string { return 'danger'; }
 
-    public static function getNavigationBadgeTooltip(): ?string { return 'Requests that need attention'; }
+    public static function getNavigationBadgeTooltip(): ?string { return 'Requests staff need to act on'; }
 
     public static function table(Table $table): Table
     {
@@ -91,8 +91,8 @@ class OperationResource extends Resource
                 TextColumn::make('state')
                     ->label('State')
                     ->badge()
-                    ->formatStateUsing(fn (?string $state, Operation $record) => self::refunded($record) ? 'Refunded' : Labels::state($state))
-                    ->color(fn (?string $state, Operation $record) => self::refunded($record) ? 'gray' : Labels::stateColor($state))
+                    ->formatStateUsing(fn (?string $state, Operation $record) => self::refunded($record) ? 'Refunded' : Labels::requestState($record))
+                    ->color(fn (?string $state, Operation $record) => self::refunded($record) || Labels::notSent($record) ? 'gray' : Labels::stateColor($state))
                     ->tooltip(fn (Operation $record) => self::refunded($record)
                         ? ($record->safe_code === 'refunded_by_staff' && is_string($record->funding_reason) ? $record->funding_reason : 'The client\'s payment was added to their account credit.')
                         : Labels::stateHint($record->state, $record))
@@ -101,10 +101,11 @@ class OperationResource extends Resource
                         ($refund = Labels::refundText($record)) ? $refund.'.' : null,
                         ($said = Labels::providerMessage($record)) !== null
                             ? 'Enom said: '.$said
-                            : (in_array($record->state, [...Labels::ATTENTION_STATES, 'awaiting_payment'], true) ? Labels::stateHint($record->state, $record) : null),
+                            : (in_array($record->state, [...Labels::ATTENTION_STATES, ...Labels::CUSTOMER_STATES, 'pending'], true) || Labels::notSent($record) ? Labels::stateHint($record->state, $record) : null),
                     ])) ?: null)
                     ->wrap(),
                 TextColumn::make('funding_basis')
+                    ->getStateUsing(fn (Operation $record) => Labels::requestFunding($record))
                     ->label('Who pays')
                     ->visibleFrom('md')
                     ->formatStateUsing(fn (?string $state) => Labels::funding($state))

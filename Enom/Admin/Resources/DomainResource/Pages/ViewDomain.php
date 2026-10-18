@@ -164,6 +164,11 @@ class ViewDomain extends ViewRecord
                 ->danger()
                 ->visible(fn () => $this->facts()['attention']->isNotEmpty() || $this->facts()['paused'] || $this->getRecord()->status === 'needs_review')
                 ->description(fn () => $this->attentionText()),
+            Callout::make('Waiting on customer')
+                ->color('gray')
+                ->icon('heroicon-o-clock')
+                ->visible(fn () => $this->facts()['waiting']->isNotEmpty())
+                ->description(fn () => $this->waitingText()),
             Section::make('Overview')
                 ->columns(['default' => 2, 'lg' => 4])
                 ->schema([
@@ -255,12 +260,18 @@ class ViewDomain extends ViewRecord
         $lines = [];
         foreach ($facts['attention'] as $operation) {
             $said = Labels::providerMessage($operation);
-            $lines[] = Labels::action($operation->action).' #'.$operation->id.': '.strtolower(Labels::state($operation->state)).'. '.Labels::stateHint($operation->state)
+            $lines[] = Labels::action($operation->action).' #'.$operation->id.': '.lcfirst(Labels::requestState($operation)).'. '.Labels::stateHint($operation->state, $operation)
                 .($said ? ' Enom said: '.$said.(str_ends_with($said, '.') ? '' : '.') : '');
         }
         if (!$lines && $facts['paused']) { $lines[] = 'Changes and renewal billing are paused after a staff review.'; }
         if (!$lines) { $lines[] = 'Enom reported a problem with this domain. Refresh from Enom to check again.'; }
         return implode(' ', array_slice($lines, 0, 2)).' See Activity below.';
+    }
+
+    private function waitingText(): string
+    {
+        return $this->facts()['waiting']->take(2)->map(fn ($operation) => Labels::action($operation->action).' #'.$operation->id.': '
+            .strtolower(Labels::state($operation->state)).'. '.Labels::stateHint($operation->state, $operation))->implode(' ');
     }
 
     private function billingSection(): Section
@@ -348,7 +359,8 @@ class ViewDomain extends ViewRecord
                     ->listWithLineBreaks()
                     ->copyable()
                     ->placeholder('Not read yet')
-                    ->belowContent(fn (Domain $record) => $this->usesDefaultNameservers($record) ? 'Server default' : null),
+                    ->belowContent(fn (Domain $record) => ($this->facts($record)['snapshot']['registrar_dns'] ?? null) === true ? 'Registrar default'
+                        : ($this->usesDefaultNameservers($record) ? 'Server default' : null)),
                 TextEntry::make('glue')
                     ->label('Child nameservers')
                     ->state(fn (Domain $record) => array_map(fn (array $glue) => '<span style="overflow-wrap: anywhere">'.e($glue['host']).'</span><br><span class="text-gray-500 dark:text-gray-400">'.e($glue['ip']).'</span>',

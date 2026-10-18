@@ -787,6 +787,8 @@ class DomainController extends Controller
         return $input;
     }
 
+    public const NOT_SENT = 'Queued — not sent yet';
+
     /** Customer status badge for a domain: [label, tone]. Tone is ok, info, warn, bad or muted. */
     public static function badge(?string $status, ?array $progress = null): array
     {
@@ -798,6 +800,7 @@ class DomainController extends Controller
                 $label === 'Needs your details' => ['Needs your details', 'warn'],
                 !empty($progress['awaiting_payment']) => ['Awaiting payment', 'warn'],
                 is_string($label) && str_ends_with($label, 'needs review') => ['Delayed', 'warn'],
+                !empty($progress['not_sent']) && is_string($label) && str_ends_with($label, 'waiting to be sent') => [self::NOT_SENT, 'muted'],
                 default => [$kind, 'info'],
             };
         }
@@ -840,10 +843,11 @@ class DomainController extends Controller
             $what .= ', '.self::yearsLabel($term);
         }
         [$label, $tone] = match (true) {
-            $state === 'rejected' && in_array($outcome, ['cancelled_unpaid', 'code_timeout'], true) => ['Cancelled', 'muted'],
+            $state === 'rejected' && in_array($outcome, ['cancelled_unpaid', 'cancelled_payment_review', 'cancelled_unknown', 'code_timeout'], true) => ['Cancelled', 'muted'],
             $state === 'awaiting_payment' => ['Awaiting payment', 'warn'],
             $state === 'awaiting_code' => ['Needs your code', 'warn'],
             $state === 'held' && $outcome === 'needs_details' => ['Needs your details', 'warn'],
+            $state === 'queued' && !empty($operation['not_sent']) => [self::NOT_SENT, 'muted'],
             in_array($state, ['queued', 'running', 'pending'], true) => ['In progress', 'info'],
             in_array($state, ['uncertain', 'held'], true) => ['Being checked', 'warn'],
             $state === 'succeeded' => ['Done', 'ok'],

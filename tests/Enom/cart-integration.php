@@ -119,7 +119,7 @@ verify($operations->execute($seal['operation']->id)->safe_code === 'contact_deta
 $duringPrice = null;
 
 // U1: exactly two native emails, both durable, plain and free of the code and private payload.
-integrationClock('2026-10-17 12:00:00');
+integrationClock('2026-10-17 00:30:00');
 $availability['mail-transfer.com'] = 'transferable';
 $mailOrder = enomCartOrder($user, 'mail-transfer.com', 'transfer');
 verify(codeMail('mail-transfer.com') === [], 'Unpaid checkout sent a code email.');
@@ -127,14 +127,14 @@ integrationPay($mailOrder);
 verify(count(codeMail('mail-transfer.com')) === 1, 'Payment did not send exactly one code email.');
 $transfers->paymentAccepted($mailOrder['operation']); $operations->acceptPaidInvoice($mailOrder['invoice']->fresh()); $transfers->expireMissingCodes();
 verify(count(codeMail('mail-transfer.com')) === 1, 'Payment/sweep replay repeated the code email.');
-integrationClock('2026-11-09 11:59:59'); $transfers->expireMissingCodes();
+integrationClock('2026-11-09 00:29:59'); $transfers->expireMissingCodes();
 verify(count(codeMail('mail-transfer.com')) === 1, 'Reminder sent before seven days remained.');
-integrationClock('2026-11-09 12:00:00'); $transfers->expireMissingCodes(); $transfers->expireMissingCodes();
+integrationClock('2026-11-09 00:30:00'); $transfers->expireMissingCodes(); $transfers->expireMissingCodes();
 $mails = codeMail('mail-transfer.com');
 verify(count($mails) === 2 && str_starts_with($mails[1]->subject, 'Reminder: transfer code for mail-transfer.com'), 'Reminder was missing or repeated.');
 verify(isset($mailOrder['operation']->fresh()->policy['transfer_code_paid_notified_at'], $mailOrder['operation']->fresh()->policy['transfer_code_reminder_notified_at']), 'Email markers were not durable.');
 foreach ($mails as $mail) {
-    verify(str_contains($mail->body, '#transfer-code') && str_contains($mail->body, 'Nov 16, 2026') && !str_contains($mail->body, 'UTC') && str_contains($mail->body, '$13.00'), 'Email omitted the domain link, deadline or line credit amount.');
+    verify(str_contains($mail->body, '#transfer-code') && str_contains($mail->body, 'Nov 16, 2026, 12:30 AM UTC') && str_contains($mail->body, '$13.00'), 'Email omitted the domain link, deadline or line credit amount.');
     verify(!preg_match('/\\b(Enom|RDAP|EPP|operation)\\b/i', str_replace(parse_url(config('app.url'), PHP_URL_HOST), '', strip_tags($mail->subject.' '.$mail->body)), $internalWord), 'Email used internal wording: '.($internalWord[1] ?? 'none'));
 }
 $availability['code-before.com'] = 'transferable';

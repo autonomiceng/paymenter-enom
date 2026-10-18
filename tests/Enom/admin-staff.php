@@ -205,7 +205,8 @@ foreach (['com' => $tld->fresh(), 'net' => $markup->fresh()] as $ending => $reco
     verify($plain['record_actions'] === [] && $plain['bulk_actions'] === ['disable'], '.'.$ending.' pricing actions offered without admin.enom.costs: '.json_encode($plain));
     verify(isset($withCosts['columns']['margin']) && $withCosts['record_actions'] === ['edit'] && $withCosts['bulk_actions'] === ['disable', 'default'] && str_contains(json_encode($withCosts), 'Cost $'), '.'.$ending.' costs hidden from admin.enom.costs: '.json_encode($withCosts));
 }
-verify($tldTable($manager, $markup->fresh())['columns']['tld'][2] === 'Own rule' && $tldTable($coster, $markup->fresh())['columns']['tld'][2] === 'Own rule: Cost + percent', 'Markup size is not limited to admin.enom.costs.');
+verify($tldTable($manager, $markup->fresh())['columns']['tld'][2] === 'Own rule' && $tldTable($manager, $markup->fresh())['columns']['tld'][3] === ''
+    && $tldTable($coster, $markup->fresh())['columns']['tld'][3] === 'Own rule: Cost + percent', 'Markup size is not limited to admin.enom.costs.');
 foreach ([[ListDomains::class, []], [ListOperations::class, []], ...$tldPage, [ViewDomain::class, ['record' => $domainForAdmin->id]]] as [$component, $parameters]) {
     // Livewire's test request renders the abort(403) as an error page.
     try { [$html, $state] = $render($helpdesk, $component, $parameters); $denied = str_contains($html, '403 Forbidden') && !str_contains($html, 'admin-view.com') && $privateIn($html.$state) === []; }
@@ -235,7 +236,79 @@ $paidColumn = $page->getTable()->getColumn('transfer_paid_at'); $paidColumn->rec
 verify($paidColumn->getState()->format('c') === '2026-10-17T12:00:00+00:00', 'Staff payment date did not use the verified transfer clock.');
 $labels = \Paymenter\Extensions\Servers\Enom\Admin\Support\Labels::class;
 verify(str_contains($labels::stateHint('held', new Operation(['safe_code' => 'contact_details_required'])), 'Needs account details'), 'Contact hold has no staff recovery instruction.');
+verify($labels::money(-4) === '-$4.00' && $labels::money('8.955') === '$8.955' && $labels::money(-1.5, 'EUR') === '-1.50 EUR', 'Negative amounts put the sign after the currency symbol.');
 verify(str_contains($labels::stateHint('uncertain', new Operation(['action' => 'nameservers', 'operation_key' => 'initial-nameservers:123'])), 'Registration succeeded'), 'Nameserver failure hides the successful registration.');
+// Non-billable request kinds ignore the legacy/default invoice funding basis on both staff tables.
+$fundingColumn = $page->getTable()->getColumn('funding_basis');
+foreach ([...\Paymenter\Extensions\Servers\Enom\Services\DomainManager::ACTIONS, 'provider_renewal_disable',
+    ...\Paymenter\Extensions\Servers\Enom\Services\DomainPresentation::FINANCIAL_ACTIONS] as $action) {
+    foreach (['paid_invoice', 'complimentary', 'non_billable_management'] as $basis) {
+        $request = new Operation(['action' => $action, 'funding_basis' => $basis, 'amount' => '0.00']);
+        $request->id = 100000 + $checks;
+        $fundingColumn->record($request);
+        $billable = in_array($action, ['register', 'transfer', 'renew', 'privacy_purchase', 'privacy_renew'], true);
+        $expected = $billable ? $labels::funding($basis) : 'No charge';
+        verify($fundingColumn->formatState($fundingColumn->getState()) === $expected, 'Who pays mislabels '.$action.' / '.$basis);
+        verify($billable || $fundingColumn->getColor($fundingColumn->getState()) === 'gray', 'Non-billable request uses an invoice/complimentary color: '.$action);
+    }
+}
+// Pending requests that cannot be reconciled remain on every staff-attention surface.
+Illuminate\Support\Facades\Auth::setUser($manager);
+$labels = \Paymenter\Extensions\Servers\Enom\Admin\Support\Labels::class;
+$staff = \Paymenter\Extensions\Servers\Enom\Admin\Support\Staff::class;
+$facts = \Paymenter\Extensions\Servers\Enom\Admin\Support\DomainFacts::class;
+foreach (['register', 'renew', 'transfer', 'epp_sync', 'epp_email'] as $action) {
+    $stuckDomain = clientDomain($client, ['domain' => 'stuck-'.$action.'.com']);
+    $beforeBadge = (int) OperationResource::getNavigationBadge();
+    $beforeDomains = (int) DomainResource::getNavigationBadge();
+    $stuck = Operation::create(['domain_id' => $stuckDomain->id, 'service_id' => $stuckDomain->service_id,
+        'operation_key' => 'stuck-'.$action, 'action' => $action, 'state' => 'pending', 'provider_order_id' => null,
+        'term' => 1, 'amount' => '0.00', 'currency' => 'USD']);
+    $tabs = app(ListOperations::class)->getTabs();
+    verify($tabs['attention']->modifyQuery(Operation::query())->whereKey($stuck->id)->exists()
+        && !$tabs['progress']->modifyQuery(Operation::query())->whereKey($stuck->id)->exists(), 'Stuck request is missing from attention or duplicated in progress: '.$action);
+    verify(app(ListOperations::class)->getDefaultActiveTab() === 'attention', 'Stuck request does not open the attention tab.');
+    verify((int) OperationResource::getNavigationBadge() === $beforeBadge + 1 && (int) DomainResource::getNavigationBadge() === $beforeDomains + 1,
+        'Stuck request is missing from sidebar badges: '.$action);
+    $stats = (new ReflectionMethod(\Paymenter\Extensions\Servers\Enom\Admin\Pages\Widgets\DomainCounts::class, 'getStats'))
+        ->invoke(app(\Paymenter\Extensions\Servers\Enom\Admin\Pages\Widgets\DomainCounts::class));
+    verify((int) $stats[2]->getValue() === count($staff::attentionDomainIds())
+        && $stats[2]->getDescription() === ($n = $labels::needsStaff(Operation::query())->count()).' registrar '.($n === 1 ? 'request' : 'requests'), 'Dashboard misses stuck request: '.$action);
+    $facts::forget($stuckDomain->id);
+    verify($facts::for($stuckDomain->fresh())['attention']->contains('id', $stuck->id), 'Domain callout misses stuck request: '.$action);
+    [$callout] = $render($manager, ViewDomain::class, ['record' => $stuckDomain->id]);
+    verify(str_contains($callout, 'Needs attention') && str_contains($callout, '#'.$stuck->id.': not confirmed.'), 'Rendered domain callout misses stuck request: '.$action);
+    foreach ([null, '', '0', '12345'] as $orderId) {
+        $stuck->update(['provider_order_id' => $orderId]);
+        $unconfirmed = $orderId !== '12345' || in_array($action, ['epp_sync', 'epp_email'], true);
+        verify($labels::notConfirmed($stuck) === $unconfirmed
+            && $labels::needsStaff(Operation::query())->whereKey($stuck->id)->exists() === $unconfirmed,
+            'Pending display and staff-attention predicates differ: '.$action.' / '.$orderId);
+        verify($labels::requestState($stuck) === ($unconfirmed ? 'Not confirmed' : 'In progress at Enom')
+            && $labels::stateHint('pending', $stuck) === ($unconfirmed ? 'No reply from Enom. Check with Enom before retrying.' : 'Enom is still working on it.'),
+            'Pending request label or hint claims the wrong provider status: '.$action.' / '.$orderId);
+    }
+    $stuck->update(['provider_order_id' => null]);
+    foreach ([[ListOperations::class, []], [\Paymenter\Extensions\Servers\Enom\Admin\Resources\DomainResource\RelationManagers\RequestsRelationManager::class,
+        ['ownerRecord' => $stuckDomain, 'pageClass' => ViewDomain::class]]] as [$component, $parameters]) {
+        [$html] = $render($manager, $component, $parameters);
+        verify(str_contains($html, 'Not confirmed') && str_contains($html, 'No reply from Enom. Check with Enom before retrying.'), 'Staff request table lacks shared pending wording: '.$action.' / '.$component);
+    }
+    verify(str_contains($callout, 'No reply from Enom. Check with Enom before retrying.'), 'Domain callout lacks pending guidance: '.$action);
+    if (in_array($action, ['register', 'renew', 'transfer'], true)) {
+        $stuck->update(['provider_order_id' => '12345']);
+        verify(!$labels::needsStaff(Operation::query())->whereKey($stuck->id)->exists()
+            && $labels::inGroup(Operation::query(), 'progress')->whereKey($stuck->id)->exists(), 'Readable pending request is not solely in progress: '.$action);
+    }
+}
+// Every state, including both held kinds and pending variants, belongs to exactly one tab group.
+foreach (array_keys($labels::stateOptions()) as $state) {
+    foreach ([null, 'contact_details_required'] as $code) {
+        $stuck->update(['state' => $state, 'safe_code' => $code]);
+        $groups = array_filter(array_keys($labels::STATE_GROUPS), fn ($group) => $labels::inGroup(Operation::query(), $group)->whereKey($stuck->id)->exists());
+        verify(count($groups) === 1, 'Tab groups overlap or omit '.$state.' / '.$code);
+    }
+}
 $app['auth']->forgetGuards();
 
 echo 'Admin and staff: '.$checks.' passed; real routes, Filament via Livewire, SQLite in memory.'.PHP_EOL;

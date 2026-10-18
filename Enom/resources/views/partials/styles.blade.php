@@ -380,6 +380,7 @@
 .enom .enom-status-card { padding: 1.75rem 1.5rem; }
 .enom .enom-status-card h2 { font-size: 1.25rem; font-weight: 700; }
 .enom .enom-status-card p { color: var(--e-muted); max-width: 60ch; margin-top: .375rem; }
+.enom .enom-status-card .enom-input { max-width: 28rem; }
 .enom .enom-progress { display: flex; gap: .375rem; margin-top: 1.25rem; max-width: 28rem; }
 .enom .enom-progress span { flex: 1; height: .3125rem; border-radius: 999px; background: color-mix(in srgb, var(--e-muted) 25%, transparent); }
 .enom .enom-progress span.is-done { background: var(--e-accent); }

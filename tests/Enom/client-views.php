@@ -82,6 +82,90 @@ $list = ok('/domains', $owner);
 verify(str_contains(text($list), 'Awaiting payment') && enomDocument($list)->query('//a[@href="http://enom-tests.invalid/invoices/'.$invoice->id.'"]')->length === 1, 'List does not show the unpaid registration.');
 accessible($list, 'List');
 
+// Cancellation wording follows retained payment evidence, including a shared partial invoice.
+foreach (['unpaid' => ['register', '0.00'], 'partial' => ['register', '5.00'], 'paid-transfer' => ['transfer', '13.00']] as $case => [$action, $paid]) {
+    $name = 'cancel-'.$case.'.com';
+    if ($action === 'transfer') { $availability[$name] = 'transferable'; }
+    $order = enomCartOrder($owner, $name, $action);
+    if ($paid !== '0.00') {
+        App\Models\InvoiceTransaction::withoutEvents(fn () => $order['invoice']->transactions()->create(['amount' => $paid, 'status' => 'succeeded']));
+    }
+    if ($case === 'partial') {
+        $order['invoice']->items()->create(['description' => 'Hosting', 'price' => '20.00', 'quantity' => 1]);
+        $order['invoice']->update(['status' => Invoice::STATUS_CANCELLED]);
+    } else {
+        if ($action === 'transfer') { Illuminate\Support\Facades\DB::table('invoices')->where('id', $order['invoice']->id)->update(['status' => Invoice::STATUS_PAID]); }
+        $order['service']->update(['status' => App\Models\Service::STATUS_CANCELLED]);
+    }
+    $operations->retireCancelledInitials();
+    $page = ok('/domains/'.$order['domain']->id, $owner);
+    $unpaid = $case === 'unpaid';
+    verify($order['operation']->fresh()->safe_code === ($unpaid ? 'initial_cancelled_unpaid' : 'initial_cancelled_payment_review'), 'Cancellation fixture lost payment evidence: '.$case);
+    verify(str_contains(text($page), 'Nothing was charged.') === $unpaid, 'Cancelled card misstates payment: '.$case);
+    verify(enomDocument($page)->query('//section[@aria-labelledby="enom-activity-heading"]//span[contains(@class, "enom-tone-muted")][normalize-space(.)="Cancelled"]')->length === 1,
+        'Initial cancellation lacks neutral Activity status: '.$case);
+    foreach ([null, 'unrecognized-cancellation'] as $unknownCode) {
+        $order['operation']->update(['safe_code' => $unknownCode]);
+        $unknownPage = ok('/domains/'.$order['domain']->id, $owner);
+        verify(enomDocument($unknownPage)->query('//section[@aria-labelledby="enom-activity-heading"]//span[contains(@class, "enom-tone-muted")][normalize-space(.)="Cancelled"]')->length === 1
+            && !str_contains(text($unknownPage), 'Declined'), 'Unknown initial cancellation reads as a registrar decline: '.$case);
+    }
+    $order['operation']->update(['safe_code' => $unpaid ? 'initial_cancelled_unpaid' : 'initial_cancelled_payment_review']);
+    if (!$unpaid) {
+        verify(str_contains(text($page), 'This order was cancelled after a payment was recorded. Contact support and we’ll sort out your payment.'), 'Cancelled payment lacks review guidance: '.$case);
+        verify(enomDocument($page)->query('//section[contains(@class, "enom-status-card")]//a[contains(@class, "enom-btn--primary")][contains(., "Contact support")]')->length === 1, 'Cancelled payment lacks primary support action.');
+        verify(!str_contains(text($page), 'Try again') && !str_contains(text($page), 'Search again'), 'Cancelled payment encourages a reorder.');
+        verify(!str_contains(text($page), 'Declined'), 'Cancelled payment activity reads as a registrar decline: '.$case);
+    }
+}
+$order['operation']->update(['safe_code' => 'unrecognized-cancellation']);
+$page = ok('/domains/'.$order['domain']->id, $owner);
+verify(!str_contains(text($page), 'Nothing was charged.') && !str_contains(text($page), 'after a payment was recorded'), 'Unknown cancellation claims a payment state.');
+verify(str_contains(text($page), 'This order was cancelled. If you paid for it, contact support and we’ll sort out your payment.'), 'Unknown cancellation lacks neutral guidance.');
+verify(enomDocument($page)->query('//section[contains(@class, "enom-status-card")]//a[contains(@class, "enom-btn--primary")][contains(., "Contact support")]')->length === 1, 'Unknown cancellation lacks primary support action.');
+
+// Actual registrar refusals retain the red Declined Activity status for both initial order kinds.
+foreach (['register', 'transfer'] as $action) {
+    $name = 'refused-'.$action.'.com';
+    if ($action === 'transfer') { $availability[$name] = 'transferable'; }
+    $declined = enomCartOrder($owner, $name, $action);
+    $declined['operation']->update(['state' => 'rejected', 'safe_code' => 'provider_rejected']);
+    $declined['domain']->update(['status' => $action === 'register' ? 'registration_rejected' : 'transfer_rejected']);
+    $page = ok('/domains/'.$declined['domain']->id, $owner);
+    verify(enomDocument($page)->query('//section[@aria-labelledby="enom-activity-heading"]//span[contains(@class, "enom-tone-bad")][normalize-space(.)="Declined"]')->length === 1,
+        'Registrar refusal lost its Declined Activity status: '.$action);
+}
+
+// A paid transfer still waiting for its code shows the deadline as a zoned, localizable time.
+$availability['deadline-code.com'] = 'transferable';
+$waiting = enomCartOrder($owner, 'deadline-code.com', 'transfer');
+App\Helpers\ExtensionHelper::addPayment($waiting['invoice']->id, null, amount: 13, transactionId: 'deadline-code-paid');
+$page = ok('/domains/'.$waiting['domain']->id, $owner);
+verify(enomDocument($page)->query('//p[starts-with(normalize-space(.), "Enter it by")]//time[@data-enom-time="zone"]')->length === 1, 'Transfer code deadline is not a zoned local time.');
+$pages['deadline'] = $page;
+
+// Received transfer codes remain replaceable while processing is off, including contact holds.
+$availability['replace-code.com'] = 'transferable';
+$replace = enomCartOrder($owner, 'replace-code.com', 'transfer');
+App\Helpers\ExtensionHelper::addPayment($replace['invoice']->id, null, amount: 13, transactionId: 'replace-code-paid');
+serverSetting('operations_enabled', '0');
+$transfers = app(\Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class);
+$transfers->submitCode($owner, $replace['domain']->id, 'FIRST-CODE');
+foreach (['queued', 'held'] as $state) {
+    $replace['operation']->update(['state' => $state, 'safe_code' => $state === 'held' ? 'contact_details_required' : null]);
+    $page = ok('/domains/'.$replace['domain']->id, $owner);
+    $url = '/domains/'.$replace['domain']->id.'/transfer-code';
+    verify(enomDocument($page)->query('//section[contains(@class, "enom-status-card")]//input[@id="transfer-code-input"]')->length === 1
+        && enomDocument($page)->query('//section[contains(@class, "enom-status-card")]//details[summary[.="Change code"]]//button[.="Save new code"]')->length === 1
+        && !str_contains(text($page), 'Start transfer'), 'Replaceable code editor missing, duplicated or offering to start: '.$state);
+    $form = enomFormFields($page, $url);
+    $response = enomHttp($owner, 'POST', $url, array_replace($form, ['transfer_code' => 'REPLACED-'.$state]), ['csrf' => true]);
+    verify($response->getStatusCode() === 302 && $replace['operation']->fresh()->payload['epp'] === 'REPLACED-'.$state, 'Code replacement failed while processing is disabled: '.$state);
+}
+$replace['operation']->update(['state' => 'pending', 'provider_order_id' => '12345', 'policy' => array_replace($replace['operation']->fresh()->policy, ['dispatch_attempted_at' => now()->toIso8601String()])]);
+verify(enomDocument(ok('/domains/'.$replace['domain']->id, $owner))->query('//*[@id="transfer-code-input"]')->length === 0, 'Code editor remains after dispatch.');
+serverSetting('operations_enabled', '1');
+
 // ---------------------------------------------------------------- active domain: DNS tools off, then on
 $active = clientDomain($owner, ['domain' => 'active-site.com'], ['hosts' => [['name' => '@', 'type' => 'A', 'address' => '192.0.2.10', 'mx_pref' => 10]], 'srv' => []]);
 Operation::create(['domain_id' => $active->id, 'service_id' => $active->service_id, 'operation_key' => 'view-nameservers', 'action' => 'nameservers', 'state' => 'succeeded', 'currency' => 'USD', 'term' => 1, 'amount' => '0.00', 'payload' => [], 'created_at' => '2026-10-13 15:45:00']);

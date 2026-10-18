@@ -54,10 +54,14 @@ class DomainManager
         // A recorded invoice ID is shown only after exact owner, domain, service and item checks.
         // Unverified or foreign links never enter this DTO, whoever is viewing.
         $links = DomainAdministration::linkedInvoices($recent, [(int) $domain->id => ['service_id' => (int) $domain->service_id, 'user_id' => (int) $domain->user_id]]);
+        // With processing off, a queued request has not been sent; never call it in progress.
+        $processing = RuntimeGuard::flag((int) $domain->server_id, 'operations_enabled');
         $operations = $recent->map(fn ($operation) => [
             'id' => $operation->id, 'action' => $operation->action,
-            'state' => $operation->state, 'created_at' => $operation->created_at,
-            'invoice_id' => $links[(int) $operation->id]['id'] ?? null, 'outcome' => DomainPresentation::outcome($operation->safe_code),
+            'state' => $operation->state, 'created_at' => $operation->created_at, 'not_sent' => $operation->state === 'queued' && !$processing,
+            'invoice_id' => $links[(int) $operation->id]['id'] ?? null,
+            'outcome' => DomainPresentation::outcome($operation->safe_code)
+                ?? ($domain->status === 'cancelled' && $operation->state === 'rejected' && in_array($operation->action, ['register', 'transfer'], true) ? 'cancelled_unknown' : null),
             'term' => (int) $operation->term,
             // Only the refund summary leaves the encrypted cost record; costs stay private.
             'refund' => is_array($operation->cost['refund'] ?? null)

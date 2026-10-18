@@ -10,7 +10,7 @@ Checkout fields are flat: canonical lowercase ASCII `domain` and `enom_registry_
 
 Cart add/edit and Order Creating listeners recheck availability, terms, current prices, quantity one, USD, ownership and duplicate registrar names. Hosting may use the same domain. Every domain line must remain positive after coupons; a zero or negative domain line rolls back the whole checkout, including a mixed order.
 
-The native cart creates one Order and one Invoice for the checkout, with a Service for each line. An InvoiceItem Creating listener gives initial domain lines the description `Register example.com (3 years)` or `Transfer example.com`. A synchronous InvoiceItem Created listener binds inside checkout's transaction. Failure propagates and rolls back every new obligation, including account binding. No provider write occurs at checkout.
+The native cart creates one Order and one Invoice for the checkout, with a Service for each line. An InvoiceItem Creating listener gives initial domain lines the description `Register example.com (3 years)` or `Transfer example.com (adds 1 year)`. A synchronous InvoiceItem Created listener binds inside checkout's transaction. Failure propagates and rolls back every new obligation, including account binding. No provider write occurs at checkout.
 
 Binding validates product markers and plan ownership, locks product then ending, creates the unique Domain and initial Operation, snapshots contacts and registry details, and freezes purchased plan, years, currency and discounted invoice amount. Replaying the same binding returns the same Operation; conflicts fail closed.
 

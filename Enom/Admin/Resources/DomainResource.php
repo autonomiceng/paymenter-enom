@@ -166,10 +166,11 @@ class DomainResource extends Resource
     private static function pendingProgress(Domain $record): ?string
     {
         if (!in_array($record->status, ['registration_pending', 'transfer_pending'], true)) { return null; }
-        $label = DomainAdministration::progress([$record])[(int) $record->id]['label'] ?? null;
+        $progress = DomainAdministration::progress([$record])[(int) $record->id] ?? [];
+        $label = $progress['label'] ?? null;
         return match (true) {
             $label === null => null,
-            str_ends_with($label, 'waiting to be sent') => 'Paid, waiting to send',
+            str_ends_with($label, 'waiting to be sent') => !empty($progress['not_sent']) ? Labels::NOT_SENT : 'Paid, waiting to send',
             str_ends_with($label, 'in progress') => 'At Enom',
             str_ends_with($label, 'needs review') => 'Needs attention',
             str_ends_with($label, 'not confirmed') => 'Not paid yet',

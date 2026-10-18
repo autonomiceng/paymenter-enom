@@ -86,10 +86,10 @@ final class Staff
         return $message !== '' && strlen($message) <= 300 && !str_contains($message, "\n") && !str_contains($message, 'SQLSTATE') ? $message : null;
     }
 
-    /** Domains with requests or a domain status that need staff. */
+    /** Domains with requests or a domain status that need staff. Requests waiting on the customer don't count. */
     public static function attentionDomainIds(): array
     {
-        return Operation::query()->whereIn('state', Labels::ATTENTION_STATES)->distinct()->pluck('domain_id')
+        return Labels::needsStaff(Operation::query())->distinct()->pluck('domain_id')
             ->merge(Domain::query()->where('status', 'needs_review')->pluck('id'))
             ->map(fn ($id) => (int) $id)->unique()->values()->all();
     }

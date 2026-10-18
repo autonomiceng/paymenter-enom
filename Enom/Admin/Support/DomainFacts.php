@@ -47,8 +47,9 @@ final class DomainFacts
         $registered = Operation::query()->where('domain_id', $domain->id)->whereIn('action', ['register', 'transfer'])
             ->where('state', 'succeeded')->orderBy('id')->value('completed_at');
 
-        $attention = Operation::query()->select(['id', 'action', 'state', 'cost', 'created_at'])->where('domain_id', $domain->id)
-            ->whereIn('state', Labels::ATTENTION_STATES)->orderByDesc('id')->limit(5)->get();
+        $requests = fn () => Operation::query()->select(['id', 'action', 'state', 'safe_code', 'operation_key', 'cost', 'created_at'])->where('domain_id', $domain->id);
+        $attention = Labels::needsStaff($requests())->orderByDesc('id')->limit(5)->get();
+        $waiting = Labels::waitingOnCustomer($requests())->orderByDesc('id')->limit(5)->get();
 
         $nextInvoice = null;
         if ($pays['mode'] !== 'complimentary' && $service && !$service->cancellation) {
@@ -70,6 +71,7 @@ final class DomainFacts
             'next_invoice' => $nextInvoice,
             'registered' => $registered,
             'attention' => $attention,
+            'waiting' => $waiting,
             'paused' => DomainOperations::writesPaused($domain),
             'unresolved' => $domain->operations()->whereIn('state', DomainOperations::UNRESOLVED_STATES)->exists(),
             'invoices' => self::invoices($domain),

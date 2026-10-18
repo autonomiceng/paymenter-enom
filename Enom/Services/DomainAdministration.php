@@ -113,14 +113,14 @@ class DomainAdministration
     public static function progress(iterable $domains): array
     {
         $actions = ['registration_pending' => 'register', 'transfer_pending' => 'transfer'];
-        $entry = function (?string $status, ?array $request, ?int $invoiceId): array {
+        $entry = function (?string $status, ?array $request, ?int $invoiceId, bool $notSent = false): array {
             $label = DomainPresentation::progress($status, $request);
             $awaiting = $label === DomainPresentation::AWAITING_PAYMENT;
             return ['label' => $label, 'kind' => match ($status) { 'registration_pending' => 'registration', 'transfer_pending' => 'transfer', default => null },
-                'awaiting_payment' => $awaiting, 'invoice_id' => $awaiting ? $invoiceId : null,
+                'awaiting_payment' => $awaiting, 'invoice_id' => $awaiting ? $invoiceId : null, 'not_sent' => $notSent,
                 'state' => $request['state'] ?? null, 'safe_code' => in_array($request['safe_code'] ?? null, ['contact_details_required', 'transfer_code_required', 'transfer_code_timeout'], true) ? $request['safe_code'] : null];
         };
-        $result = []; $pending = []; $owners = []; $refused = [];
+        $result = []; $pending = []; $owners = []; $refused = []; $servers = [];
         foreach ($domains as $domain) {
             if (!($domainId = self::key(data_get($domain, 'id')))) { continue; }
             $status = is_string(data_get($domain, 'status')) ? data_get($domain, 'status') : null;
@@ -129,6 +129,7 @@ class DomainAdministration
             if ($status !== null && isset($actions[$status])) {
                 $pending[$domainId] = $status;
                 $owners[$domainId] = ['service_id' => (int) data_get($domain, 'service_id'), 'user_id' => (int) data_get($domain, 'user_id')];
+                $servers[$domainId] = (int) data_get($domain, 'server_id');
             }
         }
         // A transfer cancelled for a missing code reads differently from one the registrar refused.
@@ -149,7 +150,9 @@ class DomainAdministration
         foreach ($latest as $domainId => $request) {
             $link = $links[(int) $request->id] ?? null;
             $result[$domainId] = $entry($pending[$domainId], ['state' => is_string($request->state) ? $request->state : null,
-                'safe_code' => $request->safe_code, 'invoiced' => $request->invoice_id !== null, 'invoice_status' => $link['status'] ?? null], $link['id'] ?? null);
+                'safe_code' => $request->safe_code, 'invoiced' => $request->invoice_id !== null, 'invoice_status' => $link['status'] ?? null], $link['id'] ?? null,
+                // Processing off: a paid, queued order is saved but not sent.
+                $request->state === 'queued' && $servers[$domainId] > 0 && !RuntimeGuard::flag($servers[$domainId], 'operations_enabled'));
         }
         return $result;
     }

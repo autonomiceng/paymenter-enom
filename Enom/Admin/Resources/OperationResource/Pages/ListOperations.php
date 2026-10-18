@@ -30,16 +30,14 @@ class ListOperations extends ListRecords
 
     public function getTabs(): array
     {
-        $counts = Operation::query()->selectRaw('state, count(*) as total')->groupBy('state')->pluck('total', 'state');
-        $count = fn (array $states) => (int) collect($states)->sum(fn ($state) => (int) ($counts[$state] ?? 0));
         $tab = fn (string $label, string $group, ?string $color = null) => Tab::make($label)
-            ->modifyQueryUsing(fn (Builder $query) => $query->whereIn('state', Labels::STATE_GROUPS[$group]))
-            ->badge(($n = $count(Labels::STATE_GROUPS[$group])) > 0 ? $n : null)
+            ->modifyQueryUsing(fn (Builder $query) => Labels::inGroup($query, $group))
+            ->badge(($n = Labels::inGroup(Operation::query(), $group)->count()) > 0 ? $n : null)
             ->badgeColor($color ?? 'gray');
 
         return [
             'attention' => $tab('Needs attention', 'attention', 'danger'),
-            'payment' => $tab('Waiting for payment', 'payment', 'warning'),
+            'customer' => $tab('Waiting on customer', 'customer'),
             'progress' => $tab('In progress', 'progress', 'info'),
             'completed' => $tab('Completed', 'completed'),
             'failed' => $tab('Failed', 'failed'),
@@ -49,6 +47,6 @@ class ListOperations extends ListRecords
 
     public function getDefaultActiveTab(): string|int|null
     {
-        return Operation::query()->whereIn('state', Labels::ATTENTION_STATES)->exists() ? 'attention' : 'all';
+        return Labels::needsStaff(Operation::query())->exists() ? 'attention' : 'all';
     }
 }

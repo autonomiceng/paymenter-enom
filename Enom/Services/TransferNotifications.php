@@ -37,7 +37,7 @@ final class TransferNotifications
                 if (!$template?->enabled || !$template->isEnabledForPreference($preference, 'mail')) { continue; }
                 // Only public display data reaches templates or queued mail; never the request payload.
                 NotificationHelper::sendNotification('enom_transfer_code_'.$kind, [
-                    'domain' => $domain->domain, 'deadline' => $deadline->format('M j, Y'),
+                    'domain' => $domain->domain, 'deadline' => $deadline->utc()->format('M j, Y, g:i A').' UTC',
                     'amount' => '$'.number_format((float) $current->amount, 2, '.', ','),
                     'domain_url' => route('enom.domains.show', $domain->id).'#transfer-code',
                 ], $user);

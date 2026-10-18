@@ -27,7 +27,8 @@ class DomainCounts extends StatsOverviewWidget
         $today = CarbonImmutable::today();
         $expiring = Domain::query()->whereDate('provider_expires_at', '>=', $today)->whereDate('provider_expires_at', '<=', $today->addDays(30))->count();
         $attention = count(Staff::attentionDomainIds());
-        $requests = Operation::query()->whereIn('state', Labels::ATTENTION_STATES)->count();
+        $requests = Labels::needsStaff(Operation::query())->count();
+        $waiting = Labels::waitingOnCustomer(Operation::query())->count();
 
         return [
             Stat::make('Domains', (string) Domain::query()->count())
@@ -41,6 +42,10 @@ class DomainCounts extends StatsOverviewWidget
                 ->description($requests ? $requests.' registrar '.($requests === 1 ? 'request' : 'requests') : 'All clear')
                 ->color($attention ? 'danger' : 'success')
                 ->url($requests ? OperationResource::getUrl('index', ['tab' => 'attention']) : DomainResource::getUrl('index', ['filters' => ['attention' => ['isActive' => '1']]])),
+            Stat::make('Waiting on customer', (string) $waiting)
+                ->description($waiting ? 'Payment, transfer code or details' : 'Nothing waiting')
+                ->color('gray')
+                ->url(OperationResource::getUrl('index', ['tab' => 'customer'])),
         ];
     }
 }

@@ -131,8 +131,16 @@
         <section class="enom-panel enom-status-card" aria-labelledby="enom-status-heading">
             @if ($cancelled)
                 <h2 id="enom-status-heading">Order cancelled</h2>
-                <p>The invoice wasn’t paid, so this order was cancelled. Nothing was charged.</p>
-                <div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ $retryUrl }}">{{ $isTransfer ? 'Try again' : 'Search again' }}</a></div>
+                @if (($initial['outcome'] ?? null) === 'cancelled_unpaid')
+                    <p>The invoice wasn’t paid, so this order was cancelled. Nothing was charged.</p>
+                    <div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ $retryUrl }}">{{ $isTransfer ? 'Try again' : 'Search again' }}</a></div>
+                @elseif (($initial['outcome'] ?? null) === 'cancelled_payment_review')
+                    <p>This order was cancelled after a payment was recorded. Contact support and we’ll sort out your payment.</p>
+                    @if ($supportUrl)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ $supportUrl }}">Contact support</a></div>@endif
+                @else
+                    <p>This order was cancelled. If you paid for it, contact support and we’ll sort out your payment.</p>
+                    @if ($supportUrl)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--primary" href="{{ $supportUrl }}">Contact support</a></div>@endif
+                @endif
             @elseif ($codeTimedOut)
                 @php $deadline = \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::deadline(\Paymenter\Extensions\Servers\Enom\Models\Operation::find($initial['id'])); @endphp
                 <h2 id="enom-status-heading">Transfer cancelled</h2>
@@ -167,7 +175,6 @@
             @elseif ($awaiting && $isTransfer)
                 <h2 id="enom-status-heading">{{ $codeReceived ? 'Pay the invoice to start the transfer' : 'Pay the invoice and enter the code to start the transfer' }}</h2>
                 @if (!$renewOn)<p>Auto-renew is off, so contact support before paying if you still want this domain.</p>@endif
-                @include('enom::partials.transfer-code', ['domain' => $domain])
             @elseif ($awaiting)
                 <h2 id="enom-status-heading">Pay the invoice to register {{ $name }}</h2>
                 <p>Registration starts as soon as the payment clears.@if (!$renewOn) Auto-renew is off, so contact support before paying if you still want this domain.@endif</p>
@@ -178,10 +185,12 @@
                 @if ($supportUrl)<div style="margin-top:1.25rem"><a class="enom-btn enom-btn--secondary" href="{{ $supportUrl }}">Contact support</a></div>@endif
             @elseif ($badgeLabel === 'Needs your code')
                 <h2 id="enom-status-heading">Enter your transfer code</h2>
-                @include('enom::partials.transfer-code', ['domain' => $domain])
             @elseif ($badgeLabel === 'Needs your details')
                 <h2 id="enom-status-heading">We need a few details to {{ $isTransfer ? 'transfer' : 'register' }} {{ $name }}</h2>
                 @include('enom::partials.registration-setup', ['domain' => $domain, 'part' => 'hold'])
+            @elseif ($badgeLabel === $controller::NOT_SENT)
+                <h2 id="enom-status-heading">Your {{ $kind }} is queued</h2>
+                <p>Your order is saved, but we haven’t sent it to {{ $isTransfer ? 'your current registrar' : 'the registry' }} yet. We’ll send it soon and update this page. You don’t need to do anything.</p>
             @elseif ($isTransfer)
                 <h2 id="enom-status-heading">Transfer in progress</h2>
                 <p>Your current registrar may email the domain owner to approve the transfer. Approving it there can speed things up. Most transfers finish within 5 to 7 days. Your website and email keep working.</p>
@@ -189,6 +198,9 @@
                 <h2 id="enom-status-heading">Registering {{ $name }}</h2>
                 <p>This usually takes a few minutes. Refresh this page to see when it’s ready.</p>
                 <div style="margin-top:1.25rem"><a class="enom-btn enom-btn--secondary" href="{{ route('enom.domains.show', $domainId) }}"><x-ri-refresh-line class="enom-i" aria-hidden="true" />Refresh</a></div>
+            @endif
+            @if ($pending && $isTransfer)
+                @include('enom::partials.transfer-code', ['domain' => $domain])
             @endif
             @if ($pending)
                 @php

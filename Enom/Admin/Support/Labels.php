@@ -5,9 +5,11 @@ namespace Paymenter\Extensions\Servers\Enom\Admin\Support;
 use App\Models\User;
 use Carbon\CarbonImmutable;
 use DateTimeInterface;
+use Illuminate\Database\Eloquent\Builder;
 use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Services\DomainPresentation;
 use Paymenter\Extensions\Servers\Enom\Services\Pricing;
+use Paymenter\Extensions\Servers\Enom\Services\RuntimeGuard;
 use Throwable;
 
 /**
@@ -16,16 +18,53 @@ use Throwable;
  */
 final class Labels
 {
-    /** Requests staff should look at. `disposed` keeps the domain paused until staff act on it. */
-    public const ATTENTION_STATES = ['awaiting_code', 'uncertain', 'held', 'pending', 'disposed'];
+    /** States staff may need to act on. `disposed` keeps the domain paused until staff act on it. */
+    public const ATTENTION_STATES = ['uncertain', 'held', 'disposed'];
+
+    /** States that wait on the customer: payment or a transfer code. A hold for account details waits on them too. */
+    public const CUSTOMER_STATES = ['awaiting_payment', 'awaiting_code'];
 
     public const STATE_GROUPS = [
         'attention' => self::ATTENTION_STATES,
-        'payment' => ['awaiting_payment'],
-        'progress' => ['queued', 'running'],
+        'customer' => self::CUSTOMER_STATES,
+        'progress' => ['queued', 'running', 'pending'],
         'completed' => ['succeeded'],
         'failed' => ['rejected'],
     ];
+
+    private const ORDER_ACTIONS = ['register', 'renew', 'transfer'];
+
+    private const UNRECONCILABLE_ACTIONS = ['epp_sync', 'epp_email'];
+
+    /** Requests only staff can move on. */
+    public static function needsStaff(Builder $query): Builder
+    {
+        return $query->where(fn (Builder $q) => $q
+            ->where(fn (Builder $q) => $q->whereIn('state', self::ATTENTION_STATES)
+                ->where(fn (Builder $q) => $q->where('state', '!=', 'held')->orWhereNull('safe_code')->orWhere('safe_code', '!=', 'contact_details_required')))
+            ->orWhere(fn (Builder $q) => $q->where('state', 'pending')->where(fn (Builder $q) => $q
+                ->whereIn('action', self::UNRECONCILABLE_ACTIONS)
+                ->orWhere(fn (Builder $q) => $q->whereIn('action', self::ORDER_ACTIONS)
+                    ->where(fn (Builder $q) => $q->whereNull('provider_order_id')->orWhereIn('provider_order_id', ['', '0']))))));
+    }
+
+    /** Requests waiting for the customer to pay, enter a transfer code or update their account details. */
+    public static function waitingOnCustomer(Builder $query): Builder
+    {
+        return $query->where(fn (Builder $q) => $q->whereIn('state', self::CUSTOMER_STATES)
+            ->orWhere(fn (Builder $held) => $held->where('state', 'held')->where('safe_code', 'contact_details_required')));
+    }
+
+    /** Request group for list tabs: staff attention and customer waits use the predicates above. */
+    public static function inGroup(Builder $query, string $group): Builder
+    {
+        return match ($group) {
+            'attention' => self::needsStaff($query),
+            'customer' => self::waitingOnCustomer($query),
+            'progress' => $query->whereIn('state', self::STATE_GROUPS['progress'])->whereNot(fn (Builder $q) => self::needsStaff($q)),
+            default => $query->whereIn('state', self::STATE_GROUPS[$group]),
+        };
+    }
 
     public static function domainStatusColor(?string $status): string
     {
@@ -75,6 +114,29 @@ final class Labels
         };
     }
 
+    public const NOT_SENT = 'Queued — not sent yet';
+
+    /** A queued request on a server with processing turned off: nothing has been sent to Enom. */
+    public static function notSent(\Paymenter\Extensions\Servers\Enom\Models\Operation $operation): bool
+    {
+        $serverId = (int) $operation->domain?->server_id;
+        return $operation->state === 'queued' && $serverId > 0 && !RuntimeGuard::flag($serverId, 'operations_enabled');
+    }
+
+    /** Pending without a usable reconciliation path does not confirm receipt by Enom. */
+    public static function notConfirmed(\Paymenter\Extensions\Servers\Enom\Models\Operation $operation): bool
+    {
+        return $operation->state === 'pending' && (in_array($operation->action, self::UNRECONCILABLE_ACTIONS, true)
+            || in_array($operation->action, self::ORDER_ACTIONS, true) && in_array($operation->provider_order_id, [null, '', '0'], true));
+    }
+
+    /** State label for one request; a queued request says when processing is off. */
+    public static function requestState(\Paymenter\Extensions\Servers\Enom\Models\Operation $operation): string
+    {
+        if (self::notConfirmed($operation)) { return 'Not confirmed'; }
+        return self::notSent($operation) ? self::NOT_SENT : self::state($operation->state);
+    }
+
     public static function stateColor(?string $state): string
     {
         return match ($state) {
@@ -89,6 +151,12 @@ final class Labels
     /** One sentence: what the state means for staff and what to do next. */
     public static function stateHint(?string $state, ?\Paymenter\Extensions\Servers\Enom\Models\Operation $operation = null): string
     {
+        if ($operation && $state === 'pending' && self::notConfirmed($operation)) {
+            return 'No reply from Enom. Check with Enom before retrying.';
+        }
+        if ($operation && $state === 'queued' && self::notSent($operation)) {
+            return 'Processing is off in the Enom server settings. Sends once it is turned on.';
+        }
         if ($operation?->safe_code === 'contact_details_required' && $state === 'held') {
             return 'Needs account details. Ask the customer to save their account details, then use updated account details on the domain page.';
         }
@@ -181,6 +249,13 @@ final class Labels
         };
     }
 
+    /** Management requests never bill, including retained rows with the default invoice basis. */
+    public static function requestFunding(\Paymenter\Extensions\Servers\Enom\Models\Operation $operation): ?string
+    {
+        return in_array($operation->action, DomainPresentation::FINANCIAL_ACTIONS, true)
+            ? $operation->funding_basis : 'non_billable_management';
+    }
+
     public static function funding(?string $basis): string
     {
         return match ($basis) {
@@ -204,8 +279,13 @@ final class Labels
     public static function money(mixed $amount, ?string $currency = 'USD'): ?string
     {
         if (!is_numeric($amount)) { return null; }
-        $value = number_format((float) $amount, 2, '.', ',');
-        return ($currency === null || $currency === 'USD') ? '$'.$value : $value.' '.$currency;
+        // Cents unless Enom's four-place cost has a sub-cent part: $8.95, $8.955.
+        $value = number_format((float) $amount, 4, '.', ',');
+        $value = preg_replace('/(\.\d\d\d*?)0+$/', '$1', $value);
+        // Sign before the symbol: -$4.00, not $-4.00.
+        $sign = str_starts_with($value, '-') ? '-' : '';
+        $value = ltrim($value, '-');
+        return ($currency === null || $currency === 'USD') ? $sign.'$'.$value : $sign.$value.' '.$currency;
     }
 
     public static function day(mixed $value): ?CarbonImmutable

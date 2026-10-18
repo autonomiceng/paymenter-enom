@@ -21,6 +21,8 @@
 
     /* Timestamps in the viewer's own time zone. Calendar dates are plain text and never converted. */
     const full = new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'});
+    /* Deadlines name the time zone, since emails give the same deadline in UTC. */
+    const zoned = new Intl.DateTimeFormat(undefined, {year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'});
     const relative = 'RelativeTimeFormat' in Intl ? new Intl.RelativeTimeFormat(undefined, {numeric: 'auto'}) : null;
     const ago = date => {
         const seconds = (date.getTime() - Date.now()) / 1000;
@@ -33,7 +35,8 @@
         const date = new Date(node.getAttribute('datetime'));
         if (isNaN(date)) return;
         node.title = full.format(date);
-        node.textContent = node.dataset.enomTime === 'relative' && relative ? ago(date) : full.format(date);
+        const style = node.dataset.enomTime;
+        node.textContent = style === 'relative' && relative ? ago(date) : (style === 'zone' ? zoned : full).format(date);
     });
 
     /* Tabs. Without script every section shows and the tab links jump to it. */

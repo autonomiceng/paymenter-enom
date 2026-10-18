@@ -431,7 +431,7 @@ $moneyBeforeResume = tableRows(['invoices', 'invoice_items', 'invoice_transactio
 $commands = [];
 require dirname(__DIR__).'/enom-admin-panel.php';
 enomAdminPanel();
-$staffPage = Livewire\Livewire::actingAs($staff)->test(Paymenter\Extensions\Servers\Enom\Admin\Resources\OperationResource\Pages\ListOperations::class);
+$staffPage = Livewire\Livewire::actingAs($staff)->test(Paymenter\Extensions\Servers\Enom\Admin\Resources\OperationResource\Pages\ListOperations::class)->set('activeTab', 'all');
 $staffPage->assertTableActionVisible('resumeContacts', $staffHeld)
     ->assertTableActionHidden('resumeContacts', $sent)
     ->callTableAction('resumeContacts', $staffHeld, data: ['reason' => 'Account details corrected'])

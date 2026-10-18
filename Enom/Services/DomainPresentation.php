@@ -15,7 +15,7 @@ final class DomainPresentation
     public const FINANCIAL_ACTIONS = ['register', 'transfer', 'renew', 'privacy_purchase', 'privacy_renew'];
 
     /** Safe codes a customer may see, mapped to a short outcome key. Everything else stays hidden. */
-    private const OUTCOMES = ['renewal_cancelled_unpaid' => 'cancelled_unpaid', 'initial_cancelled_unpaid' => 'cancelled_unpaid', 'transfer_code_timeout' => 'code_timeout', 'epp_sync_acknowledged' => 'acknowledged', 'contact_details_required' => 'needs_details'];
+    private const OUTCOMES = ['renewal_cancelled_unpaid' => 'cancelled_unpaid', 'initial_cancelled_unpaid' => 'cancelled_unpaid', 'initial_cancelled_payment_review' => 'cancelled_payment_review', 'transfer_code_timeout' => 'code_timeout', 'epp_sync_acknowledged' => 'acknowledged', 'contact_details_required' => 'needs_details'];
 
     public static function outcome(mixed $safeCode): ?string
     {

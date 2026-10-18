@@ -196,11 +196,19 @@ const submit = (w, form, submitter) => form.requestSubmit(submitter || form.quer
         const full = new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'}).format(new Date('2026-10-14T08:30:00Z'));
         check(updated && updated.title === full && full.includes('4:30'), 'Timestamp title is shown in the viewer’s time zone: ' + (updated && updated.title));
         check(updated.dataset.enomTime === 'relative' && /ago|in |yesterday|today|now/.test(updated.textContent) && !updated.textContent.includes('UTC'), 'Relative timestamp replaces the server text: ' + updated.textContent);
-        const activity = stamps.filter(t => t.dataset.enomTime !== 'relative');
+        const activity = stamps.filter(t => t.dataset.enomTime === 'full');
         check(activity.length > 0 && activity.every(t => t.textContent === new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'}).format(new Date(t.getAttribute('datetime')))), 'Full timestamps use the viewer’s locale and zone');
         const calendar = [...d.querySelectorAll('time:not([data-enom-time])')];
         check(calendar.length > 0 && calendar.every(t => /^\d{4}-\d{2}-\d{2}$/.test(t.getAttribute('datetime'))) && calendar.some(t => t.textContent === 'Dec 1, 2026'), 'Calendar dates are left exactly as served');
         check(errors.length === 0, 'Timestamp formatting has no console errors');
+        w.close();
+    }
+    {
+        const {w, d, errors} = mount(pages.deadline);
+        const deadline = d.querySelector('time[data-enom-time="zone"]');
+        const zoned = new Intl.DateTimeFormat(undefined, {year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'});
+        check(deadline && deadline.textContent === zoned.format(new Date(deadline.getAttribute('datetime'))) && /[A-Z]{2,}|GMT/.test(deadline.textContent), 'Transfer code deadline names the viewer’s time zone: ' + (deadline && deadline.textContent));
+        check(errors.length === 0, 'Deadline page has no console errors');
         w.close();
     }
     {
