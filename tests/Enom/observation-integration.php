@@ -1,53 +1,10 @@
 <?php
-require_once dirname(__DIR__).'/paymenter-test-app.php';
-
-// Real stock Laravel/models, synthetic environment, in-memory SQLite, injected fake provider.
-// Never load an installed app or any .env. Run: php tests/Enom/observation-integration.php
-$repo = dirname(__DIR__, 2);
-$successful = false;
-$testRoot = null;
-paymenterTestShutdown($testRoot, $successful);
-$release = paymenterTestApp();
-if (!is_file($release.'/vendor/autoload.php') || is_file($release.'/.env')) { throw new RuntimeException('A pristine release with vendor and no environment file is required.'); }
-$testRoot = $repo.'/.scratch/enom-observation-test-'.bin2hex(random_bytes(5));
-mkdir($testRoot, 0700, true);
-foreach (['bootstrap/cache', 'storage/framework/cache', 'storage/framework/sessions', 'storage/framework/views', 'storage/logs'] as $path) { mkdir($testRoot.'/'.$path, 0700, true); }
-foreach (['config', 'database', 'routes', 'vendor', 'themes', 'resources', 'public'] as $path) { symlink($release.'/'.$path, $testRoot.'/'.$path); }
-mkdir($testRoot.'/app', 0700);
-foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($release.'/app', FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file) {
-    $target = $testRoot.'/app/'.substr($file->getPathname(), strlen($release.'/app/'));
-    if ($file->isDir()) { mkdir($target, 0700, true); } else { copy($file->getPathname(), $target); }
-}
-copy($release.'/bootstrap/app.php', $testRoot.'/bootstrap/app.php');
-copy($release.'/bootstrap/providers.php', $testRoot.'/bootstrap/providers.php');
-copy($release.'/composer.json', $testRoot.'/composer.json');
-$extensionRoot = $testRoot.'/extensions/Servers/Enom';
-mkdir($extensionRoot, 0700, true);
-foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($repo.'/Enom', FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST) as $file) {
-    $target = $extensionRoot.'/'.substr($file->getPathname(), strlen($repo.'/Enom/'));
-    if ($file->isDir()) { mkdir($target, 0700, true); } else { copy($file->getPathname(), $target); }
-}
-foreach (['APP_ENV' => 'testing', 'APP_KEY' => 'base64:'.base64_encode(str_repeat('t', 32)), 'APP_URL' => 'http://enom-tests.invalid',
-    'DB_CONNECTION' => 'sqlite', 'DB_DATABASE' => ':memory:', 'CACHE_STORE' => 'array', 'QUEUE_CONNECTION' => 'database',
-    'SESSION_DRIVER' => 'array', 'MAIL_MAILER' => 'array', 'APP_TELEMETRY_ENABLED' => 'false'] as $key => $value) {
-    putenv($key.'='.$value); $_ENV[$key] = $_SERVER[$key] = $value;
-}
-$loader = require $release.'/vendor/autoload.php';
-$loader->addPsr4('Paymenter\\Extensions\\Servers\\Enom\\', $extensionRoot.'/', true);
-$app = require $testRoot.'/bootstrap/app.php';
-$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-config(['audit.enabled' => false, 'settings.mail_disabled' => true, 'settings.default_currency' => 'USD', 'settings.tax_enabled' => false, 'settings.theme' => 'default']);
-if (config('database.default') !== 'sqlite' || config('database.connections.sqlite.database') !== ':memory:') { throw new RuntimeException('Test database isolation failed.'); }
-Illuminate\Support\Facades\Artisan::call('migrate', ['--force' => true]);
-$extension = new Paymenter\Extensions\Servers\Enom\Enom;
-$extension->installed();
+$enomBootExtension = false;
+$enomCreateCurrency = false;
+require dirname(__DIR__).'/enom-native-app.php';
+require_once dirname(__DIR__).'/enom-cart-order.php';
 $extension->boot();
 $checks = 0;
-function verify(bool $condition, string $message): void {
-    global $checks;
-    if (!$condition) { throw new RuntimeException($message); }
-    $checks++;
-}
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Cache;
@@ -65,6 +22,7 @@ App\Models\Currency::create(['code' => 'USD', 'name' => 'US Dollar', 'format' =>
 $user = App\Models\User::create(['email' => 'observe@example.invalid', 'password' => 'synthetic']);
 $other = App\Models\User::create(['email' => 'other@example.invalid', 'password' => 'synthetic']);
 $server = App\Models\Server::create(['name' => 'Offline Enom', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
+enomTestTld(['server_id'=>$server->id,'tld'=>'com','renew_price'=>'15.00']);
 $category = App\Models\Category::create(['name' => 'Offline', 'slug' => 'offline']);
 $product = App\Models\Product::create(['name' => 'Offline existing domains', 'category_id' => $category->id, 'server_id' => $server->id, 'hidden' => true]);
 $plan = $product->plans()->create(['name' => 'Year', 'type' => 'recurring', 'billing_unit' => 'year', 'billing_period' => 1]);
@@ -113,7 +71,7 @@ function reader(Domain $domain, array $overrides = [], ?Closure $race = null, ?a
     return [new DomainObservation(new EnomApi(new RegistrarClient('offline-account', 'offline-token', $transport, null, true)), $guard), $commands, $configReads];
 }
 function finances(): array {
-    $tables = ['services', 'invoices', 'invoice_items', 'invoice_transactions', 'service_cancellations', 'enom_operations', 'enom_order_intents', 'jobs', 'failed_jobs'];
+    $tables = ['services', 'invoices', 'invoice_items', 'invoice_transactions', 'service_cancellations', 'enom_operations', 'jobs', 'failed_jobs'];
     $result = [];
     foreach ($tables as $table) { $result[$table] = json_encode(DB::table($table)->orderBy('id')->get()); }
     return $result;
@@ -178,7 +136,7 @@ foreach (['revision', 'authority', 'anchor', 'owner', 'lifecycle', 'account'] as
     verify(!isset($domain->fresh()->observation['sources']['expiry']['value']), 'Stale read overwrote observation values.');
     if ($race === 'revision') { verify($domain->fresh()->snapshot === ['new_confirmed' => true], 'Delayed read replaced renewal snapshot.'); }
 }
-// Ordinary reads still cover do-not-renew, sponsored/free and suspended services.
+// Ordinary reads still cover do-not-renew, complimentary and suspended services.
 Cache::flush(); $domain = fixture();
 $domain->service->update(['status' => 'suspended', 'price' => 0]);
 App\Models\ServiceCancellation::withoutEvents(fn () => App\Models\ServiceCancellation::create(['service_id' => $domain->service_id, 'type' => 'end_of_period', 'reason' => 'fixture']));
@@ -226,7 +184,7 @@ verify($catalogueApi->suffixes() === ['com', 'net', 'us', 'org', 'io', 'co.uk'],
 $catalogueApi->search('existing.org'); $catalogueApi->search('name.co.uk');
 verify($sent === ['existing.net', 'existing.org', 'name.co.uk'], 'Catalogue ending was refused or split at the wrong label.');
 try { $catalogueApi->search('xn--bcher-kva.org'); verify(false, 'International name was addressed.'); } catch (InvalidArgumentException) { verify(true, 'IDN remains unavailable.'); }
-verify((new EnomApi($client))->existingRenew('existing.us')->code === 'read_only', 'Explicit existing-domain renewal bypassed read-only mode.');
+verify((new EnomApi($client))->renew('existing.us')->code === 'read_only', 'Explicit existing-domain renewal bypassed read-only mode.');
 // A server without encrypted credentials still refuses even reads.
 try { RuntimeGuard::assertProvider($server->id, true); verify(false, 'Server without encrypted credentials passed the runtime guard.'); }
 catch (RuntimeException $e) { verify(str_contains($e->getMessage(), 'account ID and API token'), 'Credential refusal lacks its explanation.'); }
@@ -276,58 +234,10 @@ foreach (['missing_command','expired_command','wrong_ack','wrong_order','wrong_d
     if($fault==='mismatched_total')$candidateHeader['orderbillamount']='$9.95';
     verify(RegistrarMoney::actualCost(new RegistrarResult('success',null,['order'=>$candidateHeader]),$candidateBinding,$candidateExecution)['state']==='unconfirmed','Unsafe ordinary renewal actual cost accepted: '.$fault);
 }
-// Immutable provider IDs refuse replacement in daily and quote observations.
+// Immutable provider IDs refuse replacement during daily observation.
 Cache::flush(); $anchored = fixture(); $anchored->update(['provider_domain_id' => '999']);
 [$observer, $commands] = reader($anchored);
-verify($observer->observe($anchored->id) === 'identity_unconfirmed' && count($commands) === 1 && $anchored->fresh()->provider_domain_id === '999', 'Daily observation replaced its immutable provider anchor.');
-$commands->exchangeArray([]);
-verify($observer->observeRenewalQuote($anchored->id) === 'identity_or_guard_unconfirmed' && count($commands) === 1 && $anchored->fresh()->provider_domain_id === '999', 'Quote read bypassed the immutable provider anchor.');
-// Full pricing observations carry bounded read-only identity and base-expiry evidence.
-Cache::flush(); $quotedDomain = fixture(); $quotedDomain->update(['provider_domain_id' => '456']);
-[$observer, $commands] = reader($quotedDomain);
-$before = finances(); $beforeSnapshot = $quotedDomain->snapshot;
-verify($observer->observeRenewalQuote($quotedDomain->id) === 'quoted', 'Bound ordinary read-only renewal quote was not observed.');
-$quote = $quotedDomain->fresh()->observation['renewal_quote'];
-verify($commands->getArrayCopy() === ['GetDomainInfo', 'GetExtendInfo', 'Check'], 'Ordinary quote invoked a write or expired query.');
-verify($quote['state'] === 'quoted' && $quote['complete'] && $quote['amount'] === '10.25' && $quote['currency'] === 'USD'
-    && $quote['base_expires_at'] === '2027-10-05' && $quote['provider_domain_id'] === '456'
-    && $quote['confirmed_revision'] === 0 && $quote['authority_generation'] === 0 && is_string($quote['observed_at']), 'Quote lost its immutable obligation binding.');
-verify(finances() === $before && $quotedDomain->fresh()->snapshot === $beforeSnapshot && $quotedDomain->fresh()->provider_expires_at->format('Y-m-d') === '2027-10-05', 'Quote observation changed native finances or confirmed snapshot.');
-$observer->observe($quotedDomain->id);
-verify($quotedDomain->fresh()->observation['renewal_quote'] === $quote, 'Daily advisory quote overwrote a complete internal quote.');
-[$failedQuote] = reader($quotedDomain, ['Check' => '<invalid']);
-verify($failedQuote->observeRenewalQuote($quotedDomain->id) === 'quote_unconfirmed' && $quotedDomain->fresh()->observation['renewal_quote'] === $quote, 'Failed pricing read erased or accepted replacement quote.');
-Cache::flush(); $raceQuote = fixture();
-[$observer] = reader($raceQuote, [], fn () => null);
-$raceRead = new EnomApi(new RegistrarClient('offline-account', 'offline-token', function ($command, $parameters) use ($raceQuote) {
-    if ($command === 'GetDomainInfo') { return envelope($command, '<GetDomainInfo><domainname domainnameid="456">'.$raceQuote->domain.'</domainname><status><expiration>2027-10-05</expiration><belongs-to>offline-account</belongs-to></status></GetDomainInfo>'); }
-    if ($command === 'GetExtendInfo') { $raceQuote->update(['confirmed_revision' => 1, 'provider_expires_at' => '2028-10-05']); return envelope($command, '<Expiration>2027-10-05</Expiration><RegistrarHold>False</RegistrarHold><MaxExtension>9</MaxExtension><Price>10.25</Price>'); }
-    return envelope($command, '<Domains><Domain><Name>'.$raceQuote->domain.'</Name><RRPCode>211</RRPCode><IsPremium>false</IsPremium><IsPlatinum>false</IsPlatinum><IsEAP>false</IsEAP><Prices><Currency>USD</Currency><Renewal>10.25</Renewal></Prices></Domain></Domains>');
-}, null, true));
-$observer = new DomainObservation($raceRead, fn () => ['uid' => 'offline-account', 'token' => 'offline-token', 'reads_enabled' => true]);
-verify($observer->observeRenewalQuote($raceQuote->id) === 'stale' && !isset($raceQuote->fresh()->observation['renewal_quote']), 'Quote crossed a renewal completion revision.');
-Cache::flush(); $graceQuote = fixture(); $graceQuote->update(['provider_domain_id' => '456']);
-Carbon\CarbonImmutable::setTestNow('2027-10-06 00:00:00 UTC');
-[$observer, $commands] = reader($graceQuote);
-verify($observer->observeRenewalQuote($graceQuote->id) === 'quoted' && $graceQuote->fresh()->observation['renewal_quote']['grace_eligible'] === true
-    && $graceQuote->fresh()->observation['renewal_quote']['command'] === 'UpdateExpiredDomains', 'Expired quote refresh ignored the app business clock or exact Expired contract.');
-verify($commands->getArrayCopy() === ['GetDomainInfo', 'GetExtendInfo', 'Check', 'GetExpiredDomains'], 'Expired pricing did not use its bounded four-read path.');
-Carbon\CarbonImmutable::setTestNow();
-// Authenticated GetDomainInfo supplies precision missing from GetExtendInfo date-only views.
-Cache::flush();$calendarDomain=fixture();$calendarDomain->update(['provider_domain_id'=>'456','provider_expires_at'=>'2028-10-13']);
-$calendarInfo='<GetDomainInfo><domainname domainnameid="456">'.$calendarDomain->domain.'</domainname><status><expiration>10/12/2028 11:14:00 PM</expiration><belongs-to>offline-account</belongs-to></status></GetDomainInfo>';
-$calendarExtend='<Expiration>10/12/2028</Expiration><RegistrarHold>False</RegistrarHold><MaxExtension>8</MaxExtension><Price>8.95</Price>';
-$calendarCheck='<Domains><Domain><Name>'.$calendarDomain->domain.'</Name><RRPCode>211</RRPCode><IsPremium>False</IsPremium><IsPlatinum>False</IsPlatinum><IsEAP>False</IsEAP><Prices><Currency></Currency><Renewal>8.95</Renewal></Prices></Domain></Domains>';
-[$calendarObserver,$calendarCommands]=reader($calendarDomain,['GetDomainInfo'=>envelope('GetDomainInfo',$calendarInfo),'GetExtendInfo'=>envelope('GetExtendInfo',$calendarExtend),'Check'=>envelope('Check',$calendarCheck)]);
-$beforeCalendarFinance=finances();$beforeCalendarExpiry=$calendarDomain->provider_expires_at->format('Y-m-d');$beforeCalendarService=$calendarDomain->service->getRawOriginal();
-verify($calendarObserver->observeRenewalQuote($calendarDomain->id)==='quoted','Authenticated date-only quote observer failed.');
-$calendarQuote=$calendarDomain->fresh()->observation['renewal_quote'];
-verify($calendarQuote['complete']&&$calendarQuote['currency']==='USD'&&$calendarQuote['amount']==='8.95'&&$calendarQuote['base_expires_at']==='2028-10-13'&&$calendarQuote['expiry_source']==='GetDomainInfo_precise_la_date_reconciled'
-    &&$calendarQuote['expires_at']==='2028-10-13T06:14:00.000000+00:00',
-    'Observer altered UTC obligation day or lost real Check currency evidence.');
-verify($calendarCommands->getArrayCopy()===['GetDomainInfo','GetExtendInfo','Check']&&finances()===$beforeCalendarFinance
-    &&$calendarDomain->fresh()->provider_expires_at->format('Y-m-d')===$beforeCalendarExpiry&&$calendarDomain->fresh()->service->getRawOriginal()===$beforeCalendarService,
-    'Date-only pricing observation changed native finances, provider obligation or service.');
+verify($observer->observe($anchored->id) === 'identity_unconfirmed' && count($commands) === 1 && $anchored->fresh()->provider_domain_id === '999', 'Daily observation replaced immutable provider identity.');
 // Domain-specific explicit USD ordinary renewal evidence, plus exact expired lifecycle.
 $ordinaryCheck = new RegistrarResult('success', null, ['domains' => ['domain' => ['name' => 'charged.net', 'rrpcode' => '211',
     'ispremium' => 'false', 'isplatinum' => 'false', 'iseap' => 'false', 'prices' => ['currency' => 'USD', 'renewal' => '10.25']]]]);

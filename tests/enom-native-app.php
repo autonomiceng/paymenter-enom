@@ -1,6 +1,6 @@
 <?php
 /**
- * Shared disposable native app for 0.3 tests: stock Paymenter 1.5.9 code, a copy of Enom/, an in-memory
+ * Shared disposable native app for extension tests: stock Paymenter 1.5.9 code, a copy of Enom/, an in-memory
  * SQLite database, the extension installed and booted. Never loads an installed app, .env or credentials.
  * Include at top level; it defines $repo, $release, $testRoot, $app, $extension, $checks, $successful and verify().
  */
@@ -61,17 +61,6 @@ function refuses(callable $action, string $needle, string $message, array $types
         return $error->getMessage();
     }
     throw new RuntimeException($message.' (no refusal)');
-}
-/**
- * Count passing checks. Record known failures in the summary and print them to stderr
- * without stopping the suite. Passing checks produce no warning.
- */
-$knownBugs = [];
-function knownBug(bool $intended, string $id, string $description): void {
-    global $knownBugs, $checks;
-    if ($intended) { $checks++; return; }
-    $knownBugs[] = $id;
-    fwrite(STDERR, 'KNOWN RUNTIME BUG '.$id.': '.$description.PHP_EOL);
 }
 /** Enom XML envelope for an injected transport. */
 function enomXml(string $command, string $body): string {
