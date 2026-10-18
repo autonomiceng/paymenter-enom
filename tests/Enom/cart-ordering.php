@@ -4,6 +4,7 @@ require dirname(__DIR__).'/enom-native-app.php';
 require dirname(__DIR__).'/enom-http.php';
 require dirname(__DIR__).'/enom-client-fixture.php';
 
+use App\Exceptions\DisplayException;
 use App\Models\Service;
 use App\Models\CartItem;
 use Paymenter\Extensions\Servers\Enom\Models\Operation;
@@ -11,7 +12,7 @@ use Paymenter\Extensions\Servers\Enom\Models\Domain;
 use Paymenter\Extensions\Servers\Enom\Services\CartOrdering;
 use Paymenter\Extensions\Servers\Enom\Services\Catalogue;
 
-function cartRefuses(callable $action, string $needle, string $message): void { refuses($action, $needle, $message, [Throwable::class]); }
+function cartRefuses(callable $action, string $needle, string $message): void { refuses($action, $needle, $message, [DisplayException::class]); }
 
 $user = client('cart-owner@example.com');
 $cart = enomCartStart($user);
@@ -40,7 +41,7 @@ $hostingPlan = $hosting->plans()->create(['name'=>'Monthly','type'=>'recurring',
 $hostingPlan->prices()->create(['currency_code'=>'USD','price'=>'20.00','setup_fee'=>'0.00']);
 $cart->items()->create(['product_id'=>$hosting->id,'plan_id'=>$hostingPlan->id,'quantity'=>1,'config_options'=>[],'checkout_config'=>['domain'=>'first.com']]);
 verify($cart->items()->count()===3,'Matching hosting domain was rejected.');
-cartRefuses(fn()=> $line->update(['plan_id'=>$hostingPlan->id]), '', 'Another product plan was admitted.');
+refuses(fn()=> $line->update(['plan_id'=>$hostingPlan->id]), 'Invalid domain plan mapping.', 'Another product plan was admitted.', [RuntimeException::class]);
 $line->refresh();
 cartRefuses(fn()=> $line->update(['config_options'=>['paid-option'=>1]]), '', 'Paid configurable options were admitted.');
 $line->refresh();

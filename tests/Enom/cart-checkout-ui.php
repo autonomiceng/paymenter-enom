@@ -19,7 +19,11 @@ $cart=enomCartStart($user); enomCartAdd($user,$cart,'waiting.com'); enomCartChec
 $domain=Paymenter\Extensions\Servers\Enom\Models\Domain::where('domain','waiting.com')->sole();
 $page=enomHttp($user,'GET','/domains/'.$domain->id);
 verify($page->getStatusCode()===200 && str_contains($page->getContent(),'Pay the invoice'),'Pending domain lost its payment link.');
-foreach([['POST','/domains/quote'],['POST','/domains/order'],['GET','/domains/order/'.str_repeat('a',48)]] as [$method,$uri]) { verify(enomHttp($user,$method,$uri)->getStatusCode()===404,'Obsolete ordering route remains.'); }
+foreach ([['POST','/domains/quote'], ['POST','/domains/order'], ['GET','/domains/order/'.str_repeat('a',48)]] as [$method, $uri]) {
+    $request = Illuminate\Http\Request::create($uri, $method);
+    verify(!collect(app('router')->getRoutes())->contains(fn ($route) => $route->matches($request)), 'Obsolete ordering route remains registered: '.$method.' '.$uri);
+    verify(enomHttp($user, $method, $uri)->getStatusCode() === 404, 'Obsolete ordering route remains.');
+}
 $availability['move-ui.com']='transferable';
 $transfer=enomCartOrder($user,'move-ui.com','transfer');
 $page=enomHttp($user,'GET','/domains/'.$transfer['domain']->id);
