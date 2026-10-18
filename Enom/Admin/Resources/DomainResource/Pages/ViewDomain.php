@@ -55,7 +55,6 @@ class ViewDomain extends ViewRecord
     private function refreshFacts(Domain $domain): void
     {
         DomainFacts::forget((int) $domain->id);
-        Labels::forgetClient((int) $domain->user_id);
         $this->record = $domain->fresh() ?? $domain;
         $this->record->load(['client', 'service.cancellation']);
     }

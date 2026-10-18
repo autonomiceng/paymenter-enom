@@ -36,7 +36,7 @@ $loader = require $release.'/vendor/autoload.php';
 $loader->addPsr4('Paymenter\\Extensions\\Servers\\Enom\\', $extensionRoot.'/', true);
 $app = require $testRoot.'/bootstrap/app.php';
 $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-config(['hashing.bcrypt.rounds' => 4, 'audit.enabled' => false, 'settings.mail_disabled' => true, 'settings.default_currency' => 'USD', 'settings.tax_enabled' => false,
+config(['hashing.bcrypt.rounds' => 4, 'audit.enabled' => false, 'settings.default_currency' => 'USD', 'settings.tax_enabled' => false,
     'settings.theme' => 'default', 'app.version' => 'development']);
 if (config('database.default') !== 'sqlite' || config('database.connections.sqlite.database') !== ':memory:') { throw new RuntimeException('Test database isolation failed.'); }
 Illuminate\Support\Facades\Http::preventStrayRequests();

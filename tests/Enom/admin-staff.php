@@ -134,6 +134,35 @@ $invoice = $staffDomains->renewNow($manager, $paying->id);
 verify($invoice instanceof Invoice && $invoice->user_id === $client->id && $invoice->status === 'pending' && (string) $invoice->items()->sole()->price === '14.00', 'Manager renew-now did not issue the client\'s renewal invoice.');
 verify($staffDomains->renewNow($manager, $paying->id)->id === $invoice->id, 'Repeated renew-now issued a second invoice for the cycle.');
 
+// The real header action must reload both its record and cached facts after a registrar read.
+$refreshDomain = clientDomain($client, ['domain' => 'staff-refresh.com']);
+$refreshCommands = [];
+$refreshOperations = new \Paymenter\Extensions\Servers\Enom\Services\DomainOperations(
+    new \Paymenter\Extensions\Servers\Enom\Api\EnomApi(new \Paymenter\Extensions\Servers\Enom\Api\RegistrarClient('offline-account', 'offline-token',
+        function (string $command) use (&$refreshCommands): string {
+            $refreshCommands[] = $command;
+            return enomXml($command, match ($command) {
+                'GetDomainInfo' => '<GetDomainInfo><domainname>staff-refresh.com</domainname></GetDomainInfo>',
+                'GetDNS' => '<dns>ns1.refreshed.example.com</dns><dns>ns2.refreshed.example.com</dns><UseDNS>custom</UseDNS>',
+                'GetRegLock' => '<reg-lock>0</reg-lock>',
+                default => '',
+            });
+        })), fn () => ['uid' => 'offline-account', 'token' => 'offline-token', 'environment' => 'test']);
+$app->instance(StaffDomains::class, new StaffDomains($refreshOperations));
+try {
+    $refreshPage = Livewire::actingAs($manager)->test(ViewDomain::class, ['record' => $refreshDomain->id]);
+    verify(str_contains($refreshPage->html(), 'ns1.example-host.com'), 'Staff refresh did not start with cached nameservers.');
+    $refreshPage->callAction('refresh');
+    verify($refreshCommands === ['GetDomainInfo', 'GetContacts', 'GetDNS', 'GetRegLock', 'GetWPPSInfo', 'GetHosts', 'GetDomainSRVHosts', 'GetDnsSec', 'GetRenew'],
+        'Staff refresh action did not execute the real bounded registrar read.');
+    verify(str_contains($refreshPage->html(), 'ns1.refreshed.example.com') && !str_contains($refreshPage->html(), 'ns1.example-host.com'),
+        'Staff refresh left stale record or cached facts on the page.');
+    verify($refreshPage->instance()->getRecord()->snapshot['locked'] === false, 'Staff refresh did not reload its record.');
+} finally {
+    $app->instance(StaffDomains::class, $staffDomains);
+    $app['auth']->forgetGuards();
+}
+
 // ---------------------------------------------------------------- Filament pages: no costs or encrypted columns in state or HTML
 $secret = ['payload' => 'PAYLOAD-SECRET-7Q', 'policy' => 'POLICY-SECRET-7Q', 'cost' => 'COST-SECRET-7Q', 'snapshot' => 'SNAPSHOT-SECRET-7Q', 'observation' => 'OBSERVATION-SECRET-7Q', 'renewal' => 'RENEWAL-SECRET-7Q'];
 $domainForAdmin = clientDomain($client, ['domain' => 'admin-view.com', 'observation' => ['note' => $secret['observation']], 'renewal_policy' => ['enabled' => true, 'note' => $secret['renewal']]],

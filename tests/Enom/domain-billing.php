@@ -428,6 +428,21 @@ foreach(['expired','drift'] as $case){
         'Held lifecycle retired debt, cancelled service, changed health or queue.');
     $graceSetting->update(['value'=>true]);
 }
+// A legacy mail key must not suppress native in-app renewal notifications.
+atBilling('2026-11-10');
+config(['settings.mail_disable' => true, 'settings.mail_disabled' => true]);
+App\Models\NotificationTemplate::updateOrCreate(['key' => 'new_invoice_created'], [
+    'enabled' => true, 'subject' => 'Invoice created', 'body' => 'Invoice created',
+    'mail_enabled' => 'force', 'in_app_enabled' => 'force', 'in_app_title' => 'Renewal invoice {{ $invoice->id }}', 'in_app_body' => 'Invoice created',
+]);
+$mailFlags = [];
+Invoice::creating(function (Invoice $invoice) use (&$mailFlags): void { $mailFlags[] = $invoice->send_create_email; });
+$mailInvoice = $billing->invoice($make('mail-setting-disabled')->id, $user);
+checkBilling($mailFlags === [true], 'Renewal invoices suppressed the native notification event.');
+$mailJobs = billingJobCount('App\\Mail\\Mail');
+(new App\Listeners\SendMailListener)->handle(new App\Events\Invoice\Finalized($mailInvoice, $mailFlags[0]));
+checkBilling(App\Models\Notification::where('user_id', $user->id)->where('title', 'Renewal invoice '.$mailInvoice->id)->count() === 1
+    && billingJobCount('App\\Mail\\Mail') === $mailJobs, 'Disabled mail suppressed the native in-app renewal notice or queued email.');
 checkBilling(DB::select("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'enom_%' ORDER BY name") == $nativeSchema,
     'Domain billing changed native table definitions.');
 Carbon\Carbon::setTestNow();

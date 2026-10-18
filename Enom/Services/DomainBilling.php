@@ -140,7 +140,6 @@ final class DomainBilling
             $lockedPolicy = $this->lockedPolicy($domain, $service, $policy, $calendar, $years);
             $invoice = new Invoice(['user_id' => $domain->user_id, 'currency_code' => $service->currency_code,
                 'status' => Invoice::STATUS_PENDING, 'due_at' => $calendar['due']]);
-            $invoice->send_create_email = !config('settings.mail_disabled', false);
             $invoice->save();
             $item = $invoice->items()->create(['reference_type' => null, 'reference_id' => null,
                 'quantity' => 1, 'price' => $this->decimal($amount),

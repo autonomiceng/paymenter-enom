@@ -15,7 +15,7 @@ require_once $testRoot.'/app/Classes/helpers.php';
 $app['view']->addLocation($release.'/themes/default/views');
 // Native code reloads config('settings') from the settings table after a global setting is saved (for example the
 // invoice number); store the test settings there too so the theme and mail switches survive the reload.
-foreach (['theme' => 'default', 'mail_disabled' => '1', 'mail_must_verify' => '0', 'default_currency' => 'USD', 'tax_enabled' => '0'] as $key => $value) {
+foreach (['theme' => 'default', 'mail_must_verify' => '0', 'default_currency' => 'USD', 'tax_enabled' => '0'] as $key => $value) {
     App\Models\Setting::query()->updateOrCreate(['key' => $key, 'settingable_type' => null, 'settingable_id' => null], ['value' => $value]);
 }
 Illuminate\Support\Facades\Cache::forget('settings');
