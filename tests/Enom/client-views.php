@@ -98,6 +98,7 @@ foreach (['unpaid' => ['register', '0.00'], 'partial' => ['register', '5.00'], '
         $order['service']->update(['status' => App\Models\Service::STATUS_CANCELLED]);
     }
     $operations->retireCancelledInitials();
+    $order['operation']->refresh();
     $page = ok('/domains/'.$order['domain']->id, $owner);
     $unpaid = $case === 'unpaid';
     verify($order['operation']->fresh()->safe_code === ($unpaid ? 'initial_cancelled_unpaid' : 'initial_cancelled_payment_review'), 'Cancellation fixture lost payment evidence: '.$case);
@@ -109,6 +110,9 @@ foreach (['unpaid' => ['register', '0.00'], 'partial' => ['register', '5.00'], '
         $unknownPage = ok('/domains/'.$order['domain']->id, $owner);
         verify(enomDocument($unknownPage)->query('//section[@aria-labelledby="enom-activity-heading"]//span[contains(@class, "enom-tone-muted")][normalize-space(.)="Cancelled"]')->length === 1
             && !str_contains(text($unknownPage), 'Declined'), 'Unknown initial cancellation reads as a registrar decline: '.$case);
+        verify(!str_contains(text($unknownPage), 'Nothing was charged.') && !str_contains(text($unknownPage), 'after a payment was recorded'), 'Unknown cancellation claims a payment state: '.$case.' / '.($unknownCode ?? 'null'));
+        verify(str_contains(text($unknownPage), 'This order was cancelled. If you paid for it, contact support and we’ll sort out your payment.'), 'Unknown cancellation lacks neutral guidance: '.$case.' / '.($unknownCode ?? 'null'));
+        verify(enomDocument($unknownPage)->query('//section[contains(@class, "enom-status-card")]//a[contains(@class, "enom-btn--primary")][contains(., "Contact support")]')->length === 1, 'Unknown cancellation lacks primary support action: '.$case.' / '.($unknownCode ?? 'null'));
     }
     $order['operation']->update(['safe_code' => $unpaid ? 'initial_cancelled_unpaid' : 'initial_cancelled_payment_review']);
     if (!$unpaid) {
@@ -118,11 +122,6 @@ foreach (['unpaid' => ['register', '0.00'], 'partial' => ['register', '5.00'], '
         verify(!str_contains(text($page), 'Declined'), 'Cancelled payment activity reads as a registrar decline: '.$case);
     }
 }
-$order['operation']->update(['safe_code' => 'unrecognized-cancellation']);
-$page = ok('/domains/'.$order['domain']->id, $owner);
-verify(!str_contains(text($page), 'Nothing was charged.') && !str_contains(text($page), 'after a payment was recorded'), 'Unknown cancellation claims a payment state.');
-verify(str_contains(text($page), 'This order was cancelled. If you paid for it, contact support and we’ll sort out your payment.'), 'Unknown cancellation lacks neutral guidance.');
-verify(enomDocument($page)->query('//section[contains(@class, "enom-status-card")]//a[contains(@class, "enom-btn--primary")][contains(., "Contact support")]')->length === 1, 'Unknown cancellation lacks primary support action.');
 
 // Actual registrar refusals retain the red Declined Activity status for both initial order kinds.
 foreach (['register', 'transfer'] as $action) {

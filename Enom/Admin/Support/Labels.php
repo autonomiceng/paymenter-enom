@@ -119,8 +119,16 @@ final class Labels
     /** A queued request on a server with processing turned off: nothing has been sent to Enom. */
     public static function notSent(\Paymenter\Extensions\Servers\Enom\Models\Operation $operation): bool
     {
+        if ($operation->state !== 'queued') { return false; }
         $serverId = (int) $operation->domain?->server_id;
-        return $operation->state === 'queued' && $serverId > 0 && !RuntimeGuard::flag($serverId, 'operations_enabled');
+        if ($serverId <= 0) { return false; }
+        // Display-only memo: a fresh request must see current server settings.
+        $request = request();
+        $key = self::class.'.processing';
+        $processing = $request->attributes->get($key, []);
+        $processing[$serverId] ??= RuntimeGuard::flag($serverId, 'operations_enabled');
+        $request->attributes->set($key, $processing);
+        return !$processing[$serverId];
     }
 
     /** Pending without a usable reconciliation path does not confirm receipt by Enom. */

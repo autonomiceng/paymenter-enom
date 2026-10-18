@@ -264,6 +264,41 @@ $page = app(ListOperations::class); $page->bootedInteractsWithTable();
 $paidColumn = $page->getTable()->getColumn('transfer_paid_at'); $paidColumn->record($codeRequest);
 verify($paidColumn->getState()->format('c') === '2026-10-17T12:00:00+00:00', 'Staff payment date did not use the verified transfer clock.');
 $labels = \Paymenter\Extensions\Servers\Enom\Admin\Support\Labels::class;
+// Five display lookups per queued row share settings only within the current request, per server.
+$otherServer = App\Models\Server::create(['name' => 'Other queue', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
+$otherServer->settings()->create(['key' => 'operations_enabled', 'value' => '1']);
+$originalRequest = request();
+$queueQueries = function (int $rows, bool $processing) use ($app, $labels, $server, $otherServer): int {
+    $app->instance('request', Illuminate\Http\Request::create('/admin/enom/operations'));
+    Illuminate\Support\Facades\DB::enableQueryLog();
+    Illuminate\Support\Facades\DB::flushQueryLog();
+    $correct = true;
+    for ($row = 0; $row < $rows; $row++) {
+        foreach ([$server->id => $processing, $otherServer->id => true] as $serverId => $enabled) {
+            $queued = (new Operation(['id' => $row + 1, 'state' => 'queued']))->setRelation('domain', new Domain(['server_id' => $serverId]));
+            for ($display = 0; $display < 5; $display++) { $correct = $labels::notSent($queued) === !$enabled && $correct; }
+        }
+    }
+    $queries = count(Illuminate\Support\Facades\DB::getQueryLog());
+    Illuminate\Support\Facades\DB::disableQueryLog();
+    echo 'Queued display: '.$rows.' rows per server, processing '.($processing ? 'on' : 'off').', '.$queries.' queries.'.PHP_EOL;
+    verify($correct, 'Queued display ignored current request or server flag: '.($processing ? 'on' : 'off'));
+    return $queries;
+};
+try {
+    serverSetting('operations_enabled', '0');
+    $singleQueries = $queueQueries(1, false);
+    verify($singleQueries > 0 && $singleQueries <= 4, 'Single queued display did not read bounded server settings.');
+    serverSetting('operations_enabled', '1');
+    verify($queueQueries(20, true) === $singleQueries, 'Fresh request did not read bounded current settings.');
+    serverSetting('operations_enabled', '0');
+    verify($queueQueries(20, false) === $singleQueries, 'Queued flag queries scale with row count.');
+} finally {
+    $app->instance('request', $originalRequest);
+    serverSetting('operations_enabled', '1');
+    $otherServer->settings()->delete(); $otherServer->delete();
+}
+
 verify(str_contains($labels::stateHint('held', new Operation(['safe_code' => 'contact_details_required'])), 'Needs account details'), 'Contact hold has no staff recovery instruction.');
 verify($labels::money(-4) === '-$4.00' && $labels::money('8.955') === '$8.955' && $labels::money(-1.5, 'EUR') === '-1.50 EUR', 'Negative amounts put the sign after the currency symbol.');
 verify(str_contains($labels::stateHint('uncertain', new Operation(['action' => 'nameservers', 'operation_key' => 'initial-nameservers:123'])), 'Registration succeeded'), 'Nameserver failure hides the successful registration.');

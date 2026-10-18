@@ -92,9 +92,23 @@ check($purpose['required'] === true && count($purpose['options']) === 5 && $purp
 check(RegistryFields::supported($schema) && RegistryFields::normalize($com = parsed('GetExtAttributes', fixture('enom-getextattributes-com.xml'), ['TLD' => 'com'])) === [], '.us not supported or .com produced fields.');
 check(RegistryFields::normalize(new RegistrarResult('success', null, ['attributes' => ['attribute' => ['name' => 'free_text', 'required' => '1', 'userdefined' => 'True']]]))[0]['text'] === true, 'Singleton user-defined attribute was not free text.');
 check(!RegistryFields::supported([['name' => 'opaque', 'required' => true, 'child' => false, 'text' => false, 'options' => []]]), 'A field with neither options nor free text was supported.');
-// Duplicates keep the first entry; a field without options gains the later list.
-$duplicate = RegistryFields::normalize(new RegistrarResult('success', null, ['attributes' => ['attribute' => [['name' => 'dup_field', 'required' => '1'], ['name' => 'dup_field', 'required' => '0', 'options' => ['option' => ['value' => 'A', 'title' => 'Alpha']]]]]]));
-check(count($duplicate) === 1 && $duplicate[0]['required'] === true && $duplicate[0]['options'][0]['value'] === 'A', 'Duplicate attribute was not merged.');
+// Duplicates must agree on normalized flags and any nonempty options.
+$normalizeDuplicates = fn (array $entries) => RegistryFields::normalize(new RegistrarResult('success', null, ['attributes' => ['attribute' => $entries]]));
+$duplicateField = ['name' => 'dup_field', 'required' => '0', 'ischild' => '0', 'userdefined' => 'True',
+    'options' => ['option' => ['value' => 'A', 'title' => 'Alpha']]];
+$oneField = $normalizeDuplicates([$duplicateField]);
+check($normalizeDuplicates([$duplicateField, $duplicateField]) === $oneField, 'Identical registry duplicates did not collapse.');
+$emptyField = array_diff_key($duplicateField, ['options' => true]);
+check($normalizeDuplicates([$emptyField, $duplicateField]) === $oneField, 'Later registry options were not merged.');
+check($normalizeDuplicates([$duplicateField, $emptyField]) === $oneField, 'Empty later registry options erased the first list.');
+foreach (['required' => '1', 'ischild' => '1', 'userdefined' => 'False', 'options' => ['option' => ['value' => 'B', 'title' => 'Beta']]] as $key => $value) {
+    try { $normalizeDuplicates([$duplicateField, array_replace($duplicateField, [$key => $value])]); throw new RuntimeException('Conflicting registry duplicate accepted: '.$key); }
+    catch (InvalidArgumentException) { check(true, 'Conflicting registry duplicate refused: '.$key); }
+}
+foreach (['required' => '1', 'ischild' => '1', 'userdefined' => 'False'] as $key => $value) {
+    try { $normalizeDuplicates([$emptyField, array_replace($duplicateField, [$key => $value])]); throw new RuntimeException('Conflicting registry flags accepted before option merge: '.$key); }
+    catch (InvalidArgumentException) { check(true, 'Conflicting registry flags refused before merge: '.$key); }
+}
 // Strictness: unreadable names, names that collide with Enom request parameters, or unknown dependencies refuse the ending.
 foreach ([['name' => 'Bad Name'], ['name' => 'x'], ['required' => '1'], 'junk', ['name' => 'numyears'], ['name' => 'registrantfirstname'], ['name' => 'ns1'], ['name' => 'authinfo1'], ['name' => 'uid'], ['name' => 'overrideorder'], ['name' => 'chargeamount'], ['name' => 'creditcardnumber'], ['name' => 'cvv2'], ['name' => 'ccname'], ['name' => 'usewiretransfer'],
     ['name' => 'scalar_requires', 'options' => ['option' => ['value' => 'Y', 'requires' => ['attribute' => 'global_cc_us']]]], ['name' => 'unnamed_requires', 'options' => ['option' => ['value' => 'Y', 'requires' => ['attribute' => ['id' => '4']]]]],
