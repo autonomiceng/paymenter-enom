@@ -52,7 +52,7 @@ $catalogue = new Catalogue($operations);
 $app->instance(Catalogue::class, $catalogue);
 $server = Server::create(['name' => 'Catalogue', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
 $second = Server::create(['name' => 'Second catalogue', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
-CatalogueRuntime::saveDefaultRule($server->id, array_replace(PricingRule::DEFAULT, ['markup' => '0.00']));
+verify(CatalogueRuntime::saveDefaultRule($server->id, array_replace(PricingRule::DEFAULT, ['markup' => '0.00'])) === ['published' => 0, 'failed' => []], 'Empty default-rule publication has the wrong summary.');
 $storedRule = $server->settings()->where('key', 'pricing_default_rule')->sole();
 verify($storedRule->type === 'array' && !$storedRule->encrypted && is_array($storedRule->value), 'Default rule was not a native array Setting.');
 $net = Tld::create(['server_id' => $server->id, 'tld' => 'net', 'min_years' => 1, 'max_years' => 10,
@@ -168,6 +168,32 @@ $catalogue->publish($net);
 verify($net->registrationTotal(2) === '20.00', 'Override markup/rounding was not published.');
 CatalogueRuntime::saveDefaultRule($server->id, array_replace(PricingRule::DEFAULT, ['markup' => '90.00']));
 verify($net->fresh()->registrationTotal(2) === '20.00', 'Default change overwrote a TLD override.');
+
+// One broken product mapping cannot stop later default-rule publications; overrides stay independent.
+$ruleServer = Server::create(['name' => 'Rule republish', 'type' => 'server', 'extension' => 'Enom', 'enabled' => true]);
+$ruleEndings = [];
+foreach (['rulefirst', 'ruleblocked', 'rulelast', 'ruleown'] as $ending) {
+    $ruleEndings[$ending] = Tld::create(['server_id' => $ruleServer->id, 'tld' => $ending, 'enabled' => true, 'min_years' => 1, 'max_years' => 1,
+        'register_enabled' => true, 'renew_enabled' => true, 'transfer_enabled' => false, 'use_default_rule' => $ending !== 'ruleown', 'pricing_mode' => 'fixed',
+        'fixed_register' => '20.00', 'fixed_renew' => '20.00', 'fixed_transfer' => '20.00', 'cost_register_terms' => [1 => '8.9500'], 'cost_renew' => '8.9500']);
+    $catalogue->publish($ruleEndings[$ending]);
+}
+$blockedProduct = $catalogue->productFor($ruleEndings['ruleblocked'], 'register');
+$blockedSetting = $blockedProduct->settings()->where('key', 'enom_action')->sole();
+$blockedSetting->update(['value' => 'invalid']);
+$blockedBefore = (array) DB::table('enom_tlds')->where('id', $ruleEndings['ruleblocked']->id)->sole();
+$blockedPrice = $blockedProduct->plans()->sole()->prices()->sole()->price;
+$reportedRules = [];
+app(Illuminate\Contracts\Debug\ExceptionHandler::class)->reportable(function (RuntimeException $error) use (&$reportedRules) { $reportedRules[] = $error->getMessage(); return false; });
+$ruleResult = CatalogueRuntime::saveDefaultRule($ruleServer->id, array_replace(PricingRule::DEFAULT, ['markup' => '50.00']));
+verify($ruleResult === ['published' => 2, 'failed' => ['.ruleblocked']] && $reportedRules === ['Invalid domain product mapping.'], 'Default-rule republish stopped early, miscounted or did not report its failure.');
+verify(CatalogueRuntime::defaultRule($ruleServer->id)['markup'] === '50.00' && $ruleEndings['rulefirst']->fresh()->price('register') === '13.43'
+    && $ruleEndings['rulelast']->fresh()->price('register') === '13.43' && $ruleEndings['ruleown']->fresh()->price('register') === '20.00', 'Partial republish did not save the rule, reach later endings or preserve overrides.');
+verify((array) DB::table('enom_tlds')->where('id', $ruleEndings['ruleblocked']->id)->sole() === $blockedBefore
+    && $blockedProduct->plans()->sole()->prices()->sole()->price === $blockedPrice, 'Failed default-rule publication changed existing prices.');
+$blockedSetting->update(['value' => 'register']);
+verify(CatalogueRuntime::saveDefaultRule($ruleServer->id, array_replace(PricingRule::DEFAULT, ['markup' => '50.00'])) === ['published' => 3, 'failed' => []]
+    && $ruleEndings['ruleblocked']->fresh()->price('register') === '13.43', 'Repaired ending could not republish the saved default rule.');
 
 // Registration-only endings need no transfer cost; two-year minimum keeps annual identity unpriced.
 $ai = Tld::create(['server_id' => $server->id, 'tld' => 'ai', 'min_years' => 2, 'max_years' => 10,

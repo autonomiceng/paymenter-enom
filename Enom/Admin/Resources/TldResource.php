@@ -300,7 +300,14 @@ class TldResource extends Resource
             ->fillForm(fn () => self::ruleData(CatalogueRuntime::defaultRule((int) $server->id)))
             ->schema(fn () => self::pricingForm(serverId: (int) $server->id))->action(function (array $data) use ($server) {
                 Staff::require(Staff::COSTS);
-                Staff::attempt(fn () => 'Default rule applied to '.CatalogueRuntime::saveDefaultRule((int) $server->id, self::ruleFromData($data)).' TLDs.', 'Default rule saved.');
+                Staff::attempt(function () use ($server, $data) {
+                    $summary = CatalogueRuntime::saveDefaultRule((int) $server->id, self::ruleFromData($data));
+                    $message = 'Default rule applied to '.$summary['published'].' TLDs.';
+                    if ($summary['failed']) {
+                        return \Filament\Notifications\Notification::make()->title($message." Couldn't update: ".implode(', ', $summary['failed']).' — open each to retry.')->warning()->persistent();
+                    }
+                    return $message;
+                }, 'Default rule saved.');
             });
     }
     /**

@@ -33,17 +33,23 @@ final class CatalogueRuntime
         return PricingRule::validate($rule);
     }
 
-    public static function saveDefaultRule(int $serverId, array $rule): int
+    /** @return array{published: int, failed: list<string>} */
+    public static function saveDefaultRule(int $serverId, array $rule): array
     {
         $rule = PricingRule::validate($rule);
         $server = Server::where('extension', 'Enom')->findOrFail($serverId);
         $server->settings()->updateOrCreate(['key' => 'pricing_default_rule'], ['type' => 'array', 'encrypted' => false, 'value' => $rule]);
-        $count = 0;
+        $summary = ['published' => 0, 'failed' => []];
         // Publication owns its product-first transaction for each ending.
         foreach (Tld::where('server_id', $serverId)->where('use_default_rule', true)->orderBy('id')->get() as $tld) {
-            app(Catalogue::class)->publish($tld);
-            $count++;
+            try {
+                app(Catalogue::class)->publish($tld);
+                $summary['published']++;
+            } catch (Throwable $exception) {
+                report($exception);
+                $summary['failed'][] = '.'.$tld->tld;
+            }
         }
-        return $count;
+        return $summary;
     }
 }

@@ -67,6 +67,21 @@ $page->setActionData(['pricing_mode' => 'markup_percent', 'markup' => '25.00', '
 $page->callMountedAction();
 verify($page->instance()->getErrorBag()->isEmpty(), 'Default rule form failed validation: '.json_encode($page->instance()->getErrorBag()->toArray()));
 verify(CatalogueRuntime::defaultRule($server->id)['markup'] === '25.00', 'Default rule modal did not persist the native array setting.');
+$successNotice = collect(session('filament.claimed_notifications', session('filament.notifications', [])))->last();
+verify($successNotice['status'] === 'success' && str_starts_with($successNotice['title'], 'Default rule applied to '), 'Complete default-rule publication did not report success.');
+$failDefaultPublish = true;
+App\Models\Product::updating(function ($product) use ($blockedProduct, &$failDefaultPublish) {
+    if ($failDefaultPublish && (int) $product->id === (int) $blockedProduct->id) { throw new RuntimeException('Injected default-rule publication failure'); }
+});
+session()->forget('filament.notifications');
+$page = Livewire::actingAs($coster)->test(ListTlds::class);
+$page->mountAction('defaultRule'.$ruleServer->id);
+$page->setActionData(['pricing_mode' => 'markup_percent', 'markup' => '25.00', 'round_up' => 'none']);
+$page->callMountedAction();
+verify($page->instance()->getErrorBag()->isEmpty(), 'Partial default-rule publication failed the native action.');
+$partialNotice = collect(session('filament.claimed_notifications', session('filament.notifications', [])))->last();
+verify($partialNotice['status'] === 'warning' && $partialNotice['title'] === "Default rule applied to 2 TLDs. Couldn't update: .ruleblocked — open each to retry.", 'Partial default-rule publication did not show the requested warning and retry guidance.');
+$failDefaultPublish = false;
 $setup = Livewire::actingAs($coster)->test(EnomSetup::class);
 verify(str_contains($setup->html(), 'Default pricing rule') && str_contains($setup->html(), 'Sync costs now'), 'Setup lacks pricing and sync actions.');
 
@@ -135,8 +150,7 @@ $alertEnding = Tld::create(['server_id' => $alertServer->id, 'tld' => 'alerttest
     'register_enabled' => true, 'renew_enabled' => true, 'transfer_enabled' => false, 'use_default_rule' => false, 'pricing_mode' => 'fixed',
     'fixed_register' => '1.00', 'fixed_renew' => '1.00', 'fixed_transfer' => '1.00', 'cost_register_terms' => [1 => '10.0000'], 'cost_renew' => '10.0000']);
 $failedNotice = $failedEmail = false;
-$reportedAlerts = [];
-app(Illuminate\Contracts\Debug\ExceptionHandler::class)->reportable(function (RuntimeException $error) use (&$reportedAlerts) { $reportedAlerts[] = $error->getMessage(); return false; });
+$reportedAlerts = &$reportedRules;
 App\Models\Notification::creating(function ($notice) use ($coster, &$failedNotice) {
     if (!$failedNotice && (int) $notice->user_id === (int) $coster->id && str_contains($notice->title, '.alerttest')) {
         $failedNotice = true;
