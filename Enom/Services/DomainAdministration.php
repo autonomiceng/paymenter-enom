@@ -118,7 +118,7 @@ class DomainAdministration
             $awaiting = $label === DomainPresentation::AWAITING_PAYMENT;
             return ['label' => $label, 'kind' => match ($status) { 'registration_pending' => 'registration', 'transfer_pending' => 'transfer', default => null },
                 'awaiting_payment' => $awaiting, 'invoice_id' => $awaiting ? $invoiceId : null, 'not_sent' => $notSent,
-                'state' => $request['state'] ?? null, 'safe_code' => in_array($request['safe_code'] ?? null, ['contact_details_required', 'transfer_code_required', 'transfer_code_timeout'], true) ? $request['safe_code'] : null];
+                'state' => $request['state'] ?? null, 'safe_code' => in_array($request['safe_code'] ?? null, ['contact_details_required', 'transfer_code_required', 'transfer_code_timeout', 'transfer_not_registered'], true) ? $request['safe_code'] : null];
         };
         $result = []; $pending = []; $owners = []; $refused = []; $servers = [];
         foreach ($domains as $domain) {

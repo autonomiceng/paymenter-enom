@@ -242,6 +242,7 @@ class DomainController extends Controller
             !empty($result['existing']) => 'managed',
             !empty($result['premium']) => 'premium',
             !empty($result['transferable']) => 'transferable',
+            ($result['transfer_reason_code'] ?? null) === 'transfer_not_registered' => 'invalid',
             default => 'taken',
         };
         $currency = is_string($result['currency'] ?? null) ? $result['currency'] : 'USD';
@@ -268,7 +269,7 @@ class DomainController extends Controller
             'transfer_price' => self::money($result['transfer_price'] ?? null, $currency),
             'renew_price' => self::money($result['renew_price'] ?? null, $currency),
             'register_url' => $result['register_url'] ?? null, 'transfer_url' => $result['transfer_url'] ?? null,
-            'warning' => $result['warning'] ?? null,
+            'warning' => $result['warning'] ?? null, 'transfer_reason' => $result['transfer_reason'] ?? null,
             'min_years' => $min, 'max_years' => $max, 'terms' => $terms, 'alternative' => $alternative,
         ];
         if (!$user) {

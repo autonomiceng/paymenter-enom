@@ -70,6 +70,38 @@ verify($otherHeld['status'] === 'taken' && !isset($otherHeld['url']), 'Another c
 verify(json_decode(enomHttp($free, 'POST', '/domains/check', ['domain' => 'gift-idea.com'], ['json' => true])->getContent(), true)['price'] === '$12.00', 'Complimentary client saw prices.');
 verify(json_decode($guestCheck('gift-idea.com')->getContent(), true)['price'] === '$12.00', 'Guest saw complimentary pricing.');
 
+// Enom TEST can call a registry-unregistered name transferable. An authoritative RDAP 404 blocks it.
+$availability['asdfsadfsafd.com'] = 'transferable';
+$rdapRequests = [];
+$app->instance(\Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class,
+    new \Paymenter\Extensions\Servers\Enom\Services\TransferOrders(new \Paymenter\Extensions\Servers\Enom\Services\Rdap(function ($url) use (&$rdapRequests) {
+        $rdapRequests[] = $url;
+        return $url === 'https://data.iana.org/rdap/dns.json'
+            ? ['status' => 200, 'body' => json_encode(['services' => [[['com'], ['https://rdap.example.com/']]]])]
+            : ['status' => 404, 'body' => ''];
+    })));
+$reason = \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::reason('transfer_not_registered');
+$checked = app(\Paymenter\Extensions\Servers\Enom\Services\DomainOrders::class)->check(null, 'asdfsadfsafd.com');
+verify(!$checked['available'] && !$checked['transferable'] && $checked['transfer_reason'] === $reason
+    && $checked['warning'] === null && $checked['transfer_price'] === null && $checked['transfer_url'] === null, 'Registry 404 left a transfer offer in DomainOrders.');
+$answer = json_decode($guestCheck('asdfsadfsafd.com')->getContent(), true);
+verify($answer['status'] === 'invalid' && $answer['transfer_reason'] === $reason && $answer['warning'] === null
+    && $answer['transfer_price'] === null && $answer['transfer_url'] === null, 'Registry 404 search answer offers a transfer or says taken.');
+verify(count(array_filter($rdapRequests, fn ($url) => $url === 'https://rdap.example.com/domain/asdfsadfsafd.com')) === 2, 'Registry 404 did not use the domain endpoint.');
+$transferPage = enomHttp($owner, 'GET', '/domains/transfer?name=asdfsadfsafd.com');
+verify($transferPage->getStatusCode() === 200 && str_contains(visible($transferPage->getContent()), $reason)
+    && !str_contains($transferPage->getContent(), 'config%5Bdomain%5D=asdfsadfsafd.com'), 'Server-rendered transfer page lost the reason or offers checkout.');
+// Native checkout rechecks eligibility before creating any order or invoice.
+require_once dirname(__DIR__).'/enom-cart-order.php';
+$beforeBlocked = clientRows();
+$blockedCart = enomCartStart($owner);
+$transferProduct = app(\Paymenter\Extensions\Servers\Enom\Services\Catalogue::class)->productFor($com, 'transfer');
+$transferPlan = $transferProduct->plans()->where('billing_period', 1)->firstOrFail();
+try { $blockedCart->items()->create(['product_id' => $transferProduct->id, 'plan_id' => $transferPlan->id, 'quantity' => 1,
+    'config_options' => [], 'checkout_config' => ['domain' => 'asdfsadfsafd.com']]); throw new RuntimeException('Registry 404 passed checkout.'); }
+catch (\App\Exceptions\DisplayException $error) { verify($error->getMessage() === $reason, 'Blocked checkout lost the registry reason.'); }
+verify(clientRows() === $beforeBlocked, 'Blocked transfer checkout wrote business rows.');
+
 // ---------------------------------------------------------------- per-IP limit with short cached answers
 Illuminate\Support\Facades\Cache::flush();
 foreach (['limited' => '198.51.100.20', 'other-ip' => '198.51.100.21'] as $jar => $ip) { enomHttp(null, 'GET', '/domains/register', [], ['ip' => $ip, 'jar' => $jar]); } // Sessions and XSRF cookies.

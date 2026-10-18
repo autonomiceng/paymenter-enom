@@ -157,6 +157,9 @@ final class Labels
         if ($operation && $state === 'queued' && self::notSent($operation)) {
             return 'Processing is off in the Enom server settings. Sends once it is turned on.';
         }
+        if ($operation?->safe_code === 'transfer_not_registered' && $state === 'held') {
+            return \Paymenter\Extensions\Servers\Enom\Services\TransferOrders::reason('transfer_not_registered');
+        }
         if ($operation?->safe_code === 'contact_details_required' && $state === 'held') {
             return 'Needs account details. Ask the customer to save their account details, then use updated account details on the domain page.';
         }

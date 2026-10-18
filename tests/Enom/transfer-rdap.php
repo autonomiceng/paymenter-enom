@@ -74,6 +74,32 @@ foreach (['http://rdap.example.com/', 'https://127.0.0.1/', 'https://[::1]/', 'h
 foreach ([['status' => 302, 'body' => '{}'], ['status' => 200, 'body' => str_repeat('x', 2097153)], ['status' => 200, 'body' => '{'], ['status' => 503, 'body' => '{}']] as $response) {
     verify((new Rdap(fn () => $response))->precheck('example.com')['warning'] !== null, 'Redirect, size or invalid response accepted.');
 }
+// Only an authoritative domain-object 404 is definitive; bootstrap and transport failures stay unknown.
+$notRegistered = ['allowed' => false, 'code' => 'transfer_not_registered', 'warning' => null, 'expires_at' => null];
+foreach ([['status' => 404, 'body' => ''], ['status' => 404, 'body' => '{"errorCode":404}']] as $response) {
+    $calls404 = [];
+    $rdap404 = new Rdap(function ($url) use ($response, &$calls404) {
+        $calls404[] = $url;
+        return $url === 'https://data.iana.org/rdap/dns.json'
+            ? ['status' => 200, 'body' => json_encode(['services' => [[['com'], ['https://rdap.example.com/']]]])]
+            : $response;
+    });
+    verify($rdap404->precheck('example.com') === $notRegistered && $calls404 === ['https://data.iana.org/rdap/dns.json', 'https://rdap.example.com/domain/example.com'], 'Domain endpoint 404 was not definitive.');
+}
+$bootstrap404 = new Rdap(fn () => ['status' => 404, 'body' => '{"errorCode":404}']);
+$actual = $bootstrap404->precheck('example.com');
+verify($actual['allowed'] && $actual['code'] === null && $actual['warning'] !== null, 'Bootstrap 404 claimed the name is not registered.');
+foreach ([500, 429, 302, 200, 'timeout'] as $failure) {
+    $rdapFailure = new Rdap(function ($url) use ($failure) {
+        if ($url === 'https://data.iana.org/rdap/dns.json') {
+            return ['status' => 200, 'body' => json_encode(['services' => [[['com'], ['https://rdap.example.com/']]]])];
+        }
+        if ($failure === 'timeout') { throw new RuntimeException('Synthetic timeout'); }
+        return ['status' => $failure, 'body' => '{'];
+    });
+    $actual = $rdapFailure->precheck('example.com');
+    verify($actual['allowed'] && $actual['code'] === null && $actual['warning'] !== null && $actual['expires_at'] === null, 'Domain failure did not stay unknown: '.$failure);
+}
 $calls = 0;
 $rdap = new Rdap(function () use (&$calls) { $calls++; throw new RuntimeException('private transport detail'); });
 verify($rdap->precheck('example.com')['warning'] !== null && $calls === 1, 'Unavailable lookup retried or failed closed.');

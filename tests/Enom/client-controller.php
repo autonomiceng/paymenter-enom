@@ -143,8 +143,8 @@ verify($check($owner, 'hello.com', ['csrf' => true, 'token' => false])->getStatu
 $ok = $check($owner, 'hello.com', ['csrf' => true]);
 verify($ok->getStatusCode() === 200, 'Check refused a request with the session CSRF token.');
 $data = json_decode($ok->getContent(), true);
-verify(array_keys($data) === ['domain', 'status', 'price', 'transfer_price', 'renew_price', 'register_url', 'transfer_url', 'warning', 'min_years', 'max_years', 'terms', 'alternative'] && $data['status'] === 'available'
-    && $data['price'] === '$12.00' && $data['transfer_price'] === '$13.00' && $data['renew_price'] === '$14.00', 'Available answer has unexpected fields or prices: '.$ok->getContent());
+verify(array_keys($data) === ['domain', 'status', 'price', 'transfer_price', 'renew_price', 'register_url', 'transfer_url', 'warning', 'transfer_reason', 'min_years', 'max_years', 'terms', 'alternative'] && $data['status'] === 'available'
+    && $data['transfer_reason'] === null && $data['price'] === '$12.00' && $data['transfer_price'] === '$13.00' && $data['renew_price'] === '$14.00', 'Available answer has unexpected fields or prices: '.$ok->getContent());
 // Each sale plan supplies its own total for 1-10 years.
 verify($data['min_years'] === 1 && $data['max_years'] === 10 && array_keys($data['terms']) === range(1, 10) && $data['terms']['1'] === '$12.00'
     && $data['terms']['2'] === '$24.00' && $data['terms']['10'] === '$120.00', 'Check answer terms differ: '.json_encode($data['terms']));

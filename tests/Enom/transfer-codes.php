@@ -87,6 +87,24 @@ verify(!str_contains($raw->payload, $secret) && !str_contains($raw->policy, 'pai
 verify(!str_contains(json_encode($saved), $secret) && !DB::table('properties')->where('value', $secret)->exists(), 'Code leaked through serialization or service properties.');
 verify(app(Refunds::class)->rejectUnsentTransfer($saved->id) === null, 'Code entry lost the timeout race.');
 $transfers->assertReady($saved);
+$missingTransfers = new TransferOrders(new Rdap(fn ($url) => $url === 'https://data.iana.org/rdap/dns.json'
+    ? ['status' => 200, 'body' => json_encode(['services' => [[['com'], ['https://rdap.example.com/']]]])]
+    : ['status' => 404, 'body' => '']));
+$missingReason = TransferOrders::reason('transfer_not_registered');
+try { $missingTransfers->assertReady($saved); throw new RuntimeException('Unregistered transfer passed dispatch.'); }
+catch (InputValidationException $error) { verify($error->errors === ['transfer_not_registered' => $missingReason], 'Dispatch lost the not-registered reason.'); }
+app()->instance(TransferOrders::class, $missingTransfers);
+$engine->resumeInitial($saved->id);
+$saved->refresh();
+verify($saved->state === 'held' && $saved->safe_code === 'transfer_not_registered' && !isset($saved->cost['refund']), 'Registry 404 did not retain a safe unsent hold.');
+verify(TransferOrders::codeRejection($saved) === $missingReason, 'Held code-entry page lacks the reason.');
+refuses(fn () => $missingTransfers->submitCode($owner, $saved->domain_id, 'new-code'), $missingReason, 'Blocked transfer accepted a replacement code.', [InputValidationException::class]);
+verify(\Paymenter\Extensions\Servers\Enom\Admin\Support\Labels::stateHint('held', $saved) === $missingReason, 'Staff hold lacks the registry reason.');
+$heldPage = enomHttp($owner, 'GET', '/domains/'.$saved->domain_id);
+$heldText = html_entity_decode(strip_tags(preg_replace('#<(style|script)\b.*?</\1>#si', '', $heldPage->getContent())));
+verify($heldPage->getStatusCode() === 200 && str_contains($heldText, $missingReason)
+    && !str_contains($heldPage->getContent(), 'id="transfer-code-input"') && !str_contains($heldText, 'account credit'), 'Held transfer page offers code entry or implies a refund.');
+app()->instance(TransferOrders::class, $transfers);
 DB::rollBack();
 $unpaid = transferFixture(false);
 DB::beginTransaction();

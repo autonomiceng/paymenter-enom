@@ -214,6 +214,7 @@ class TransferOrders
     public static function reason(?string $code): string
     {
         return match ($code) {
+            'transfer_not_registered' => "This name isn't registered with its registry, so it can't be transferred.",
             'transfer_locked' => 'This domain is locked at its current registrar. Turn off the transfer lock there, then try again.',
             'transfer_redemption' => 'This domain has expired at its current registrar. Renew or restore it there first.',
             'transfer_pending_delete' => 'This domain is about to be deleted by its registry and cannot be transferred.',
@@ -227,6 +228,9 @@ class TransferOrders
     /** Shared code-entry gate for the owner form and submission; payment recovery runs before checking the cutoff. */
     public static function codeRejection(Operation $operation, bool $checkDeadline = true): ?string
     {
+        if ($operation->state === 'held' && $operation->safe_code === 'transfer_not_registered') {
+            return self::reason('transfer_not_registered');
+        }
         $domain = $operation->domain;
         $invoiceStatus = Invoice::whereKey($operation->invoice_id)->value('status');
         if ($operation->action !== 'transfer' || !in_array($operation->state, self::OPEN, true) || !self::unsent($operation)

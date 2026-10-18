@@ -40,20 +40,23 @@ class DomainOrders
         $premium = ($check['is_premium'] ?? null) !== false || ($check['is_platinum'] ?? null) !== false || ($check['is_eap'] ?? null) !== false;
         $terms = self::termsFor($tld, $check);
         $precheck = !empty($check['available']) || !app(TransferOrders::class)->allowed($tld) ? [] : app(TransferOrders::class)->precheck($tld, $resolved['domain']);
+        $transferable = !$existing && !$premium && empty($check['available']) && !empty($check['transferable']) && $tld->orderable('transfer') && app(TransferOrders::class)->allowed($tld) && ($precheck['allowed'] ?? false);
+        $notRegistered = ($precheck['code'] ?? null) === 'transfer_not_registered';
         $price = fn (?string $amount) => $user ? Pricing::taxed($user, $amount, 'USD') : $amount;
         $totals = [];
         foreach ($terms as $years) { $totals[$years] = $price($tld->registrationTotal($years)); }
         return ['domain' => $resolved['domain'], 'tld' => $tld->tld,
             'available' => !$existing && !$premium && $terms !== [] && $tld->orderable('register') && !empty($check['available']),
-            'transferable' => !$existing && !$premium && empty($check['available']) && !empty($check['transferable']) && $tld->orderable('transfer') && app(TransferOrders::class)->allowed($tld) && ($precheck['allowed'] ?? false),
+            'transferable' => $transferable,
             // Only the owner learns that a name is in this portal; everyone else just sees it taken.
             'premium' => $premium, 'existing' => $existing && $user !== null && (int) $record->user_id === (int) $user->id,
             'taxed' => $user !== null,
-            'register_price' => $price($tld->price('register')), 'transfer_price' => $price($tld->price('transfer')),
+            'register_price' => $price($tld->price('register')), 'transfer_price' => $notRegistered ? null : $price($tld->price('transfer')),
             'renew_price' => $price($tld->price('renew')), 'warning' => $precheck['warning'] ?? null,
+            'transfer_reason_code' => $precheck['code'] ?? null,
             'transfer_reason' => isset($precheck['allowed']) && !$precheck['allowed'] ? TransferOrders::reason($precheck['code'] ?? null) : null,
             'register_url' => self::checkoutUrl($tld, 'register', $resolved['domain'], $terms[0] ?? null),
-            'transfer_url' => self::checkoutUrl($tld, 'transfer', $resolved['domain'], 1), 'terms' => $terms, 'register_totals' => $totals];
+            'transfer_url' => $transferable ? self::checkoutUrl($tld, 'transfer', $resolved['domain'], 1) : null, 'terms' => $terms, 'register_totals' => $totals];
     }
 
     /** Registration terms for this name: the ending's range, raised to the name's own registry minimum. */

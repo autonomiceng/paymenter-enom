@@ -142,6 +142,17 @@ const submit = (w, form, submitter) => form.requestSubmit(submitter || form.quer
         check(errors.length === 0, 'Long warning and retry have no script errors'); w.close();
     }
 
+    {
+        const reason = "This name isn't registered with its registry, so it can't be transferred.";
+        const fetch = async () => ({status: 200, json: async () => ({status: 'invalid', transfer_reason: reason, transfer_price: null, transfer_url: null})});
+        const {w, d, errors} = mount(pages.search, {fetch}); await sleep(200);
+        const row = d.querySelector('[data-enom-result]');
+        check(row.dataset.state === 'invalid' && row.querySelector('[data-slot="status"]').textContent === 'Not available', 'Unregistered name has a neutral unavailable badge');
+        check(row.querySelector('[data-slot="note"]').textContent === reason && row.querySelector('[data-slot="price"]').textContent === '', 'Unregistered name shows the reason without a transfer price');
+        check(row.querySelector('[data-slot="transfer"]').style.display === 'none', 'Unregistered name offers no Transfer action');
+        check(errors.length === 0, 'Unregistered name renders without script errors'); w.close();
+    }
+
     // ------------------------------------------------------------ confirmation dialog
     {
         const {w, d, errors, submits} = mount(pages.show);

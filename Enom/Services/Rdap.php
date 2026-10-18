@@ -37,7 +37,8 @@ class Rdap
                 }
             }
             if ($endpoint === null) { return $unknown; }
-            $data = $this->request($endpoint.'/domain/'.rawurlencode($domain));
+            $data = $this->request($endpoint.'/domain/'.rawurlencode($domain), true);
+            if ($data === null) { return ['allowed' => false, 'code' => 'transfer_not_registered', 'warning' => null, 'expires_at' => null]; }
             if (($data['objectClassName'] ?? null) !== 'domain' || !is_string($data['ldhName'] ?? null)
                 || strtolower($data['ldhName']) !== $domain || !is_array($data['status'] ?? null) || !$data['status']) { return $unknown; }
             $statuses = [];
@@ -104,12 +105,15 @@ class Rdap
             && !preg_match('/[\x00-\x20\x7f\\\\]/', $url);
     }
 
-    private function request(string $url): array
+    /** A null result means only the bootstrap-selected domain endpoint returned 404. */
+    private function request(string $url, bool $domainObject = false): ?array
     {
         if (!$this->safeUrl($url)) { throw new RuntimeException('Lookup endpoint is unavailable.'); }
         $response = $this->transport !== null ? ($this->transport)($url) : $this->send($url);
-        if (!is_array($response) || ($response['status'] ?? null) !== 200 || !is_string($response['body'] ?? null)
+        if (!is_array($response) || !is_string($response['body'] ?? null)
             || strlen($response['body']) > self::BODY_LIMIT) { throw new RuntimeException('Lookup response is unavailable.'); }
+        if ($domainObject && ($response['status'] ?? null) === 404) { return null; }
+        if (($response['status'] ?? null) !== 200) { throw new RuntimeException('Lookup response is unavailable.'); }
         $data = json_decode($response['body'], true, 32, JSON_THROW_ON_ERROR);
         if (!is_array($data)) { throw new RuntimeException('Lookup response is unavailable.'); }
         return $data;
