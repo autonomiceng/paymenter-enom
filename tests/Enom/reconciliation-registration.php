@@ -45,6 +45,24 @@ function registrationReader($operation, array $overrides = []): array {
     });
     return [new DomainOperations(new EnomApi($client), fn () => ['uid' => 'offline', 'token' => 'offline']), $commands];
 }
+// An unpaid invoice or a paid label without a successful transaction cannot authorize recovery.
+foreach (['pending', 'paid'] as $invoiceStatus) {
+    [$unfundedDomain, $unfunded] = fundedRegistration();
+    Illuminate\Database\Eloquent\Model::withoutEvents(function () use ($unfunded, $invoiceStatus) {
+        $invoice = App\Models\Invoice::findOrFail($unfunded->invoice_id);
+        $invoice->transactions()->delete();
+        $invoice->update(['status' => $invoiceStatus]);
+    });
+    [$unfundedReader, $unfundedCommands] = registrationReader($unfunded);
+    verify($unfunded->funding_basis === 'paid_invoice' && !$unfundedReader->funded($unfunded), 'Unfunded registration fixture has spend authority.');
+    $beforeUnfunded = finances();
+    $result = $unfundedReader->reconcile($unfunded->id);
+    verify($unfundedCommands->getArrayCopy() === [], 'Unfunded registration reconciliation made a provider read.');
+    verify($result->state === 'uncertain' && $result->safe_code === 'provider_unknown'
+        && $unfundedDomain->fresh()->status === 'registration_pending' && $unfundedDomain->fresh()->service->status === 'pending',
+        'Unfunded registration reconciliation changed the unresolved request.');
+    verify(finances() == $beforeUnfunded, 'Unfunded registration reconciliation changed native billing or jobs.');
+}
 [$domain, $operation] = fundedRegistration();
 [$reader, $commands] = registrationReader($operation);
 verify($reader->funded($operation), 'Native paid registration is not a valid recovery fixture.');
@@ -60,8 +78,12 @@ foreach (['invoices', 'invoice_items', 'invoice_transactions', 'failed_jobs'] as
 }
 verify(onlyRefreshJobAdded($before['jobs'], $after['jobs'], $domain->id), 'Recovery did not queue exactly one detail refresh for the recovered domain.');
 verify(App\Models\Invoice::find($operation->invoice_id)->status === 'paid' && App\Models\InvoiceTransaction::where('invoice_id', $operation->invoice_id)->count() === 1, 'Recovery changed native payment evidence.');
-$reader->execute($operation->id); $reader->reconcile($operation->id);
-verify($commands->getArrayCopy() === ['GetOrderDetail', 'GetDomainExp', 'GetDomainInfo'], 'Recovery replayed a Purchase or another registrar request.');
+$afterRecoveryCommands = $commands->getArrayCopy();
+verify($afterRecoveryCommands === ['GetOrderDetail', 'GetDomainExp', 'GetDomainInfo'], 'Recovery used unexpected registrar requests.');
+$reader->execute($operation->id);
+verify($commands->getArrayCopy() === $afterRecoveryCommands, 'Execute after recovery added a registrar request.');
+$reader->reconcile($operation->id);
+verify($commands->getArrayCopy() === $afterRecoveryCommands, 'Second reconciliation after recovery added a registrar request.');
 foreach ([['id' => '999999'], ['description' => 'foreign.com'], ['quantity' => null], ['quantity' => '2'], ['detail_status' => 'Failed'], ['detail_order_status' => 'Open'], ['multiple' => true], ['result' => 'False'], ['errcount' => '1'], ['expiry' => '2027-10-14']] as $overrides) {
     [$candidateDomain, $candidate] = fundedRegistration();
     [$candidateReader, $candidateCommands] = registrationReader($candidate, $overrides);
