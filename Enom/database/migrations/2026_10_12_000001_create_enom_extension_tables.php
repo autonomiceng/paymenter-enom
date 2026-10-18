@@ -75,6 +75,32 @@ return new class extends Migration {
             $table->timestamps();
             $table->unique(['invoice_item_id', 'action']);
         });
+        Schema::create('enom_tlds', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('server_id');
+            $table->string('tld', 63);
+            $table->boolean('enabled')->default(false);
+            foreach (['register', 'renew', 'transfer'] as $action) { $table->boolean($action.'_enabled')->default(false); }
+            $table->boolean('use_default_rule')->default(true);
+            $table->string('round_up', 16)->default('none');
+            $table->string('pricing_mode', 32)->default('markup_percent');
+            $table->decimal('markup', 12, 2)->nullable();
+            foreach (['register', 'renew', 'transfer'] as $action) { $table->decimal('fixed_'.$action, 12, 2)->nullable(); }
+            // Temporary legacy-row columns; removed by the consolidated fresh schema.
+            foreach (['register_price', 'transfer_price', 'cost_register'] as $column) { $table->decimal($column, 12, 2)->nullable(); }
+            $table->json('cost_register_terms')->nullable();
+            $table->json('sale_holds')->nullable();
+            $table->decimal('renew_price', 12, 2)->nullable();
+            $table->decimal('cost_renew', 12, 4)->nullable();
+            $table->decimal('cost_transfer', 12, 4)->nullable();
+            $table->timestamp('costs_synced_at')->nullable();
+            $table->unsignedInteger('sort_order')->default(100);
+            $table->unsignedTinyInteger('min_years')->default(1);
+            $table->unsignedTinyInteger('max_years')->default(10);
+            $table->json('registry_fields')->nullable();
+            $table->timestamps();
+            $table->unique(['server_id', 'tld']);
+        });
     }
 
     // Data-retaining removal is deliberate. Financial deduplication survives reinstall.

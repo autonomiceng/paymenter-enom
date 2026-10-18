@@ -48,22 +48,6 @@ $hostile = new RegistrarResult('success', null, ['tldlist' => ['tld' => [['tld' 
 check(Catalogue::tldNames($hostile) === ['com'], 'Malformed, duplicate or IDN endings were accepted: '.json_encode(Catalogue::tldNames($hostile)));
 check(Catalogue::tldNames(new RegistrarResult('success', null, [])) === [], 'Missing list produced endings.');
 
-// PE_GetDomainPricing: reseller cost per action, null when Enom disables that action, cents normalized.
-$pricing = parsed('PE_GetDomainPricing', fixture('enom-pe-getdomainpricing.xml'), ['Years' => 1]);
-check($pricing->status === 'success', 'Captured PE_GetDomainPricing parses as success.');
-$costs = Catalogue::costs($pricing);
-check(array_keys($costs) === ['com', 'net', 'org', 'us', 'co.uk', 'io', 'tm', 'br.com'] && !isset($costs['ai']), 'Pricing endings differ from the capture (ai is absent from Enom pricing).');
-check($costs['com'] === ['register' => '8.95', 'renew' => '8.95', 'transfer' => '9.50'], '.com costs (transfer 9.5 => 9.50) were misread: '.json_encode($costs['com']));
-check($costs['net'] === ['register' => '15.55', 'renew' => '8.95', 'transfer' => '8.95'], '.net costs misread.');
-check($costs['co.uk'] === ['register' => '6.99', 'renew' => '6.99', 'transfer' => '6.99'], 'Multi-label .co.uk costs misread.');
-check($costs['io'] === ['register' => '39.50', 'renew' => '39.50', 'transfer' => null], 'Disabled .io transfer was given a cost.');
-check($costs['tm'] === ['register' => '99.00', 'renew' => null, 'transfer' => null], 'Disabled .tm renew/transfer were given costs.');
-check($costs['br.com'] === ['register' => null, 'renew' => '49.95', 'transfer' => null], 'Disabled .br.com registration was given a cost.');
-$single = new RegistrarResult('success', null, ['pricestructure' => ['product' => ['tld' => 'COM', 'resellerpricereg' => '8.955', 'registerenabled' => 'true',
-    'resellerpricerenew' => '-1', 'renewenabled' => 'True', 'resellerpricetran' => '1e3', 'transferenabled' => 'True']]]);
-check(Catalogue::costs($single) === ['com' => ['register' => '8.96', 'renew' => null, 'transfer' => null]], 'Singleton product, half-up cents or invalid amounts mishandled: '.json_encode(Catalogue::costs($single)));
-check(Catalogue::costs(new RegistrarResult('success', null, ['pricestructure' => ['product' => [['tld' => 'bad tld', 'resellerpricereg' => '1', 'registerenabled' => 'True'], 'junk']]])) === [], 'Malformed products produced costs.');
-
 // PE_GetProductPrice uses the requested term's per-year price, including non-bracket terms.
 foreach ([1 => '15.55', 2 => '8.95', 3 => '8.9500'] as $years => $expected) {
     $sent = [];
@@ -92,10 +76,8 @@ foreach ([['net', 'register', 0], ['net', 'register', 11], ['net', 'privacy', 1]
     catch (InvalidArgumentException) { check(true, 'Invalid request refused.'); }
 }
 
-
 // GetExtAttributes: .us has required nexus and purpose attributes plus a country child; .com has none.
 $us = parsed('GetExtAttributes', fixture('enom-getextattributes-us.xml'), ['TLD' => 'us']);
-check($us->status === 'success' && Catalogue::requiresExtraDetails($us), '.us nexus attribute was not detected as required.');
 // 0.4 registry fields: the stored schema the order form and server validation share.
 $schema = RegistryFields::normalize($us);
 check(array_column($schema, 'name') === ['us_nexus', 'global_cc_us', 'us_purpose'], '.us schema fields differ: '.json_encode(array_column($schema, 'name')));
@@ -138,11 +120,7 @@ $text = [['name' => 'company_id', 'label' => 'Company ID', 'required' => true, '
 check(RegistryFields::validate($text, ['company_id' => str_repeat('a', 255)]) === ['company_id' => str_repeat('a', 255)], '255-character text refused.');
 check(registryErrors($text, ['company_id' => str_repeat('a', 256)]) === ['registry.company_id' => 'Shorten this entry and remove special characters.']
     && isset(registryErrors($text, ['company_id' => "a\nb"])['registry.company_id']) && registryErrors($text, ['company_id' => ' '])['registry.company_id'] === 'Fill in this field.', 'Text length/control/blank rules differ.');
-check($com->status === 'success' && !Catalogue::requiresExtraDetails($com), '.com was treated as needing extra registrant details.');
 $optional = new RegistrarResult('success', null, ['attributes' => ['attribute' => ['name' => 'optional', 'required' => '0']]]);
-check(!Catalogue::requiresExtraDetails($optional), 'Optional singleton attribute was treated as required.');
-check(Catalogue::requiresExtraDetails(new RegistrarResult('success', null, ['attributes' => ['attribute' => ['name' => 'nexus', 'required' => '1']]])), 'Required singleton attribute was missed.');
-check(Catalogue::requiresExtraDetails(new RegistrarResult('success', null, ['attributes' => ['attribute' => [['required' => '2'], ['required' => '1']]]])), 'Required attribute later in a list was missed.');
 
 // GetTLDDetails: the minimum registration term Catalogue::enable() reads.
 $ai = parsed('GetTLDDetails', fixture('enom-gettlddetails-ai.xml'), ['TLD' => 'ai']);
@@ -170,8 +148,8 @@ check($missing->status === 'rejected' && str_contains(strtolower((string) $missi
 // EnomApi sends the catalogue commands with the documented parameters only.
 $sent = [];
 $api = new EnomApi(new RegistrarClient('offline_uid', 'offline_token', function ($command, $params) use (&$sent) { $sent[] = [$command, $params]; return fixture('enom-getextattributes-com.xml'); }, null, true));
-$api->tldList(); $api->domainPricing(); $api->tldExtendedAttributes('US'); $api->tldInfo('AI');
-check($sent === [['GetTLDList', []], ['PE_GetDomainPricing', ['Years' => 1]], ['GetExtAttributes', ['TLD' => 'us']], ['GetTLDDetails', ['TLD' => 'ai']]], 'Catalogue commands sent unexpected parameters: '.json_encode($sent));
+$api->tldList(); $api->productPrice('com', 'register', 3); $api->tldExtendedAttributes('US'); $api->tldInfo('AI');
+check($sent === [['GetTLDList', []], ['PE_GetProductPrice', ['TLD' => 'com', 'ProductType' => 10, 'Years' => 3]], ['GetExtAttributes', ['TLD' => 'us']], ['GetTLDDetails', ['TLD' => 'ai']]], 'Catalogue commands sent unexpected parameters: '.json_encode($sent));
 
 // Retail: fixed amount markup adds cents; percent is a percentage of cost; rounding is half-up to the cent.
 $retail = [
@@ -184,7 +162,7 @@ $retail = [
 foreach ($retail as [$cost, $mode, $markup, $expected]) {
     check(Catalogue::retail($cost, $mode, $markup) === $expected, "retail($cost, $mode, $markup) = ".Catalogue::retail($cost, $mode, $markup)." not $expected");
 }
-foreach ([['8.95', 'fixed', '5'], ['8.95', 'markup_percent', '-1'], ['8.955', 'markup_amount', '1'], ['abc', 'markup_amount', '1'], ['8.95', 'gross_margin', '10']] as [$cost, $mode, $markup]) {
+foreach ([['8.95', 'fixed', '5'], ['8.95', 'markup_percent', '-1'], ['8.95555', 'markup_amount', '1'], ['abc', 'markup_amount', '1'], ['8.95', 'gross_margin', '10']] as [$cost, $mode, $markup]) {
     try { Catalogue::retail($cost, $mode, $markup); check(false, "retail($cost, $mode, $markup) was accepted."); }
     catch (InvalidArgumentException) { check(true, 'Invalid retail input refused.'); }
 }
