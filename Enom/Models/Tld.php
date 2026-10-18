@@ -6,12 +6,15 @@ use App\Models\Server;
 use Illuminate\Database\Eloquent\Model;
 use Paymenter\Extensions\Servers\Enom\Services\Catalogue;
 use Paymenter\Extensions\Servers\Enom\Services\PricingRule;
+use Throwable;
 
 /** One ending, its pricing rule and the last exact-term wholesale costs. */
 class Tld extends Model
 {
     public const MODES = ['fixed', 'markup_amount', 'markup_percent'];
     public const ACTIONS = ['register', 'renew', 'transfer'];
+
+    private bool $saleReadFailed = false;
 
     protected $table = 'enom_tlds';
     protected $guarded = [];
@@ -25,16 +28,24 @@ class Tld extends Model
         'min_years' => 'integer', 'max_years' => 'integer', 'registry_fields' => 'array',
     ];
 
+    public function refresh()
+    {
+        $this->saleReadFailed = false;
+        return parent::refresh();
+    }
+
     public function server() { return $this->belongsTo(Server::class); }
     public function getDisplayNameAttribute(): string { return '.'.$this->tld; }
 
     public function orderable(?string $action = null): bool
     {
-        if (!$this->enabled || $this->price('renew') === null) { return false; }
-        return match ($action) {
-            'register' => $this->register_enabled && $this->terms() !== [],
-            'transfer' => $this->transfer_enabled && $this->price('transfer') !== null,
-            null => $this->orderable('register') || $this->orderable('transfer'),
+        if (!$this->enabled || !$this->saleRenewalAvailable()) { return false; }
+        $register = $this->register_enabled && $this->terms() !== [];
+        $transfer = $this->transfer_enabled && $this->price('transfer') !== null;
+        return !$this->saleReadFailed && match ($action) {
+            'register' => $register,
+            'transfer' => $transfer,
+            null => $register || $transfer,
             default => false,
         };
     }
@@ -55,12 +66,12 @@ class Tld extends Model
     /** @return list<int> Registration years with a current USD sale price. */
     public function terms(): array
     {
-        if (!$this->enabled || !$this->register_enabled || $this->price('renew') === null) { return []; }
+        if (!$this->enabled || !$this->register_enabled || !$this->saleRenewalAvailable()) { return []; }
         $terms = [];
         for ($years = max(1, (int) $this->min_years); $years <= min(10, (int) $this->max_years); $years++) {
             if ($this->registrationTotal($years) !== null) { $terms[] = $years; }
         }
-        return $terms;
+        return $this->saleReadFailed ? [] : $terms;
     }
 
     public function registrationTotal(int $years): ?string
@@ -71,11 +82,30 @@ class Tld extends Model
 
     private function salePrice(string $action, int $years): ?string
     {
-        if (!$this->enabled || !$this->{$action.'_enabled'} || $this->price('renew') === null) { return null; }
-        $product = app(Catalogue::class)->productFor($this, $action);
-        $price = $product?->plans()->where('type', 'recurring')->where('billing_unit', 'year')->where('billing_period', $years)
-            ->first()?->prices()->where('currency_code', 'USD')->first();
-        if (!$price || PricingRule::units((string) $price->price, 2) <= 0 || PricingRule::units((string) $price->setup_fee, 2) !== 0) { return null; }
-        return PricingRule::decimal(PricingRule::units((string) $price->price, 2));
+        if (!$this->enabled || !$this->{$action.'_enabled'} || !$this->saleRenewalAvailable()) { return null; }
+        try {
+            $product = app(Catalogue::class)->productFor($this, $action);
+            $price = $product?->plans()->where('type', 'recurring')->where('billing_unit', 'year')->where('billing_period', $years)
+                ->first()?->prices()->where('currency_code', 'USD')->first();
+            if (!$price || PricingRule::units((string) $price->price, 2) <= 0 || PricingRule::units((string) $price->setup_fee, 2) !== 0) { return null; }
+            return PricingRule::decimal(PricingRule::units((string) $price->price, 2));
+        } catch (Throwable $exception) {
+            $this->saleReadFailed = true;
+            report($exception);
+            return null;
+        }
+    }
+
+    /** Sale filtering must not turn corrupt holder renewal billing into a silent null. */
+    private function saleRenewalAvailable(): bool
+    {
+        if ($this->saleReadFailed) { return false; }
+        try {
+            return $this->price('renew') !== null;
+        } catch (Throwable $exception) {
+            $this->saleReadFailed = true;
+            report($exception);
+            return false;
+        }
     }
 }

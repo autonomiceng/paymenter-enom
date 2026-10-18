@@ -184,7 +184,7 @@ $blockedSetting->update(['value' => 'invalid']);
 $blockedBefore = (array) DB::table('enom_tlds')->where('id', $ruleEndings['ruleblocked']->id)->sole();
 $blockedPrice = $blockedProduct->plans()->sole()->prices()->sole()->price;
 $reportedRules = [];
-app(Illuminate\Contracts\Debug\ExceptionHandler::class)->reportable(function (RuntimeException $error) use (&$reportedRules) { $reportedRules[] = $error->getMessage(); return false; });
+app(Illuminate\Contracts\Debug\ExceptionHandler::class)->reportable(function (Throwable $error) use (&$reportedRules) { $reportedRules[] = $error->getMessage(); return false; });
 $ruleResult = CatalogueRuntime::saveDefaultRule($ruleServer->id, array_replace(PricingRule::DEFAULT, ['markup' => '50.00']));
 verify($ruleResult === ['published' => 2, 'failed' => ['.ruleblocked']] && $reportedRules === ['Invalid domain product mapping.'], 'Default-rule republish stopped early, miscounted or did not report its failure.');
 verify(CatalogueRuntime::defaultRule($ruleServer->id)['markup'] === '50.00' && $ruleEndings['rulefirst']->fresh()->price('register') === '13.43'
@@ -207,6 +207,51 @@ $annual = $catalogue->billingPlan($aiProduct);
 verify($annual->name === 'Managed annual renewal' && $annual->billing_period === 1 && $annual->prices()->count() === 0
     && $aiProduct->plans()->first()->billing_period === 2 && $ai->price('register') === null, 'Annual service identity became a one-year sale.');
 verify($ai->registrationTotal(2) !== null && !array_key_exists('cost_register_terms', $ai->toArray()) && !array_key_exists('cost_renew', $ai->toArray()), 'Missing retail or serialized wholesale costs.');
+$public = collect($catalogue->publicPrices())->keyBy('tld');
+verify($public['ai']['register'] === null && $public['ai']['min_years'] === 2 && $public['ai']['transfer'] === null, 'Public prices differ for registration-only .ai.');
+verify($catalogue->resolve('example.ai')['tld']->id === $ai->id, '.ai did not resolve to its enabled seller.');
+
+// Corrupt sale data isolates one enabled ending while direct administrative reads still reject it.
+$broken = Tld::create(['server_id' => $server->id, 'tld' => 'broken', 'enabled' => true, 'min_years' => 1, 'max_years' => 2,
+    'register_enabled' => true, 'renew_enabled' => true, 'transfer_enabled' => false, 'use_default_rule' => false, 'pricing_mode' => 'fixed',
+    'fixed_register' => '20.00', 'fixed_renew' => '20.00', 'fixed_transfer' => '20.00', 'cost_register_terms' => [1 => '8.9500', 2 => '8.9500'], 'cost_renew' => '8.9500']);
+$catalogue->publish($broken);
+$brokenProduct = $catalogue->productFor($broken, 'register');
+$brokenMarker = $brokenProduct->settings()->where('key', 'enom_action')->sole();
+$brokenPrice = $brokenProduct->plans()->where('billing_period', 1)->sole()->prices()->sole();
+$reportedSales = &$reportedRules;
+foreach (['marker', 'duplicate', 'price', 'setup_fee', 'renew_price'] as $corruption) {
+    $reportsBefore = count($reportedSales);
+    if ($corruption === 'marker') { $brokenMarker->update(['value' => 'invalid']); }
+    if ($corruption === 'duplicate') {
+        $duplicateProduct = $brokenProduct->replicate();
+        $duplicateProduct->slug = 'broken-duplicate';
+        $duplicateProduct->save();
+        foreach ($brokenProduct->settings()->get() as $setting) { $duplicateProduct->settings()->create($setting->only(['key', 'value', 'type', 'encrypted'])); }
+    }
+    if ($corruption === 'price') { DB::table('prices')->where('id', $brokenPrice->id)->update(['price' => 'malformed']); }
+    if ($corruption === 'setup_fee') { DB::table('prices')->where('id', $brokenPrice->id)->update(['setup_fee' => null]); }
+    if ($corruption === 'renew_price') { DB::table('enom_tlds')->where('id', $broken->id)->update(['renew_price' => 'malformed']); }
+    if (in_array($corruption, ['marker', 'duplicate'], true)) {
+        if ($corruption === 'marker') { refuses(fn () => $catalogue->mapping($brokenProduct), 'product mapping', 'Invalid marker passed direct mapping.'); }
+        refuses(fn () => $catalogue->publish($broken), 'product mapping', 'Corrupt mapping passed direct publication.');
+    }
+    if ($corruption === 'renew_price') {
+        refuses(fn () => $broken->fresh()->price('renew'), '', 'Corrupt holder renewal price became silent null.', [Throwable::class]);
+    }
+    verify($catalogue->orderable()->contains('id', $ai->id) && !$catalogue->orderable()->contains('id', $broken->id), 'Corrupt '.$corruption.' hid valid endings or remained orderable.');
+    verify($catalogue->resolve('example.ai')['tld']->id === $ai->id, 'Corrupt '.$corruption.' stopped valid resolution.');
+    $public = collect($catalogue->publicPrices())->keyBy('tld');
+    verify($public->has('ai') && !$public->has('broken'), 'Corrupt '.$corruption.' hid valid public prices or remained public.');
+    verify($broken->refresh()->terms() === [] && $broken->registrationTotal(2) === null, 'Corrupt '.$corruption.' leaked another registration term.');
+    verify(count($reportedSales) > $reportsBefore, 'Corrupt '.$corruption.' was not reported.');
+    $brokenMarker->update(['value' => 'register']);
+    if ($corruption === 'duplicate') { $duplicateProduct->settings()->delete(); $duplicateProduct->delete(); }
+    DB::table('prices')->where('id', $brokenPrice->id)->update(['price' => '20.00', 'setup_fee' => '0.00']);
+    DB::table('enom_tlds')->where('id', $broken->id)->update(['renew_price' => '20.00']);
+    verify($broken->refresh()->terms() === [1, 2] && $broken->registrationTotal(2) === '40.00', 'Repaired '.$corruption.' remained off sale after refresh.');
+}
+$broken->delete();
 $de = Tld::create(['server_id' => $server->id, 'tld' => 'de']);
 refuses(fn () => $catalogue->enable($de), 'nameservers at purchase', '.de registration was enabled.');
 
@@ -273,6 +318,7 @@ verify($catalogue->import($importServer->id)['added'] === 0 && Tld::where('serve
 // Explicitly unavailable prices remove stale sales and can recover without enabling disabled actions.
 $failAll = true;
 $catalogue->syncCosts($server->id);
+verify(!collect($catalogue->publicPrices())->contains('tld', 'net'), 'Unavailable price reads left .net in public prices.');
 verify(!$net->fresh()->orderable() && $net->fresh()->cost('register', 2) === null && $net->fresh()->cost('renew') === null
     && ($net->fresh()->sale_holds['register'] ?? null) === 'No current price is available.'
     && ($net->fresh()->sale_holds['transfer'] ?? null) === 'No current price is available.'
