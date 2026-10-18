@@ -12,7 +12,7 @@ Paymenter's `AdminPanelProvider` discovers `Admin/Resources` and `Admin/Pages` f
 
 Paymenter v1.5.9's [UploadExtensionService](https://github.com/Paymenter/Paymenter/blob/v1.5.9/app/Services/Extensions/UploadExtensionService.php) accepts a ZIP containing the extension entry point directly or inside one wrapper directory. This project's ZIP uses `Enom/`. A full `extensions/Servers/Enom/` archive nesting is too deep for that native importer.
 
-The uploader detects the Server subclass, places files at `extensions/Servers/Enom`, and invokes native install or upgrade. `installed()` runs extension migrations and verifies the four-table schema. `upgraded()` preserves the existing data and checks the schema. `uninstalled()` retains registrations and the financial/operation ledger.
+The uploader detects the Server subclass, places files at `extensions/Servers/Enom`, and invokes native install or upgrade. `installed()` runs the single fresh-install migration and verifies `enom_domains`, `enom_operations` and `enom_tlds`, including their uniqueness constraints. The nullable unique `reservation_name` reserves a current name while retaining historical Domain rows. `upgraded()` repeats install/template/schema checks; it contains no earlier-schema conversion. `uninstalled()` retains registrations and the financial/operation ledger.
 
 The tested uploader may pass null as the prior version and may hide lifecycle-hook failures. Verify source, schema, retained data and fresh-process behavior after native upload. Do not assume the upload notification alone proves a successful upgrade. The tested upload limit is 10 MB.
 
@@ -22,14 +22,12 @@ Paymenter only boots server extensions that already have a server row. Anything 
 
 ## Native billing and registrar ownership
 
-Each domain is one native Service in a hidden **Domain name** product that the extension provisions per Enom server (category **Domains**, yearly plan, marked by the product setting `enom_catalogue`). Prices come from the `enom_tlds` catalogue and the domain's who-pays mode, and are written to the Service price; issued invoices keep their own amounts. The Enom domain record adds registrar state and links to the native billing identity; it does not create another customer subscription.
+The [ordering contract](design/ordering.md) owns product/plan identity, transactional InvoiceItem binding, frozen first-term evidence and full-invoice funding. Managed services keep null native expiry; registrar success comes from confirmed readback. [Lifecycle](design/domain-lifecycle.md) owns renewals and uncertain requests; [catalogue and pricing](design/catalogue-and-pricing.md) owns exact-term costs and native prices.
 
-The product stays hidden because ordering needs domain search, contacts and a bound quote, which native checkout cannot collect. The checkout and cart guards refuse direct native orders. Complimentary orders get a paid $0.00 native invoice so Paymenter's unpaid-order cleanup leaves slow transfers alone.
-
-Only registrations explicitly assigned to Enom can be observed, billed or renewed by this integration. Hosting domain properties are not registrar assignments. A future provider adapter must define cross-provider ownership and transfer handover before sharing customer domain routes. Separate navigation entries alone do not solve duplicate renewal authority.
+Only registrations explicitly assigned to Enom can be observed, billed or renewed here. Hosting domain properties are not registrar assignments. A future provider adapter must define ownership and transfer handover before sharing customer domain routes; navigation alone cannot prevent duplicate renewal authority.
 
 ## Tested scope
 
-The runtime is tested against official Paymenter 1.5.9. It owns `enom_domains`, `enom_operations`, `enom_order_intents` and `enom_tlds`, without altering native table definitions or application/auth/gateway/theme files. The complimentary client grant is a raw native user property (`enom_complimentary`), not a CustomProperty. Future Paymenter versions need ordinary compatibility testing.
+The runtime is tested against official Paymenter 1.5.9. It owns `enom_domains`, `enom_operations` and `enom_tlds`, without altering native table definitions or application/auth/gateway/theme files. Customer properties cannot grant complimentary domain orders or custom prices. Future Paymenter versions need ordinary compatibility testing.
 
-`Services/RuntimeGuard.php` selects Enom's test or live endpoint from the server's `environment` setting. It refuses unencrypted credentials, an account or environment that differs from the server's recorded binding, and live requests from any site URL other than the one that confirmed live mode. Writes also need **Process orders and changes**; reads only need credentials. Processing is off by default.
+`Api/RegistrarClient.php` selects the test or live transport endpoint. `Services/RuntimeGuard.php` validates configuration and refuses unencrypted credentials, an account or environment that differs from the server's recorded binding, and live requests from any site URL other than the one that confirmed live mode. Writes also need **Process orders and changes**. Processing is off by default.

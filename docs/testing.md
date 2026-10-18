@@ -1,43 +1,32 @@
 # Offline development tests
 
-Install mise, system PHP 8.3 or 8.4 and Composer as described in [CONTRIBUTING](../CONTRIBUTING.md#set-up):
+Use [CONTRIBUTING](../CONTRIBUTING.md) for dependency setup, selected-suite commands and release checks.
+The native dependency is pristine official Paymenter 1.5.9 with locked Composer dependencies and default-theme assets. The guard checks Composer identity and the literal app version. It rejects installed applications, `.env` files and cached configuration. Tests download no dependencies.
 
-```bash
-mise install
-mise run bootstrap
-mise run check
-mise run test
-```
+## Suite boundaries
 
-Bootstrap prepares a pristine Paymenter 1.5.9 app at `.cache/paymenter-1.5.9` with Composer dependencies and default theme assets. It reuses valid work on later runs. The test task sets `PAYMENTER_TEST_APP` to the canonical absolute path and `PAYMENTER_TEST_PHP` to system PHP. The guard checks the Composer identity and literal `config/app.php` version. The app must have no `.env` or cached configuration and cannot be an installed `/var/www/` application. Checks and tests download no dependencies.
+| Suite | Evidence |
+| --- | --- |
+| lint | PHP syntax for runtime and tests. |
+| package | Deterministic runtime-only ZIP, manifest, metadata, license and builder refusals. |
+| provider | Injected protocol responses, response bounds, strict money, exact-term catalogue prices, contacts, registry inputs and RDAP. |
+| native | Real services, cart, invoices and transactions; ownership, renewal admission, stale claims, reconciliation, cost caps, refunds, reminders and management readbacks. |
+| ui | Native HTTP routes, sessions and middleware; checkout, client views, Filament permissions and local jsdom behavior. |
 
-Without mise, run `python3 scripts/bootstrap.py` then `python3 scripts/dev.py test` with the tools from CONTRIBUTING on PATH. To use a separately prepared pristine app:
+The full run selects all five suites. A selected subset records omissions explicitly and establishes only that subset's coverage. Failed assertions, missing dependencies, timeouts and changed runtime bytes fail the run. Retained expected behavior always uses a hard assertion.
 
-```bash
-export PAYMENTER_TEST_APP=/absolute/path/to/pristine-paymenter-1.5.9
-export PAYMENTER_TEST_PHP=php
-python3 scripts/test.py
-```
+## Isolation and fixtures
 
-The runner gives each child a small environment, blocks PHP URL streams and network transport functions, and checks that every runtime byte remains unchanged after each command. JavaScript tests use local jsdom and synthetic fetch/clipboard/DOM boundaries. Real provider responses are simulated. SQLite integration tests use new disposable application directories and in-memory databases. Reports and failed outputs stay in the system temporary directory under `enom-tests-*`. Disposable application copies under `.scratch/` are removed at shutdown, including failed runs.
+The runner gives each child a small environment, blocks PHP URL streams and network transport functions, and verifies every runtime byte after each command. Provider requests use injected transports; JavaScript uses synthetic fetch, clipboard and dialog boundaries. Use an external network block as well when running in a container.
 
-Omitting `--suite` runs lint, package, provider, native and UI checks. Missing dependencies or failed suites return a nonzero exit code. Selecting fewer suites records the omitted suites explicitly; it does not establish their coverage. `provider` includes provider response contracts, money normalization, contact readbacks and pure input contracts. `native` covers native billing, ownership, registrar lifecycle, admission and funding gates, plus the 0.4 features: multi-year terms (`registrar-terms.php`, multi-year admission in `renewal-admission.php`), registry details (`registry-details.php`), child nameservers (`glue-records.php`), refunds to account credit (`refunds.php`) and renewal reminders (`reminders.php`). `ui` covers the client area through real routes and middleware (`client-controller.php`), every client view and its escaping (`client-views.php`), staff policies, `StaffDomains` permissions, the legacy `/admin/enom` redirects and the Filament pages (`admin-staff.php`), the logged-out search, price list and per-address check limit (`public-search.php`), and the client script in jsdom (`client-script.cjs`).
+Native suites share `tests/enom-native-app.php`: a disposable application, in-memory SQLite, test-only bcrypt rounds and the installed extension. Boot and currency creation can be disabled explicitly by fixtures that need their own setup. Inert fixture helpers share current managed-domain and native-cart setup; executable suites do not include other suites. Temporary apps are removed at shutdown. Runner receipts and failed outputs remain under `enom-tests-*` in the selected temporary directory.
 
-The portable fixtures are synthetic or sanitized protocol shapes. The DNSSEC fixture carries a public DS tuple without a domain/account identifier; the Purchase XML uses synthetic IDs/dates. `tests/fixtures/enom-test-api/` holds trimmed copies of Enom TEST API catalogue responses (`GetTLDList`, `PE_GetDomainPricing`, `GetExtAttributes`, `GetTLDDetails`, `GetBalance`) with tracking keys, request times and balances removed. Endings without their own `GetTLDDetails` capture reuse the `.com` shape under their own name. The `.us` `GetExtAttributes` capture keeps its three fields with the country list cut to four real entries. The child-nameserver captures (`RegisterNameServer`, `UpdateNameServer`, `DeleteNameServer`, a refused IPv6 registration and `CheckNSStatus` for a missing host) use a placeholder domain and address. `glue-records.php` uses a synthetic successful `CheckNSStatus` response.
+Portable XML fixtures are synthetic or sanitized protocol shapes. `tests/fixtures/enom-test-api/` contains trimmed TEST API captures for `GetTLDList`, exact-term `PE_GetProductPrice`, `GetExtAttributes`, `GetTLDDetails`, balance and child nameservers. Tracking keys, times, balances and account/domain identifiers are removed or replaced. Some detail captures reuse the `.com` shape; the `.us` country list is shortened. Synthetic malformed-price and unknown-outcome cases supplement captures. Captures establish parser behavior, not provider write acceptance.
 
-`tests/public-addresses.php` generates IPv4 and IPv6 inputs for successful glue validation without storing real server addresses. CIDR boundary tests derive adjacent addresses from blocked ranges. All requests use injected transports; these addresses are never contacted.
+`tests/public-addresses.php` generates public IPv4/IPv6 inputs for glue validation and derives CIDR boundaries from blocked ranges. No generated address is contacted.
 
-New native tests share `tests/enom-native-app.php` (disposable app with the extension booted) and `tests/enom-domain-page.php` (renders the client domain page through `DomainController::show()` and lists its form targets). The harness boots the extension after the application, so tests that render notifications call `refreshNameLookups()` to resolve the extension's named routes. A `knownBug()` check records a known failure when the expected behavior is absent. It prints `KNOWN RUNTIME BUG <id>` to stderr and includes the failure in the summary without stopping the suite. Passing checks count toward the total.
+UI helpers use the native HTTP kernel and session login, real form keys and optional production CSRF checks. Domain-page helpers render through the controller. Filament resources render through Livewire after panel registration. Without PHP `intl`, pagination uses a minimal view and the TLD bulk-selection table is checked through its definition. These checks do not establish browser behavior.
 
-UI tests add three helpers. `tests/enom-http.php` sends requests through the native HTTP kernel with Paymenter's own session login, per-user cookie jars (named guest jars and client addresses through the `jar` and `ip` options), real form keys and optional production CSRF checking; long flows call `enomResetThrottle()` to clear every route-prefixed bucket for the user. `tests/enom-client-fixture.php` provides one Enom server, a catalogue with Enom costs that must never reach clients, and an injected `Check`-only transport. `tests/enom-admin-panel.php` registers the extension's Filament resources and pages on the admin panel (panel discovery runs before the test installs the extension) and renders them with `Livewire::test()`. Without PHP `intl`, a one-line view replaces Filament's pagination, and the TLD table, whose bulk-selection counter needs `intl`, is checked through its table definition instead of rendered HTML.
+## Acceptance limits
 
-This repository's passing local checks do not claim native upload acceptance, MariaDB concurrency, actual browser/mobile behavior, real registrar writes, payment acceptance, production compatibility, or compatibility beyond Paymenter 1.5.9.
-
-Build a fresh native package with:
-
-```bash
-mise run build
-mise run check:public
-```
-
-The build task preserves previous releases under `dist/release-<timestamp>` and creates fresh output in `dist/release`. The builder reads only `Enom/`, requires its MIT `LICENSE`, and produces a single `Enom/` ZIP wrapper plus a member-hash manifest. Tests, docs, dependencies and private files cannot enter it. It uses fixed timestamps, order, permissions and compression settings, verifies archive readback and refuses existing artifacts. Reproducibility is checked within the same Python/zlib environment. Public checks require full Git history and scan it plus the unpacked ZIP with pinned gitleaks. Building never uploads or activates the extension.
+Passing offline checks do not establish native upload/install acceptance, MariaDB concurrency, actual browser/mobile/keyboard behavior, custom-theme completion, real registrar writes, incoming transfer completion, grace renewal acceptance, gateway settlement or SMTP delivery. Compatibility beyond Paymenter 1.5.9 remains unverified. See the [lifecycle reminder limitation](design/domain-lifecycle.md#reminders).

@@ -31,7 +31,7 @@ Without mise, use Python 3.10+, Node 22.23.1, system PHP 8.3/8.4 and Composer 2.
 
 Read [extension conventions](docs/paymenter-extension-conventions.md) before changing native integration or packaging. Put runtime code in `Enom/`. Keep Paymenter core, authentication, gateways, themes and native schema upstream. The extension retains its own tables and retains them during upgrades and uninstall.
 
-Use native services and invoices. Registrar writes require verified funding, current ownership and a resolved prior outcome. Preserve invoices, sponsorship cycles and uncertain-request history. Use encrypted credentials and bounded provider responses. Keep API tokens, transfer codes, contact payloads and reseller costs out of unauthorized views and logs.
+Use native services and invoices. Registrar writes require verified funding, current ownership and a resolved prior outcome. Preserve invoices, payment evidence, complimentary cost limits and uncertain-request history. Use encrypted credentials and bounded provider responses. Keep API tokens, transfer codes, contact payloads and reseller costs out of unauthorized views and logs.
 
 Cover financial changes with unpaid, partially paid and settled invoices, cancellation, changed prices and uncertain outcomes. Check UI permissions, escaping, retained input, keyboard access and narrow layouts. Tests use injected provider responses and disposable databases.
 
@@ -49,7 +49,7 @@ Use simple language in docs, UI text and comments. Use Conventional Commits, for
    ```
 
 4. Inspect the ZIP and `manifest.json` in `dist/release`. The archive must contain only the `Enom/` runtime and its MIT license. The build task preserves previous output under `dist/release-<timestamp>`. Public checks scan full Git history and the unpacked ZIP with gitleaks. Shallow clones must fetch full history first. Without mise, use `python3 scripts/dev.py build` and `python3 scripts/dev.py public` with gitleaks 8.30.1 on PATH. The underlying builder accepts a fresh output path with `python3 scripts/build.py --output-dir <path>` and refuses existing artifacts.
-5. Test installation and retained-data upgrade in a disposable Paymenter application. Verify migrations and the installed version after upload. Record any acceptance checks still missing.
+5. Test fresh installation and same-release retained-data reinstall in a disposable Paymenter application. This first release has no conversion for earlier development schemas. Verify the schema and installed version after upload; record missing acceptance checks. Validate future upgrades against their supported prior releases.
 6. Create a version tag and attach the ZIP, manifest and release notes to the release when publication is authorized.
 
-Builds do not upload or activate the extension. Back up both database and extension files before deploying. A rollback requires matching database and file backups because migrations are additive and uninstall retains data.
+Builds do not upload or activate the extension. Back up both database and extension files before deploying. Uninstall retains extension data. A rollback requires matching database and extension-file backups.
