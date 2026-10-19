@@ -44,6 +44,8 @@ def main():
         commands.append(('dependency', [str(PHP_TEST), '-r', "require 'tests/paymenter-test-app.php'; paymenterTestApp(); echo 'Pristine development dependency accepted.\\n';"]))
     if 'lint' in selected:
         commands.extend(('lint', [str(PHP_TEST), '-l', str(path.relative_to(ROOT))]) for area in ['Enom', 'tests'] for path in sorted((ROOT/area).rglob('*.php')))
+    if 'lint' in selected:
+        commands.append(('lint', [str(PHP_TEST), 'tests/Enom/php83-compatibility.php']))
     if 'package' in selected:
         commands.append(('package', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*.py']))
     for suite in SUITES:

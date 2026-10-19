@@ -6,7 +6,7 @@ It uses Paymenter's native services, cart, invoices and admin panel.
 
 ## Requirements
 
-- An unmodified Paymenter 1.5.9 installation. Other versions are untested.
+- An unmodified Paymenter 1.5.9 installation with PHP 8.3 or 8.4. Other versions are untested.
 - An Enom reseller account with API access, sufficient balance and the server's outbound IP allowed for the selected environment.
 - Paymenter's scheduler and queue worker. Set queue `retry_after` above the job timeout; 480 seconds is suitable.
 

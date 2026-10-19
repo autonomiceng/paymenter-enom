@@ -30,3 +30,15 @@ UI helpers use the native HTTP kernel and session login, real form keys and opti
 ## Acceptance limits
 
 Passing offline checks do not establish native upload/install acceptance, MariaDB concurrency, actual browser/mobile/keyboard behavior, custom-theme completion, real registrar writes, incoming transfer completion, grace renewal acceptance, gateway settlement or SMTP delivery. Compatibility beyond Paymenter 1.5.9 remains unverified. See the [lifecycle reminder limitation](design/domain-lifecycle.md#reminders).
+
+## Supported PHP
+
+Runtime source supports PHP 8.3 and 8.4, matching Paymenter 1.5.9. CI's separate PHP 8.3
+job parses every shipped PHP file and runs the offline token guard in
+`tests/Enom/php83-compatibility.php`. The guard rejects known PHP 8.4 function calls,
+asymmetric visibility, property hooks and unparenthesized `new` dereferences; synthetic
+positive/negative fixtures run with it. Namespaced user functions and function imports
+are resolved without executing source. The guard also runs in the offline lint suite.
+This is a targeted regression check, not exhaustive PHP compatibility analysis: dynamic
+function names, extension availability and untested runtime behavior remain outside it.
+The existing full CI suite still runs on PHP 8.3; local suites may use PHP 8.4.

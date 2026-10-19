@@ -62,3 +62,23 @@ jobs:
           path: /tmp/enom-tests-*
           include-hidden-files: true
           if-no-files-found: ignore
+
+  php83:
+    name: PHP 8.3 compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@44454db4f0199b8b9685a5d763dc37cbf79108e1 # 2.36.0
+        with:
+          php-version: '8.3'
+          extensions: tokenizer
+          coverage: none
+      - name: Check every shipped PHP file on PHP 8.3
+        shell: bash
+        run: |
+          php -r 'exit(PHP_VERSION_ID >= 80300 && PHP_VERSION_ID < 80400 ? 0 : 1);'
+          find Enom -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l
+          php tests/Enom/php83-compatibility.php
