@@ -159,14 +159,20 @@ $hostingBefore = $hosting->fresh()->getAttributes();
 
 // Invalid paid contacts are held with their frozen payload and one safe staff notice.
 $invalid = $payload; $invalid['contacts']['tech']['phone'] = 'private-value';
-$staffQueries = [];
-DB::listen(function ($query) use (&$staffQueries) { $staffQueries[] = $query->sql; });
-$held = setupOrder($owner, 'contact-hold.com', $invalid + ['registry' => ['us_nexus' => 'C31'], 'epp' => null]);
-verify($operations->funded($held), 'Native payment did not fund the setup fixture.');
+$held = setupOrder($owner, 'contact-hold.com', $invalid + ['registry' => ['us_nexus' => 'C31'], 'epp' => null], paid: false);
 $beforePayload = $held->payload;
-$beforeMoney = tableRows(['invoice_items', 'invoice_transactions']);
-RegistrationSetup::hold($held);
+$heldItem = InvoiceItem::findOrFail($held->invoice_item_id);
+$staffQueries = [];
+$captureStaffQueries = true;
+DB::listen(function ($query) use (&$staffQueries, &$captureStaffQueries) {
+    if ($captureStaffQueries) { $staffQueries[] = $query->sql; }
+});
+// Payment invokes the first, notifying hold; exclude checkout and subsequent idempotent holds.
+ExtensionHelper::addPayment($held->invoice_id, null, amount: (float) $heldItem->price, isCreditTransaction: true);
+$captureStaffQueries = false;
 verify(collect($staffQueries)->contains(fn ($sql) => str_contains($sql, 'from "users"') && str_contains($sql, 'exists') && str_contains($sql, '"roles"')), 'Contact hold loaded users without a staff role.');
+verify($operations->funded($held), 'Native payment did not fund the setup fixture.');
+$beforeMoney = tableRows(['invoice_items', 'invoice_transactions']);
 RegistrationSetup::hold($held);
 $held = $held->fresh();
 verify($held->state === 'held' && $held->safe_code === 'contact_details_required' && $held->payload === $beforePayload, 'Contact hold lost payload or state.');
