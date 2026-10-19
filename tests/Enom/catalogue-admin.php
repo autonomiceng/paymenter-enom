@@ -343,7 +343,7 @@ $review = collect($notice['actions'])->first();
 parse_str(parse_url($review['url'], PHP_URL_QUERY) ?? '', $destination);
 verify(($destination['tableFilters']['below_cost']['isActive'] ?? null) === '1', 'Several renewal losses do not activate the below-cost filter.');
 $unaffected = $renewalEnding->fresh()->replicate();
-$unaffected->tld = 'net'; $unaffected->sale_holds = []; $unaffected->save();
+$unaffected->tld = 'net'; $unaffected->sale_holds = ['renew' => 'No current price is available.']; $unaffected->save();
 $table = Livewire::test(ListTlds::class)->instance()->getTable();
 $affected = $table->getFilter('below_cost')->apply(Tld::where('server_id', $summaryServer->id), $destination['tableFilters']['below_cost'])
     ->orderBy('tld')->pluck('tld')->all();
