@@ -43,11 +43,35 @@ $unknown = ['state' => 'unconfirmed', 'source' => 'GetOrderDetail', 'amount' => 
 verifyMoney($order->status === 'success', 'Published XML did not parse as a successful order.');
 verifyMoney(RegistrarMoney::actualCost($order, $binding, $execution) === $confirmed, 'Published Register/$8.95 order lost exact confirmed cost.');
 
+// Both order fields accept exactly one optional dollar sign, independently.
+foreach (['8.95', '$8.95'] as $total) {
+    foreach (['8.95', '$8.95'] as $paid) {
+        $data = $order->data; $data['order']['orderbillamount'] = $total; $data['order']['orderdetail']['amountpaid'] = $paid;
+        verifyMoney(RegistrarMoney::actualCost(new RegistrarResult('success', null, $data), $binding, $execution) === $confirmed,
+            'Order dollar acceptance: '.$total.' / '.$paid);
+    }
+}
+foreach (['double_dollar' => '$$8.95', 'bare_dollar' => '$', 'leading_space' => ' $8.95',
+    'negative_prefix' => '-$8.95', 'negative_amount' => '$-8.95', 'trailing_dollar' => '8.95$',
+    'null' => null, 'integer' => 895, 'float' => 8.95, 'boolean' => true, 'array' => ['8.95'], 'object' => new stdClass] as $case => $invalid) {
+    foreach (['amountpaid', 'orderbillamount'] as $field) {
+        $data = $order->data;
+        if ($field === 'amountpaid') { $data['order']['orderdetail'][$field] = $invalid; }
+        else { $data['order'][$field] = $invalid; }
+        verifyMoney(RegistrarMoney::actualCost(new RegistrarResult('success', null, $data), $binding, $execution) === $unknown, 'Order dollar refusal: '.$field.' / '.$case);
+    }
+}
+foreach (['amountpaid', 'orderbillamount'] as $field) {
+    $data = $order->data;
+    if ($field === 'amountpaid') { $data['order']['orderdetail'][$field] = '$9.95'; }
+    else { $data['order'][$field] = '$9.95'; }
+    verifyMoney(RegistrarMoney::actualCost(new RegistrarResult('success', null, $data), $binding, $execution) === $unknown, 'Order dollar mismatch: '.$field);
+}
 // Header and per-item fields must agree independently; no allocation or rounding.
 foreach (['foreign_order', 'false_membership', 'missing_item', 'second_item', 'wrong_product', 'wrong_domain',
     'wrong_term', 'item_pending', 'item_failed', 'unbilled', 'header_currency', 'item_currency', 'null_currency',
     'blank_currency', 'different_total', 'decimal_overprecision', 'exponent', 'negative', 'comma', 'double_dollar',
-    'item_dollar', 'array_total', 'array_description', 'array_product', 'array_status', 'array_membership'] as $fault) {
+    'array_total', 'array_description', 'array_product', 'array_status', 'array_membership'] as $fault) {
     $data = $order->data;
     $item = &$data['order']['orderdetail'];
     switch ($fault) {
@@ -71,7 +95,6 @@ foreach (['foreign_order', 'false_membership', 'missing_item', 'second_item', 'w
         case 'negative': $data['order']['orderbillamount'] = '-$8.95'; break;
         case 'comma': $data['order']['orderbillamount'] = '$1,008.95'; break;
         case 'double_dollar': $data['order']['orderbillamount'] = '$$8.95'; break;
-        case 'item_dollar': $item['amountpaid'] = '$8.95'; break;
         case 'array_total': $data['order']['orderbillamount'] = ['$8.95', '$8.95']; break;
         case 'array_description': $item['description'] = ['testnum10.com', 'testnum10.com']; break;
         case 'array_product': $item['producttype'] = ['Register', 'Register']; break;

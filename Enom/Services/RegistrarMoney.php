@@ -193,11 +193,8 @@ final class RegistrarMoney
             || !is_string($item['status'] ?? null) || strtolower($item['status']) !== 'successful'
             || !is_string($item['orderstatus'] ?? null) || strtolower($item['orderstatus']) !== 'closed'
             || !is_string($item['producttype'] ?? null) || strtolower($item['producttype']) !== $requiredProduct) { return $unknown; }
-        $amount = self::decimal($item['amountpaid'] ?? null);
-        // The published XML/HTML/text examples prefix OrderBillAmount with $;
-        // AmountPaid is an undecorated decimal. Keep general quote parsing strict.
-        $bill = $header['orderbillamount'] ?? null;
-        $total = self::decimal(is_string($bill) && str_starts_with($bill, '$') ? substr($bill, 1) : $bill);
+        $amount = self::orderAmount($item['amountpaid'] ?? null);
+        $total = self::orderAmount($header['orderbillamount'] ?? null);
         if ($amount === null || $total !== $amount) { return $unknown; }
         // The official GetOrderDetail contract states OrderBillAmount is in USD.
         // With exactly one equal-priced item the total supplies its known currency.
@@ -207,6 +204,12 @@ final class RegistrarMoney
         return ['state' => 'confirmed', 'source' => 'GetOrderDetail', 'provider_order_id' => $id,
             'domain' => $expected, 'action' => $action, 'term' => $term, 'amount' => $amount,
             'currency' => 'USD', 'currency_source' => 'documented_orderbillamount_usd'];
+    }
+
+    /** Order amounts may carry one leading dollar sign; quote parsing stays strict. */
+    private static function orderAmount(mixed $value): ?string
+    {
+        return self::decimal(is_string($value) && str_starts_with($value, '$') ? substr($value, 1) : $value);
     }
 
     private static function currency(mixed $value): ?string
