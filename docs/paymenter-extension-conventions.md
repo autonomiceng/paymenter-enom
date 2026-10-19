@@ -8,6 +8,21 @@ Paymenter's v1.5.9 [ExtensionResource](https://github.com/Paymenter/Paymenter/bl
 
 Paymenter's `AdminPanelProvider` discovers `Admin/Resources` and `Admin/Pages` for server extensions. The extension ships the Domains, TLDs & pricing and Registrar requests resources and the Enom setup page there, under a **Domains** navigation group. Paymenter does not enable Filament strict authorization, so each model has a policy in `Policies/` (registered from `Enom::boot()`), and every action re-checks its permission: `admin.enom.manage`, `admin.enom.fund` for complimentary authority and `admin.enom.costs` for Enom costs. Costs are hidden from model serialisation and must not enter Livewire state for users without the costs permission. The Domains resource is the only route into Paymenter's admin global search; core offers no search hook.
 
+## Keeping Paymenter upgradable
+
+Paymenter must take new upstream releases without an extension release. Ship an extension release only when an upgrade actually breaks something.
+
+- **Public surfaces only.** Use the extension base classes and their hooks, service providers, our own routes and tables, Eloquent model events and observers, Filament registration, Paymenter events, jobs, config, and the documented theme mechanism.
+- **Never intercept Paymenter globally.** Do not rebind or subclass Paymenter services in the container, remap native routes, add global Livewire, middleware or request hooks (including `TrimStrings::skipWhen` or `TrimStrings::except`), replace database resolvers or query builders, monkeypatch, or edit core or vendor files.
+- **Never gate on the Paymenter version.** No supported-version list at runtime, and no refusal, pause or banner just because the version changed. Disable behavior only on evidence that it is broken.
+- **Guard invariants at the write.** A scoped observer refuses only the specific invalid change, logs it, and tells staff. Native renewals and saves continue for everything else.
+- **Check required hooks, not versions.** If a feature depends on a Paymenter class, event or listener, verify it at boot. If one is missing, pause only that feature and show staff exactly what is missing.
+- **Pin remaining internals in tests.** Where a guarantee still depends on Paymenter internals (template overrides, a core base class, native write paths), extend the sha256 upgrade tripwire. It runs only in tests and CI, names the changed files and the code that depends on them, and is never regenerated automatically. Update a hash only in the same reviewed change that re-checks or fixes the dependent code.
+- **Qualify releases in CI.** New Paymenter releases run the full suites, the tripwire and the override-template diff. A green run needs no extension release.
+- **Exceptions are architecture decisions.** A change that cannot follow these rules states why in its pull request and adds a tripwire before merge.
+
+Known exception, being removed: the `TrimStrings::skipWhen` hooks in `Enom/Enom.php` and `Enom/Services/TransferOrders.php`. Do not add more.
+
 ## ZIP and lifecycle hooks
 
 Paymenter v1.5.9's [UploadExtensionService](https://github.com/Paymenter/Paymenter/blob/v1.5.9/app/Services/Extensions/UploadExtensionService.php) accepts a ZIP containing the extension entry point directly or inside one wrapper directory. This project's ZIP uses `Enom/`. A full `extensions/Servers/Enom/` archive nesting is too deep for that native importer.
