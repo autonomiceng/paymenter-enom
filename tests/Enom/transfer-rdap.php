@@ -85,15 +85,35 @@ foreach ([['status' => 302, 'body' => '{}'], ['status' => 200, 'body' => str_rep
 }
 // Only an authoritative domain-object 404 is definitive; bootstrap and transport failures stay unknown.
 $notRegistered = ['allowed' => false, 'code' => 'transfer_not_registered', 'warning' => null, 'expires_at' => null];
-foreach ([['status' => 404, 'body' => ''], ['status' => 404, 'body' => '{"errorCode":404}']] as $response) {
+$unknown = ['allowed' => true, 'code' => null, 'warning' => Rdap::UNCHECKED, 'expires_at' => null];
+foreach ([
+    'empty' => ['', true],
+    'rdap-404' => ['{"errorCode":404}', true],
+    'no-error-code' => ['{"title":"Not found"}', true],
+    'empty-object' => ['{}', true],
+    'html-proxy' => ['<html>Proxy not found</html>', false],
+    'conflicting-code' => ['{"errorCode":500}', false],
+    'invalid-json' => ['{"errorCode":404', false],
+    'array' => ['[]', false],
+    'array-of-object' => ['[{"errorCode":404}]', false],
+    'null' => ['null', false],
+    'number' => ['404', false],
+    'string' => ['"not found"', false],
+    'boolean' => ['true', false],
+    'null-code' => ['{"errorCode":null}', false],
+    'string-code' => ['{"errorCode":"404"}', false],
+    'float-code' => ['{"errorCode":404.0}', false],
+    'whitespace' => [' ', false],
+] as $case => [$responseBody, $definitive]) {
     $calls404 = [];
-    $rdap404 = new Rdap(function ($url) use ($response, &$calls404) {
+    $rdap404 = new Rdap(function ($url) use ($responseBody, &$calls404) {
         $calls404[] = $url;
         return $url === 'https://data.iana.org/rdap/dns.json'
             ? ['status' => 200, 'body' => json_encode(['services' => [[['com'], ['https://rdap.example.com/']]]])]
-            : $response;
+            : ['status' => 404, 'body' => $responseBody];
     });
-    verify($rdap404->precheck('example.com') === $notRegistered && $calls404 === ['https://data.iana.org/rdap/dns.json', 'https://rdap.example.com/domain/example.com'], 'Domain endpoint 404 was not definitive.');
+    verify($rdap404->precheck('example.com') === ($definitive ? $notRegistered : $unknown), 'Domain endpoint 404 classification: '.$case);
+    verify($calls404 === ['https://data.iana.org/rdap/dns.json', 'https://rdap.example.com/domain/example.com'], 'Domain endpoint 404 route: '.$case);
 }
 $bootstrap404 = new Rdap(fn () => ['status' => 404, 'body' => '{"errorCode":404}']);
 $actual = $bootstrap404->precheck('example.com');
