@@ -16,7 +16,7 @@
                 <button class="enom-btn enom-btn--primary" type="submit">Use updated account details</button>
             </form>
         </div>
-        <p class="enom-small enom-muted" style="margin-top:.75rem">{{ $setup['action'] === 'transfer' ? 'The transfer continues' : 'Registration continues' }} as soon as we have your details.</p>
+        <p class="enom-small enom-muted" style="margin-top:.75rem">Your updated details will be checked. The order may need staff review before it can continue.</p>
     </div>
 @endif
 @if ($setup['nameservers_failed'] && $part !== 'hold')

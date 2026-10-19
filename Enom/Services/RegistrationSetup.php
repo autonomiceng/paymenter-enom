@@ -202,6 +202,12 @@ final class RegistrationSetup
             $payload = $operation->payload ?? [];
             $payload['contacts'] = $contacts;
             $changes = ['payload' => $payload];
+            $deadline = $operation->action === 'transfer' ? TransferOrders::deadline($operation) : null;
+            if ($deadline && $deadline <= \Carbon\CarbonImmutable::now('UTC')
+                && !app(TransferOrders::class)->needsCode($operation)) {
+                // A contact-only correction cannot authorize a late transfer send.
+                $changes += ['state' => 'held', 'safe_code' => 'transfer_setup_review_required', 'lease_expires_at' => null];
+            }
             if ($operationId !== null) {
                 $policy = $operation->policy ?? [];
                 $policy['contact_readmissions'][] = ['staff_id' => (int) $actor->id, 'reason' => $reason,

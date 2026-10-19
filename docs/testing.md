@@ -46,3 +46,7 @@ The existing full CI suite still runs on PHP 8.3; local suites may use PHP 8.4.
 `request-gates.php` includes synthetic worker-deadline cases at 244/245/246 seconds and claim
 lock delays. They retain a full request and 30-second finish margin, preserve unsent refusals and
 check request-local deadline isolation. SQLite and injected clocks do not prove production waits.
+
+`registration-setup.php` includes committed contact-recovery fixtures before, exactly at and
+after the transfer code deadline. They assert queued execution before the deadline, a retained
+staff review hold without enqueue at/after it, and unchanged saved inputs/payment/funding.

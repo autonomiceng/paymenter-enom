@@ -306,7 +306,7 @@ class OperationResource extends Resource
             ->size('sm')
             ->visible(fn (Operation $record) => Staff::user() && \Paymenter\Extensions\Servers\Enom\Services\RegistrationSetup::canResumeContacts($record, Staff::user()))
             ->schema([
-                Text::make('Uses the domain owner’s current account contacts for this unsent order, then checks payment and transfer requirements before resuming.'),
+                Text::make('Uses the domain owner’s current account contacts for this unsent order. Payment, transfer requirements and any staff review still apply.'),
                 Textarea::make('reason')->label('Reason')->required()->minLength(5)->maxLength(500)->rows(2),
             ])
             ->modalHeading('Use updated account details')
@@ -315,7 +315,7 @@ class OperationResource extends Resource
             ->action(function (Operation $record, array $data) {
                 $staff = Staff::require();
                 $reason = trim(preg_replace('/\s+/', ' ', (string) ($data['reason'] ?? '')));
-                Staff::attempt(fn () => \Paymenter\Extensions\Servers\Enom\Services\RegistrationSetup::resumeContacts($staff, (int) $record->id, $reason), 'Account details updated. The order will resume when its requirements are met.');
+                Staff::attempt(fn () => \Paymenter\Extensions\Servers\Enom\Services\RegistrationSetup::resumeContacts($staff, (int) $record->id, $reason), 'Account details saved. Any required order review remains in place.');
             });
     }
 

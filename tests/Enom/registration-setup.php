@@ -244,7 +244,7 @@ try {
 } finally { DB::rollBack(); }
 
 verify($hosting->fresh()->getAttributes() === $hostingBefore, 'Contact recovery changed same-domain hosting.');
-// A saved code passes the deadline gate; recovery still waits for commit before enqueueing.
+// A saved code survives the deadline; the rollback case proves only no enqueue before commit.
 $waitingTransfer = setupOrder($owner, 'waiting-transfer.com', $invalid + ['epp' => 'SYNTHETIC-CODE', 'registry' => []], 'transfer');
 RegistrationSetup::hold($waitingTransfer);
 $jobsBeforeRecovery = tableRows(['jobs']);
@@ -256,9 +256,11 @@ try {
     verify($updated->payload['epp'] === 'SYNTHETIC-CODE' && $updated->policy['paid_at'] === $waitingTransfer->policy['paid_at'], 'Contact recovery reset the transfer code or paid deadline.');
     app(Paymenter\Extensions\Servers\Enom\Services\TransferOrders::class)->assertReady($updated);
     $updated->refresh();
-    verify($updated->state === 'held' && $updated->safe_code === 'contact_details_required', 'Uncommitted contact recovery changed the transfer hold.');
+    verify($updated->state === 'held' && $updated->safe_code === 'transfer_setup_review_required', 'Late correction did not retain staff review inside the transaction.');
     verify(tableRows(['jobs']) === $jobsBeforeRecovery, 'Contact recovery queued a transfer before commit.');
 } finally { DB::rollBack(); }
+
+require dirname(__DIR__).'/late-contact-commit-cases.php';
 
 // Render the owned partial through web middleware so the form key is session-bound.
 $app['router']->get('/__enom-test-setup/{domain}', function (Illuminate\Http\Request $request, int $domain) {
@@ -462,15 +464,17 @@ verify($review === ['staff_id' => (int) $staff->id, 'reason' => 'Account details
     && array_diff_key($staffResumed->policy, ['contact_readmissions' => true]) === $staffPolicy, 'Staff recovery lost frozen policy or its audit.');
 verify($moneyBeforeResume === tableRows(['invoices', 'invoice_items', 'invoice_transactions', 'credits']) && $commands === [], 'Staff recovery changed payment evidence or contacted the registrar.');
 refuses(fn () => RegistrationSetup::resumeContacts($staff, $staffHeld->id, 'Account details corrected'), 'cannot be replaced', 'Repeated staff action recovered a queued request again.');
-foreach (['missing' => null, 'ready' => 'SYNTHETIC-STAFF-CODE', 'expired' => null] as $case => $code) {
+foreach (['missing' => null, 'ready' => 'SYNTHETIC-STAFF-CODE', 'expired' => null, 'saved-late' => 'SYNTHETIC-STAFF-CODE'] as $case => $code) {
     $staffTransfer = setupOrder($owner, 'staff-'.$case.'-transfer.com', $invalid + ['epp' => $code, 'registry' => []], 'transfer');
     RegistrationSetup::hold($staffTransfer);
     $staffTransfer->refresh();
-    if ($case === 'expired') { $staffTransfer->update(['policy' => array_replace($staffTransfer->policy, ['paid_at' => now()->subDays(31)->toIso8601String()])]); }
+    if (in_array($case, ['expired', 'saved-late'], true)) { $staffTransfer->update(['policy' => array_replace($staffTransfer->policy, ['paid_at' => now()->subDays(31)->toIso8601String()])]); }
     $paidAt = $staffTransfer->policy['paid_at'];
+    $staffJobs = count(queuedJobs(ExecuteOperation::class)); $staffMoney = tableRows(['invoices', 'invoice_items', 'invoice_transactions', 'credits']);
     $result = RegistrationSetup::resumeContacts($staff, $staffTransfer->id, 'Owner corrected account details');
-    verify($result->state === ($case === 'ready' ? 'queued' : 'awaiting_code') && $result->payload['epp'] === $code
+    verify($result->state === ($case === 'ready' ? 'queued' : ($case === 'saved-late' ? 'held' : 'awaiting_code')) && $result->payload['epp'] === $code
         && $result->policy['paid_at'] === $paidAt
+        && ($case !== 'saved-late' || $result->safe_code === 'transfer_setup_review_required' && count(queuedJobs(ExecuteOperation::class)) === $staffJobs && tableRows(array_keys($staffMoney)) === $staffMoney)
         && ($case !== 'expired' || $result->safe_code === 'transfer_code_timeout'), 'Staff transfer recovery bypassed the code/deadline gate or reset its snapshot: '.$case);
 }
 

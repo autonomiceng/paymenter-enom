@@ -21,7 +21,7 @@ final class RegistrationSetupController
             RegistrationSetup::replaceContacts($request->user(), $domain);
             FormKeys::consume($request, $context);
 
-            return $redirect->with('enom_status', 'Account details updated. We will continue once the order is ready.');
+            return $redirect->with('enom_status', 'Account details saved. Any required order review remains in place.');
         } catch (InputValidationException $error) {
             return $redirect->withErrors($error->errors);
         } catch (InvalidArgumentException) {

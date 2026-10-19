@@ -33,3 +33,8 @@ Native unpaid cleanup uses the configured threshold and can cancel a shared pend
 The extension ships no hosting upsell or native cart-field display. Those require the custom theme described in [the theme handoff](0.5-theme-handoff.md). No Paymenter core or stock theme patch is included.
 
 Sale flags, allowlist changes and sale holds apply to cart and checkout admission only. Paid initial requests still pass funding, ownership, contact, code/deadline, code-level ending support, registry/name-term and exact wholesale cost-cap checks before dispatch. Missing sale prices do not revoke paid fulfillment.
+
+A committed contact-only correction at or after the original transfer code deadline keeps a
+valid saved code, paid time, deadline and funding. It holds with `transfer_setup_review_required`
+and never enqueues execution. Before the deadline, ordinary ready work still resumes after
+commit. Payment callbacks and duplicate workers cannot release the late staff review gate.

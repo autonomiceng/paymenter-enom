@@ -171,6 +171,9 @@ final class Labels
         if ($operation?->safe_code === 'dispatch_lease_insufficient' && $state === 'held') {
             return 'Never sent: too little worker or claim time remained. Review the unsent request before resuming.';
         }
+        if ($operation?->safe_code === 'transfer_setup_review_required' && $state === 'held') {
+            return 'Never sent: contact details were corrected after the transfer code deadline. Review a refund as credit; this request cannot resume automatically.';
+        }
         if ($operation?->safe_code === 'contact_details_required' && $state === 'held') {
             return 'Needs account details. Ask the customer to save their account details, then use updated account details on the domain page.';
         }
