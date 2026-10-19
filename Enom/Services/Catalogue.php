@@ -294,7 +294,8 @@ class Catalogue
             $prices['transfer'] = [];
         }
         if (!$tld->renew_enabled || $tld->renew_price === null) {
-            foreach (['register', 'transfer'] as $action) { $holds[$action] ??= 'An annual renewal price is required.'; $prices[$action] = []; }
+            $reason = $tld->renew_enabled ? 'An annual renewal price is required.' : 'Renewal is turned off. Turn on Renew to sell this ending.';
+            foreach (['register', 'transfer'] as $action) { $holds[$action] ??= $reason; $prices[$action] = []; }
         }
         $tld->sale_holds = $holds;
         $tld->save();

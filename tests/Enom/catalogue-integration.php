@@ -168,6 +168,8 @@ foreach ([1, 2] as $repeat) {
 $net->refresh()->fill(['renew_enabled' => false]);
 $catalogue->publish($net);
 verify(!$net->orderable() && $net->price('renew') === null, 'Explicit renewal disable left new sales available.');
+verify($net->renew_price !== null && ($net->sale_holds['register'] ?? null) === 'Renewal is turned off. Turn on Renew to sell this ending.',
+    'Disabled renewal with a retained price was held as a missing price.');
 verify($catalogue->sync($server->id)['renewals_below_cost'] === [], 'Disabled renewal reported as still billed.');
 $costOverride = [];
 $catalogue->syncCosts($server->id);
