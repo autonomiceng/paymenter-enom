@@ -61,7 +61,22 @@ foreach ([1 => '15.55', 2 => '8.95', 3 => '8.9500'] as $years => $expected) {
 }
 foreach (['disabled', 'wrong-shape', 'malformed-price', 'missing-price'] as $case) {
     $api = new EnomApi(new RegistrarClient('offline_uid', 'offline_token', fn () => fixture('enom-pe-getproductprice-'.$case.'.xml'), null, true));
-    check($api->productPrice('net', 'register', 2)->code === 'product_price_unavailable', 'Unsafe product price accepted: '.$case);
+    $result = $api->productPrice('net', 'register', 2);
+    check($result->status === 'unknown' && $result->code === ($case === 'disabled' ? 'product_price_unavailable' : 'product_price_malformed'), 'Unsafe product price classified incorrectly: '.$case);
+}
+foreach (['false', 'FALSE', 'FaLsE', '0'] as $enabled) {
+    $body = '<interface-response><Command>PE_GetProductPrice</Command><ErrCount>0</ErrCount><Done>true</Done>'
+        .'<productprice><productenabled>'.$enabled.'</productenabled></productprice></interface-response>';
+    $api = new EnomApi(new RegistrarClient('offline_uid', 'offline_token', fn () => $body, null, true));
+    $result = $api->productPrice('net', 'register');
+    check($result->status === 'unknown' && $result->code === 'product_price_unavailable', 'Explicitly disabled product was not unavailable: '.$enabled);
+}
+foreach (['<price>8.95</price>', '<productenabled><flag>true</flag></productenabled><price>8.95</price>',
+    '<productenabled>maybe</productenabled><price>8.95</price>', '<productenabled>True</productenabled><price><amount>8.95</amount></price>'] as $fields) {
+    $body = '<interface-response><Command>PE_GetProductPrice</Command><ErrCount>0</ErrCount><Done>true</Done><productprice>'.$fields.'</productprice></interface-response>';
+    $api = new EnomApi(new RegistrarClient('offline_uid', 'offline_token', fn () => $body, null, true));
+    $result = $api->productPrice('net', 'register');
+    check($result->status === 'unknown' && $result->code === 'product_price_malformed', 'Malformed success was not a failed price read.');
 }
 foreach (['renew' => 16, 'transfer' => 19] as $action => $type) {
     $sent = [];

@@ -55,9 +55,12 @@ final class EnomApi
         if ($result->status !== 'success') { return $result; }
         $enabled = $result->value('productprice.productenabled');
         $price = $result->value('productprice.price');
+        if (is_string($enabled) && in_array(strtolower($enabled), ['false', '0'], true)) {
+            return new RegistrarResult('unknown', 'product_price_unavailable');
+        }
         if (!is_string($enabled) || !in_array(strtolower($enabled), ['true', '1'], true)
             || !is_string($price) || !preg_match('/^[0-9]{1,8}(?:\.[0-9]{1,4})?$/D', $price)) {
-            return new RegistrarResult('unknown', 'product_price_unavailable');
+            return new RegistrarResult('unknown', 'product_price_malformed');
         }
         return $result;
     }
