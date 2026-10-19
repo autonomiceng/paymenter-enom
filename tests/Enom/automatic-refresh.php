@@ -109,6 +109,7 @@ foreach (['all', 'partial', 'recover', 'throws'] as $mode) {
     $app->instance(DomainOperations::class, $reader);
     $reader->reconcile($operation->id);
     $audit = $operation->fresh()->getAttributes();
+    $savedSnapshot = $domain->fresh()->snapshot;
     $beforeMoney = tableRows(['invoices', 'invoice_items', 'invoice_transactions', 'credits']);
     $calls->exchangeArray([]); $state['refresh'] = true; $state['fail'] = $mode === 'all' ? true : ($mode === 'partial' ? 'partial' : false);
     $token = $server->settings()->where('key', 'token')->value('value');
@@ -121,7 +122,7 @@ foreach (['all', 'partial', 'recover', 'throws'] as $mode) {
         catch (Throwable $error) {}
         verify(($error !== null) === ($attempt <= $failures), 'Unsuccessful refresh did not reach the worker.');
         if ($mode === 'all') {
-            verify($error instanceof RuntimeException && $error->getMessage() === 'Registrar refresh did not complete any reads.'
+            verify($error instanceof RuntimeException && $error->getMessage() === 'Enom did not answer, so nothing changed. Showing the last saved details.'
                 && $error->getPrevious() === null, 'All-failed refresh exposed provider exception text.');
         }
         if ($attempt <= $failures && $attempt < 3) {
@@ -147,7 +148,7 @@ foreach (['all', 'partial', 'recover', 'throws'] as $mode) {
         verify(($snapshot['locked'] ?? null) === null && empty($snapshot['nameservers'])
             && ($snapshot['registrar_dns'] ?? null) === null, 'Failed read invented known facts.');
         verify(($mode === 'all' ? $calls->getArrayCopy() === array_merge(...array_fill(0, 3, $refreshCommands))
-                && $snapshot['read_status']['lock'] === 'unknown' : count($calls) === 0)
+                && $domain->fresh()->snapshot === $savedSnapshot : count($calls) === 0)
             && ($domain->fresh()->observation['error'] ?? null) === 'refresh_failed'
             && ($domain->fresh()->observation['status'] ?? null) === 'stale', 'Exhausted refresh did not record final observation failure.');
     }

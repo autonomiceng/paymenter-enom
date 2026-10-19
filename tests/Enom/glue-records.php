@@ -46,7 +46,8 @@ $transport = function (string $command, array $params) use (&$registry, &$reques
         }
         return file_get_contents($fixtures.$file);
     }
-    // Refresh reads: an empty but well-formed answer for each section.
+    // Refresh reads: nameservers answer so the refresh has a successful read; other sections are empty but well-formed.
+    if ($command === 'GetDNS') { return enomXml($command, '<dns>ns1.example-host.com</dns><dns>ns2.example-host.com</dns><UseDNS>custom</UseDNS><RRPCode>200</RRPCode>'); }
     return enomXml($command, '<RRPCode>200</RRPCode>');
 };
 $operations = new DomainOperations(new EnomApi(new RegistrarClient('offline-account', 'offline-token', $transport)),

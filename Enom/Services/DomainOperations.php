@@ -1344,6 +1344,10 @@ class DomainOperations
         // Refresh one bounded set per request; callers can choose cached pages while provider is unavailable.
         $api = $this->apiForServer((int) $domain->server_id, true);
         $snapshot = $api->snapshot($domain->domain);
+        // A read with no successful section must not replace the saved details.
+        if (!in_array('success', $snapshot['read_status'] ?? [], true)) {
+            throw new \RuntimeException('Enom did not answer, so nothing changed. Showing the last saved details.');
+        }
         // Enom can't list child nameservers, so re-check the ones we know about (null = gone).
         $checked = [];
         $examined = [];

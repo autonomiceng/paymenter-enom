@@ -163,6 +163,26 @@ try {
     $app['auth']->forgetGuards();
 }
 
+// A failed registrar read keeps the cached record and reports the failure.
+$failedDomain = clientDomain($client, ['domain' => 'staff-refresh-failed.com']);
+$failedSnapshot = $failedDomain->fresh()->snapshot;
+$app->instance(StaffDomains::class, new StaffDomains(new \Paymenter\Extensions\Servers\Enom\Services\DomainOperations(
+    new \Paymenter\Extensions\Servers\Enom\Api\EnomApi(new \Paymenter\Extensions\Servers\Enom\Api\RegistrarClient('offline-account', 'offline-token',
+        function (string $command): string { throw new RuntimeException('Injected registrar transport failure'); })),
+    fn () => ['uid' => 'offline-account', 'token' => 'offline-token', 'environment' => 'test'])));
+session()->forget('filament.notifications');
+try {
+    $failedPage = Livewire::actingAs($manager)->test(ViewDomain::class, ['record' => $failedDomain->id]);
+    $failedPage->callAction('refresh');
+    $failedNotice = collect(session('filament.claimed_notifications', session('filament.notifications', [])))->last();
+    verify(($failedNotice['status'] ?? null) === 'danger', 'Failed staff refresh did not report the failure.');
+    verify($failedDomain->fresh()->snapshot === $failedSnapshot && str_contains($failedPage->html(), 'ns1.example-host.com'),
+        'Failed staff refresh changed the cached record.');
+} finally {
+    $app->instance(StaffDomains::class, $staffDomains);
+    $app['auth']->forgetGuards();
+}
+
 // ---------------------------------------------------------------- Filament pages: no costs or encrypted columns in state or HTML
 $secret = ['payload' => 'PAYLOAD-SECRET-7Q', 'policy' => 'POLICY-SECRET-7Q', 'cost' => 'COST-SECRET-7Q', 'snapshot' => 'SNAPSHOT-SECRET-7Q', 'observation' => 'OBSERVATION-SECRET-7Q', 'renewal' => 'RENEWAL-SECRET-7Q'];
 $domainForAdmin = clientDomain($client, ['domain' => 'admin-view.com', 'observation' => ['note' => $secret['observation']], 'renewal_policy' => ['enabled' => true, 'note' => $secret['renewal']]],

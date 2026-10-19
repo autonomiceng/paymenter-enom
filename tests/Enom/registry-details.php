@@ -108,7 +108,8 @@ verify(DomainManager::safeSnapshot($domain->snapshot)['registry'] === ['us_nexus
 // The page model filters malformed stored values.
 verify(DomainManager::safeSnapshot(['registry' => ['ok_field' => 'yes', 'Bad Key' => 'x', 'too_long' => str_repeat('a', 256), 'array_value' => ['x'], 0 => 'y']])['registry'] === ['ok_field' => 'yes'], 'Malformed snapshot registry values reached the page.');
 // A refresh keeps the registry details (Enom does not return them).
-$refreshTransport = new DomainOperations(new EnomApi(new RegistrarClient('offline-account', 'offline-token', fn (string $command) => enomXml($command, '<RRPCode>200</RRPCode>'))),
+$refreshTransport = new DomainOperations(new EnomApi(new RegistrarClient('offline-account', 'offline-token', fn (string $command) => enomXml($command,
+    $command === 'GetDNS' ? '<dns>ns1.example-host.com</dns><dns>ns2.example-host.com</dns><UseDNS>custom</UseDNS>' : '<RRPCode>200</RRPCode>'))),
     fn () => ['uid' => 'offline-account', 'token' => 'offline-token', 'operations_enabled' => true]);
 $refreshTransport->refreshDomain($domain->id, $client);
 verify(($domain->fresh()->snapshot['registry'] ?? null) === ['us_nexus' => 'C31', 'global_cc_us' => 'GB', 'us_purpose' => 'P1'], 'Refresh dropped the registry details.');
