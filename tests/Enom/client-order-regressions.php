@@ -22,7 +22,7 @@ app(Illuminate\Contracts\Debug\ExceptionHandler::class)->stopIgnoring(Symfony\Co
 app(Illuminate\Contracts\Debug\ExceptionHandler::class)->reportable(function (Symfony\Component\HttpKernel\Exception\HttpException $error) use (&$reportedActions) {
     $reportedActions[] = $error; return false;
 });
-$moved = clientDomain($owner, ['domain' => 'moved-service.com', 'server_id' => $server->id + 100]);
+$moved = clientDomain($owner, ['domain' => 'moved-service.test', 'server_id' => $server->id + 100]);
 verify($extension->getActions($moved->service) === [['type' => 'button', 'label' => 'Manage domain', 'url' => route('enom.domains.show', $moved->id)]]
     && count($reportedActions) === 1, 'Snapshot failure lost its plain service action or was not reported.');
 
@@ -84,7 +84,7 @@ for ($attempt = 1; $attempt <= 60; $attempt++) {
     verify($response->getStatusCode() === 200, 'Shared availability budget refused request '.$attempt.' before 60.');
 }
 $beforeLimit = count($providerCommands);
-verify(enomHttp($owner, 'GET', '/domains/transfer?name=throttle-blocked.com')->getStatusCode() === 429
+verify(enomHttp($owner, 'GET', '/domains/transfer?name=throttle-blocked.test')->getStatusCode() === 429
     && count($providerCommands) === $beforeLimit, 'The 61st shared availability request was not throttled before the registrar check.');
 enomResetThrottle($owner);
 
