@@ -40,6 +40,8 @@ class Tld extends Model
     public function server() { return $this->belongsTo(Server::class); }
     public function getDisplayNameAttribute(): string { return '.'.$this->tld; }
 
+    public function saleReadFailed(): bool { return $this->saleReadFailed; }
+
     public function orderable(?string $action = null): bool
     {
         if (!$this->enabled || !$this->saleRenewalAvailable()) { return false; }

@@ -382,6 +382,7 @@ $pricingData = $pricingController->pricing(Illuminate\Http\Request::create('/dom
 $controllerQueries = count(DB::getQueryLog());
 DB::disableQueryLog();
 verify(array_column($pricingData['rows'], 'tld') === ['com', 'org', 'xyz'] && $controllerQueries <= $tenTermQueries + 4, 'Pricing controller reloaded the catalogue or changed filtering: '.$controllerQueries);
+require dirname(__DIR__).'/late-sale-read-cases.php';
 $memo = $queryTlds['com']->fresh();
 $memo->terms();
 $memo->price('transfer');

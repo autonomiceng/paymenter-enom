@@ -483,10 +483,12 @@ class Catalogue
     {
         return ($endings ?? $this->orderable())->map(function (Tld $tld) {
             $terms = $tld->terms();
-            return ['tld' => $tld->tld, 'register' => $tld->price('register'), 'renew' => $tld->price('renew'),
-                'transfer' => $tld->price('transfer'), 'min_years' => $terms ? min($terms) : null,
+            $register = $tld->price('register'); $renew = $tld->price('renew'); $transfer = $tld->price('transfer');
+            if ($tld->saleReadFailed()) { return null; }
+            return ['tld' => $tld->tld, 'register' => $register, 'renew' => $renew,
+                'transfer' => $transfer, 'min_years' => $terms ? min($terms) : null,
                 'max_years' => $terms ? max($terms) : null];
-        })->all();
+        })->filter(static fn ($row) => $row !== null)->values()->all();
     }
 
     /** @return list<string> */

@@ -50,3 +50,6 @@ check request-local deadline isolation. SQLite and injected clocks do not prove 
 `registration-setup.php` includes committed contact-recovery fixtures before, exactly at and
 after the transfer code deadline. They assert queued execution before the deadline, a retained
 staff review hold without enqueue at/after it, and unchanged saved inputs/payment/funding.
+
+`catalogue-integration.php` also covers sale reads that fail after the orderable filter has
+passed: the affected public row disappears, diagnostics are reported and other endings remain.
