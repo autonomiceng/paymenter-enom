@@ -16,6 +16,8 @@ class ExecuteOperation implements ShouldQueue
     // Six admission reads plus dispatch/readback/cost reads fit ten request
     // timeouts. The claim survives the worker timeout and cleanup margin.
     public const EXECUTION_TIMEOUT_SECONDS = 10 * RegistrarClient::REQUEST_TIMEOUT_SECONDS + 50;
+    // Leave evidence persistence and domain/operation lock waits ahead of the worker alarm.
+    public const FINISH_SECONDS = 30;
     public const CLAIM_LEASE_SECONDS = self::EXECUTION_TIMEOUT_SECONDS + 60;
     public int $tries = 1;
     public int $timeout = self::EXECUTION_TIMEOUT_SECONDS;

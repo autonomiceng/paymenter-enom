@@ -65,5 +65,6 @@ try { $operations->toggleRenewalPreference($user, $domain->id, true); }
 catch (RuntimeException) { $refused = true; }
 verify($refused, 'Unresolved domain re-enabled renewal billing.');
 verify(Illuminate\Support\Facades\DB::table('enom_operations')->orderBy('id')->get()->toArray() == $beforeOps && $providerCalls === 0, 'Preference disable changed registrar history or called provider.');
+require __DIR__.'/../worker-deadline-cases.php';
 echo 'Unresolved domain request gates: '.$checks.' passed; exact duplicates preserved; no provider calls.'.PHP_EOL;
 $successful = true;

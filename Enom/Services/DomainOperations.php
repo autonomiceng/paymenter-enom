@@ -34,7 +34,9 @@ class DomainOperations
         return $domain->billing_managed && ($domain->renewal_policy['staff_disposition_hold'] ?? false) === true;
     }
 
-    public function __construct(private ?EnomApi $api = null, private ?Closure $guard = null) {}
+    public function __construct(private ?EnomApi $api = null, private ?Closure $guard = null, private ?Closure $workerClock = null) {}
+
+    private function workerTime(): float { return $this->workerClock ? ($this->workerClock)() : hrtime(true) / 1e9; }
 
     public function apiForServer(int $serverId, bool $readOnly = false): EnomApi
     {
@@ -255,10 +257,13 @@ class DomainOperations
 
     public function execute(int $operationId): Operation
     {
+        $entry = $this->workerTime();
+        $dispatchUntil = $entry + ExecuteOperation::EXECUTION_TIMEOUT_SECONDS - ExecuteOperation::FINISH_SECONDS;
         $operation = Operation::findOrFail($operationId);
         if (!in_array($operation->state, ['queued', 'running'], true)) { return $operation; }
         // Configuration failure is pre-send: no claim and no provider call.
-        $api = $this->apiForServer((int) $operation->domain->server_id);
+        $api = $this->apiForServer((int) $operation->domain->server_id)
+            ->withRequestWindow(fn (): float => $dispatchUntil - $this->workerTime());
         $claimed = DB::transaction(function () use ($operationId) {
             $operation = Operation::findOrFail($operationId);
             User::whereKey($operation->domain->user_id)->lockForUpdate()->firstOrFail();
@@ -296,9 +301,13 @@ class DomainOperations
         if (!$claimed) { return $operation->fresh(); }
         // No database transaction or domain row lock spans a provider request.
         try {
+            if ($this->workerTime() + RegistrarClient::REQUEST_TIMEOUT_SECONDS > $dispatchUntil) {
+                return $this->finish($claimed, 'held', 'dispatch_lease_insufficient');
+            }
             $domain = $claimed->domain;
             if (in_array($claimed->action, ['register', 'transfer'], true)) {
                 $result = $api->search($domain->domain);
+                if ($result->code === 'request_deadline' || $this->workerTime() + RegistrarClient::REQUEST_TIMEOUT_SECONDS > $dispatchUntil) { return $this->finish($claimed, 'held', 'dispatch_lease_insufficient'); }
                 $check = EnomApi::normalize('search', $result);
                 if ($result->status !== 'success' || ($check['is_premium'] ?? null) !== false || ($check['is_platinum'] ?? null) !== false || ($check['is_eap'] ?? null) !== false
                     || ($claimed->action === 'register' && ($check['min_reg_year'] ?? 1) > max(1, (int) $claimed->term))
@@ -310,6 +319,7 @@ class DomainOperations
                 if (!$tld || $claimed->action === 'register' && ((int) $claimed->term > (int) ($check['max_reg_year'] ?? 10)
                     || (int) $claimed->term < max(1, (int) ($check['min_reg_year'] ?? 1)) || (int) $claimed->term > 10)) { return $this->finish($claimed, 'held', 'registration_term_changed'); }
                 $price = $api->productPrice($domain->tld, $claimed->action, (int) $claimed->term);
+                if ($price->code === 'request_deadline' || $this->workerTime() + RegistrarClient::REQUEST_TIMEOUT_SECONDS > $dispatchUntil) { return $this->finish($claimed, 'held', 'dispatch_lease_insufficient'); }
                 $raw = $price->value('productprice.price');
                 $amount = null;
                 if ($price->status === 'success' && in_array(strtolower((string) $price->value('productprice.productenabled')), ['true', '1'], true)
@@ -373,7 +383,7 @@ class DomainOperations
             }
             // Re-check immediately at dispatch as well as on each transport request.
             $this->apiForServer((int) $domain->server_id);
-            $sealed = $this->sealDispatch($claimed);
+            $sealed = $this->sealDispatch($claimed, $dispatchUntil);
             if (!$sealed) { return $claimed->fresh(); }
             $claimed = $sealed;
             $domain = $claimed->domain;
@@ -841,11 +851,11 @@ class DomainOperations
     }
 
     /** Commit a unique marker after the final checks, with no provider request inside the lock. */
-    private function sealDispatch(Operation $claimed): ?Operation
+    private function sealDispatch(Operation $claimed, float $dispatchUntil): ?Operation
     {
         // Owner read before the transaction so no snapshot predates the lock.
         $ownerId = Domain::whereKey($claimed->domain_id)->value('user_id');
-        return DB::transaction(function () use ($claimed, $ownerId) {
+        return DB::transaction(function () use ($claimed, $ownerId, $dispatchUntil) {
             // Lock the owner before the domain and request.
             User::whereKey($ownerId)->lockForUpdate()->first();
             $domain = Domain::whereKey($claimed->domain_id)->lockForUpdate()->firstOrFail();
@@ -854,7 +864,8 @@ class DomainOperations
             if ($current->state !== 'running' || !$this->sameClaim($current, $claimed)
                 || array_key_exists('dispatch_attempted_at', $current->policy ?? [])
                 || array_key_exists('execution', $current->cost ?? []) || $current->provider_order_id !== null) { return null; }
-            if (!$current->lease_expires_at || $current->lease_expires_at->lt(now()->addSeconds(RegistrarClient::REQUEST_TIMEOUT_SECONDS))) {
+            if ($this->workerTime() + RegistrarClient::REQUEST_TIMEOUT_SECONDS > $dispatchUntil
+                || !$current->lease_expires_at || $current->lease_expires_at->lt(now()->addSeconds(RegistrarClient::REQUEST_TIMEOUT_SECONDS))) {
                 $this->finish($current, 'held', 'dispatch_lease_insufficient');
                 return null;
             }
@@ -867,6 +878,10 @@ class DomainOperations
             }
             if (!$this->initialReady($current)) { return null; }
             $policy = $current->policy ?? [];
+            if ($this->workerTime() + RegistrarClient::REQUEST_TIMEOUT_SECONDS > $dispatchUntil) {
+                $this->finish($current, 'held', 'dispatch_lease_insufficient');
+                return null;
+            }
             $policy['dispatch_attempted_at'] = now()->toIso8601String();
             $current->setAttribute('policy', $policy);
             $changed = Operation::whereKey($current->id)->where('state', 'running')

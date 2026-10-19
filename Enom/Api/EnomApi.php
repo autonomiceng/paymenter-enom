@@ -17,6 +17,13 @@ final class EnomApi
     private array $suffixes = ['com', 'net', 'us'];
 
     public function __construct(private RegistrarClient $client) {}
+    /** A request-local client; never leak a worker deadline into later operations. */
+    public function withRequestWindow(\Closure $remaining): self
+    {
+        $copy = clone $this;
+        $copy->client = $this->client->withRequestWindow($remaining);
+        return $copy;
+    }
     public function isReadOnly(): bool { return $this->client->isReadOnly(); }
     public function environment(): string { return $this->client->environment(); }
 

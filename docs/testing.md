@@ -42,3 +42,7 @@ are resolved without executing source. The guard also runs in the offline lint s
 This is a targeted regression check, not exhaustive PHP compatibility analysis: dynamic
 function names, extension availability and untested runtime behavior remain outside it.
 The existing full CI suite still runs on PHP 8.3; local suites may use PHP 8.4.
+
+`request-gates.php` includes synthetic worker-deadline cases at 244/245/246 seconds and claim
+lock delays. They retain a full request and 30-second finish margin, preserve unsent refusals and
+check request-local deadline isolation. SQLite and injected clocks do not prove production waits.

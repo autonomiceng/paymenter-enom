@@ -168,6 +168,9 @@ final class Labels
         if ($operation?->safe_code === 'transfer_not_registered' && $state === 'held') {
             return 'Never sent: the registry has no record of this name, so it can’t be transferred. Refund it as credit instead of resuming.';
         }
+        if ($operation?->safe_code === 'dispatch_lease_insufficient' && $state === 'held') {
+            return 'Never sent: too little worker or claim time remained. Review the unsent request before resuming.';
+        }
         if ($operation?->safe_code === 'contact_details_required' && $state === 'held') {
             return 'Needs account details. Ask the customer to save their account details, then use updated account details on the domain page.';
         }

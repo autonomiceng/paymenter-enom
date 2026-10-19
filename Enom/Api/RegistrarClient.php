@@ -57,6 +57,14 @@ final class RegistrarClient
         }
     }
 
+    private ?\Closure $remaining = null;
+    public function withRequestWindow(\Closure $remaining): self
+    {
+        $copy = clone $this;
+        $copy->remaining = $remaining;
+        return $copy;
+    }
+
     public function isReadOnly(): bool { return $this->readOnly; }
     public function environment(): string { return $this->environment; }
     public function __debugInfo(): array { return ['environment' => $this->environment, 'injected_transport' => $this->transport !== null, 'read_only' => $this->readOnly]; }
@@ -111,9 +119,12 @@ final class RegistrarClient
             catch (\Throwable) { return new RegistrarResult('rejected', 'guard_refused'); }
         }
         try {
+            // Recheck after the configuration guard, immediately before each physical exchange.
+            $milliseconds = $this->remaining ? (int) floor(($this->remaining)() * 1000) : self::REQUEST_TIMEOUT_SECONDS * 1000;
+            if ($milliseconds < 1) { return new RegistrarResult('unknown', 'request_deadline'); }
             $body = $this->transport !== null
                 ? ($this->transport)($command, $parameters)
-                : $this->send($command, $parameters);
+                : $this->send($command, $parameters, min(self::REQUEST_TIMEOUT_SECONDS * 1000, $milliseconds));
             if (!is_string($body)) {
                 return new RegistrarResult('unknown', 'transport');
             }
@@ -124,7 +135,7 @@ final class RegistrarClient
         }
     }
 
-    private function send(string $command, array $parameters): string
+    private function send(string $command, array $parameters, int $milliseconds): string
     {
         if ($this->uid === '' || $this->token === '' || (getenv('SSLKEYLOGFILE') !== false && getenv('SSLKEYLOGFILE') !== '')) {
             throw new \RuntimeException('Registrar runtime guard refused the request.');
@@ -147,7 +158,7 @@ final class RegistrarClient
             CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
             CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTPS,
             CURLOPT_CONNECTTIMEOUT => 8,
-            CURLOPT_TIMEOUT => self::REQUEST_TIMEOUT_SECONDS,
+            CURLOPT_TIMEOUT_MS => $milliseconds,
             CURLOPT_LOW_SPEED_LIMIT => 32,
             CURLOPT_LOW_SPEED_TIME => 10,
             CURLOPT_FRESH_CONNECT => true,

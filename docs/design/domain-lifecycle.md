@@ -43,3 +43,13 @@ Native editable templates `enom_domain_expiring` and `enom_domain_expired` respe
 Reminders require a matching active Service and an active, expired or grace domain. Open invoices show payment guidance. Domains needing nothing from the client get only the 30-day notice; an already queued or completed renewal for that expiry suppresses reminders. Renewal-off notices explain expiry and link to renewal. Missed offsets have a two-day catch-up window; newer due notices supersede older ones.
 
 A process crash after claiming and before sending can lose a reminder. Reminder claims lock the domain, not the native Service row. These are retained limitations. Transfer-code emails use their separate durable enqueue contract in [ordering](ordering.md).
+
+## Worker completion budget
+
+Execution records a monotonic entry time before configuration and claim locks. The worker has
+300 seconds; every provider exchange ends by entry + 270 seconds, leaving 30 seconds for durable
+evidence/finish writes and their domain/operation lock waits. A seal needs a full 25-second
+request inside that cap as well as the original claim lease. Insufficient time holds definitely
+unsent work with `dispatch_lease_insufficient`; staff see the same code for either time limit.
+Readbacks share the cap and stop when exhausted. The 360-second claim lease is recovery time,
+not permission to outlive the worker. Unbounded database blocking is outside this finite margin.
