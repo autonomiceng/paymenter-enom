@@ -29,11 +29,11 @@ function response(string $command, string $body): RegistrarResult {
     return (new RegistrarClient('offline_uid', 'offline_token', fn () => $body))->execute($command);
 }
 
-check(DomainName::parse(' DEMO.COM ') === ['domain' => 'demo.com', 'sld' => 'demo', 'tld' => 'com'], 'canonical name');
+check(DomainName::parse(' EXAMPLE.COM ') === ['domain' => 'example.com', 'sld' => 'example', 'tld' => 'com'], 'canonical name');
 check(DomainName::parse('a.com')['sld'] === 'a', 'valid single-character domain');
-check(DomainName::parse('demo.co.uk', ['uk', 'co.uk'])['tld'] === 'co.uk', 'longest suffix');
+check(DomainName::parse('example.co.uk', ['uk', 'co.uk'])['tld'] === 'co.uk', 'longest suffix');
 check(DomainName::parse('xn--bcher-kva.com')['sld'] === 'xn--bcher-kva', 'ASCII punycode');
-foreach (['', '-demo.com', 'demo-.com', 'ab--demo.com', 'sub.demo.com', 'demo.net', 'demo.com.', 'https://demo.com', 'demo.com:443', 'de mo.com', 'demo.com/path', "demo\0.com", str_repeat('a', 64).'.com'] as $name) {
+foreach (['', '-example.com', 'example-.com', 'ab--example.com', 'sub.example.com', 'example.net', 'example.com.', 'https://example.com', 'example.com:443', 'de mo.com', 'example.com/path', "example\0.com", str_repeat('a', 64).'.com'] as $name) {
     rejects(fn () => DomainName::parse($name), 'invalid name rejected');
 }
 
@@ -132,7 +132,7 @@ $privacyUtc = response('GetWPPSInfo', xml('GetWPPSInfo', str_replace('<WPPSExpDa
 check($privacyUtc->confirmedPrivacyExpiry()?->format(DATE_ATOM) === '2027-11-26T12:00:00+00:00', 'privacy UTC attribute overrides Pacific date');
 check(response('GetWPPSInfo', xml('GetWPPSInfo', str_replace('Nov 26, 2027', 'Nov 31, 2027', $privacyXml)))->confirmedPrivacyExpiry() === null, 'invalid privacy calendar day rejected');
 
-$search = response('Check', xml('Check', '<Domains><Domain><Name>demo.com</Name><RRPCode>210</RRPCode><IsPremium>False</IsPremium><IsPlatinum>False</IsPlatinum><IsEAP>False</IsEAP><Prices><Currency/><Registration>8.95</Registration><Renewal>8.95</Renewal><Transfer>9.50</Transfer></Prices></Domain></Domains>'));
+$search = response('Check', xml('Check', '<Domains><Domain><Name>example.com</Name><RRPCode>210</RRPCode><IsPremium>False</IsPremium><IsPlatinum>False</IsPlatinum><IsEAP>False</IsEAP><Prices><Currency/><Registration>8.95</Registration><Renewal>8.95</Renewal><Transfer>9.50</Transfer></Prices></Domain></Domains>'));
 $quote = EnomApi::normalize('search', $search);
 check($quote['available'] && $quote['is_premium'] === false, 'single domain search flags');
 check($quote['currency'] === '' && $quote['prices']['registration'] === '8.95', 'blank currency and provider cost preserved without tariff inference');
@@ -144,10 +144,10 @@ check(response('TP_GetOrderDetail', xml('TP_GetOrderDetail', '<transferorderdeta
 check(response('TP_GetOrderDetail', xml('TP_GetOrderDetail', '<transferorderdetail><statusid>32</statusid></transferorderdetail>'))->status === 'rejected', 'invalid EPP transfer rejected');
 check(response('TP_GetOrderDetail', xml('TP_GetOrderDetail', '<transferorderdetail><statusid>5</statusid></transferorderdetail>'))->status === 'success', 'detail5 complete');
 check(response('TP_GetOrder', xml('TP_GetOrder', '<transferorder><statusid>5</statusid></transferorder>'))->status === 'pending', 'header5 draft differs from detail5');
-$orderXml = '<Order><OrderID>12345</OrderID><Result>true</Result><OrderDetail><Description>demo.com</Description><Status>Successful</Status><OrderStatus>Closed</OrderStatus><Quantity>1</Quantity><ExpiryDatetime>10/12/2027 9:00:00 PM</ExpiryDatetime></OrderDetail></Order>';
+$orderXml = '<Order><OrderID>12345</OrderID><Result>true</Result><OrderDetail><Description>example.com</Description><Status>Successful</Status><OrderStatus>Closed</OrderStatus><Quantity>1</Quantity><ExpiryDatetime>10/12/2027 9:00:00 PM</ExpiryDatetime></OrderDetail></Order>';
 $order = response('GetOrderDetail', xml('GetOrderDetail', $orderXml));
 check($order->status === 'success', 'provider order item completion');
-check(EnomApi::normalize('order', $order)['domain'] === 'demo.com' && EnomApi::normalize('order', $order)['term'] === 1, 'order identity and term normalizer');
+check(EnomApi::normalize('order', $order)['domain'] === 'example.com' && EnomApi::normalize('order', $order)['term'] === 1, 'order identity and term normalizer');
 check(response('GetOrderDetail', xml('GetOrderDetail', str_replace('<OrderStatus>Closed</OrderStatus>', '<OrderStatus>Open</OrderStatus>', $orderXml)))->status === 'pending', 'open order pending');
 check(response('GetOrderDetail', xml('GetOrderDetail', '<Order><Result>false</Result></Order>'))->status === 'unknown', 'unknown ownership never confirms order');
 check(response('GetOrderDetail', xml('GetOrderDetail', '<Order><Result>True</Result></Order>'))->status === 'unknown', 'order without detail rows remains unknown');
@@ -157,72 +157,72 @@ $api = new EnomApi(new RegistrarClient('uid', 'token', function ($command, $para
     $requests[] = [$command, $parameters];
     return xml($command);
 }));
-$contact = ['first_name' => 'Demo', 'last_name' => 'Owner', 'organization_name' => 'Example', 'address1' => '1 Example Street', 'city' => 'Test', 'state_province' => 'CA', 'postal_code' => '90000', 'country' => 'US', 'email_address' => 'demo@example.invalid', 'phone' => '+1.5551234567'];
-$api->register('demo.com', ['registrant' => $contact, 'admin' => $contact], [], 1);
+$contact = ['first_name' => 'Example', 'last_name' => 'Owner', 'organization_name' => 'Example', 'address1' => '1 Example Street', 'city' => 'Test', 'state_province' => 'CA', 'postal_code' => '90000', 'country' => 'US', 'email_address' => 'example@example.invalid', 'phone' => '+1.5551234567'];
+$api->register('example.com', ['registrant' => $contact, 'admin' => $contact], [], 1);
 $register = end($requests)[1];
 check($register['RenewName'] === 0 && $register['UseDNS'] === 'default' && $register['UseCreditCard'] === 'no', 'registration funded externally and default DNS');
 check(isset($register['RegistrantFirstName'], $register['AdminFirstName']), 'complete contact role sets preserved');
-$api->renew('demo.com'); check(!isset(end($requests)[1]['OverrideOrder']), 'renew does not bypass duplicate guard');
-$api->transfer('demo.com', $contact, 'PRIVATE-EPP');
+$api->renew('example.com'); check(!isset(end($requests)[1]['OverrideOrder']), 'renew does not bypass duplicate guard');
+$api->transfer('example.com', $contact, 'PRIVATE-EPP');
 check(end($requests)[1]['DomainCount'] === 1 && end($requests)[1]['AuthInfo1'] === 'PRIVATE-EPP' && end($requests)[1]['Renew'] === 0, 'one transfer private EPP and no auto renew');
-$api->updateContact('demo.com', 'tech', $contact);
+$api->updateContact('example.com', 'tech', $contact);
 check(end($requests)[1]['ContactType'] === 'TECH' && isset(end($requests)[1]['TechFirstName']) && !isset(end($requests)[1]['RegistrantFirstName']), 'contact update cannot clear other roles');
-$api->setLock('demo.com', true); check(end($requests)[1]['UnlockRegistrar'] === 0, 'lock flag inverse');
-$api->setLock('demo.com', false); check(end($requests)[1]['UnlockRegistrar'] === 1, 'unlock flag inverse');
-$api->synchronizeEpp('demo.com'); check(end($requests)[1]['EmailEPP'] === 'False', 'EPP synchronization never sends email');
-$api->disableProviderRenewal('demo.com'); check(end($requests)[1]['RenewFlag'] === 0 && end($requests)[1]['WPPSRenew'] === 0, 'domain and privacy provider auto renew off');
-$api->purchasePrivacy('demo.com'); check(end($requests)[1]['Service'] === 'WPPS' && end($requests)[1]['RenewName'] === 0, 'privacy purchase does not silently auto-renew');
-$api->enablePrivacy('demo.com', false); check(end($requests)[0] === 'DisableServices', 'privacy toggle separate from purchase');
-$api->setNameservers('demo.com', ['NS1.EXAMPLE.COM', 'ns2.example.com']);
+$api->setLock('example.com', true); check(end($requests)[1]['UnlockRegistrar'] === 0, 'lock flag inverse');
+$api->setLock('example.com', false); check(end($requests)[1]['UnlockRegistrar'] === 1, 'unlock flag inverse');
+$api->synchronizeEpp('example.com'); check(end($requests)[1]['EmailEPP'] === 'False', 'EPP synchronization never sends email');
+$api->disableProviderRenewal('example.com'); check(end($requests)[1]['RenewFlag'] === 0 && end($requests)[1]['WPPSRenew'] === 0, 'domain and privacy provider auto renew off');
+$api->purchasePrivacy('example.com'); check(end($requests)[1]['Service'] === 'WPPS' && end($requests)[1]['RenewName'] === 0, 'privacy purchase does not silently auto-renew');
+$api->enablePrivacy('example.com', false); check(end($requests)[0] === 'DisableServices', 'privacy toggle separate from purchase');
+$api->setNameservers('example.com', ['NS1.EXAMPLE.COM', 'ns2.example.com']);
 check(end($requests)[1]['NS1'] === 'ns1.example.com' && !isset(end($requests)[1]['UseDNS']), 'custom DNS exclusive default');
-$api->setHosts('demo.com', [['name' => '@', 'type' => 'A', 'address' => '192.0.2.1'], ['name' => '@', 'type' => 'TXT', 'address' => 'v=spf1 -all'], ['name' => '@', 'type' => 'MX', 'address' => 'mail.example.com.', 'mx_pref' => 20]]);
+$api->setHosts('example.com', [['name' => '@', 'type' => 'A', 'address' => '192.0.2.1'], ['name' => '@', 'type' => 'TXT', 'address' => 'v=spf1 -all'], ['name' => '@', 'type' => 'MX', 'address' => 'mail.example.com.', 'mx_pref' => 20]]);
 check(end($requests)[1]['HostName3'] === '@' && end($requests)[1]['RecordType2'] === 'TXT' && end($requests)[1]['MXPref3'] === 20, 'whole ordinary DNS set preserved');
-$api->setSrv('demo.com', [['service' => 'sip', 'protocol' => 'tcp', 'priority' => 1, 'weight' => 10, 'port' => 5060, 'target' => 'sip.example.com.']]);
+$api->setSrv('example.com', [['service' => 'sip', 'protocol' => 'tcp', 'priority' => 1, 'weight' => 10, 'port' => 5060, 'target' => 'sip.example.com.']]);
 check(end($requests)[1]['Target1'] === 'sip.example.com.' && end($requests)[1]['Protocol1'] === 'TCP', 'SRV documented inputs');
 $ds = ['algorithm' => 13, 'digest_type' => 2, 'key_tag' => 1234, 'digest' => str_repeat('AB', 32)];
-$api->addDnssec('demo.com', $ds); $added = end($requests)[1];
-$api->deleteDnssec('demo.com', $ds); check(end($requests)[1] === $added, 'delete DS exact matching tuple');
-foreach ([fn () => $api->register('demo.com', $contact, [], 0), fn () => $api->register('demo.com', $contact, [], 11), fn () => $api->renew('demo.com', 0), fn () => $api->renew('demo.com', 11), fn () => $api->register('xn--bcher-kva.com', $contact), fn () => $api->updateContact('demo.com', 'billing', $contact), fn () => $api->updateContact('demo.com', 'registrant', ['first_name' => 'Only']), fn () => $api->setNameservers('demo.com', ['ns1.example.com']), fn () => $api->setHosts('demo.com', []), fn () => $api->setHosts('demo.com', [['name' => '@', 'type' => 'A', 'address' => 'bad']]), fn () => $api->setHosts('demo.com', [['name' => '@', 'type' => 'MX', 'address' => 'mail.example.com']]), fn () => $api->addDnssec('demo.com', ['algorithm' => 13, 'digest_type' => 2, 'key_tag' => 1234, 'digest' => 'BAD']), fn () => $api->orders('10/12/2026', '10/12/2027')] as $invalid) {
+$api->addDnssec('example.com', $ds); $added = end($requests)[1];
+$api->deleteDnssec('example.com', $ds); check(end($requests)[1] === $added, 'delete DS exact matching tuple');
+foreach ([fn () => $api->register('example.com', $contact, [], 0), fn () => $api->register('example.com', $contact, [], 11), fn () => $api->renew('example.com', 0), fn () => $api->renew('example.com', 11), fn () => $api->register('xn--bcher-kva.com', $contact), fn () => $api->updateContact('example.com', 'billing', $contact), fn () => $api->updateContact('example.com', 'registrant', ['first_name' => 'Only']), fn () => $api->setNameservers('example.com', ['ns1.example.com']), fn () => $api->setHosts('example.com', []), fn () => $api->setHosts('example.com', [['name' => '@', 'type' => 'A', 'address' => 'bad']]), fn () => $api->setHosts('example.com', [['name' => '@', 'type' => 'MX', 'address' => 'mail.example.com']]), fn () => $api->addDnssec('example.com', ['algorithm' => 13, 'digest_type' => 2, 'key_tag' => 1234, 'digest' => 'BAD']), fn () => $api->orders('10/12/2026', '10/12/2027')] as $invalid) {
     $before = count($requests); rejects($invalid, 'invalid facade request'); check(count($requests) === $before, 'invalid request makes no transport call');
 }
 
 // 0.4 terms: registration and renewal accept 1-10 years and send exactly that NumYears.
 foreach ([1, 3, 10] as $years) {
-    $api->register('demo.com', ['registrant' => $contact], [], $years); check(end($requests)[0] === 'Purchase' && end($requests)[1]['NumYears'] === $years, 'Purchase NumYears '.$years);
-    $api->renew('demo.com', $years); check(end($requests)[0] === 'Extend' && end($requests)[1]['NumYears'] === $years, 'Extend NumYears '.$years);
+    $api->register('example.com', ['registrant' => $contact], [], $years); check(end($requests)[0] === 'Purchase' && end($requests)[1]['NumYears'] === $years, 'Purchase NumYears '.$years);
+    $api->renew('example.com', $years); check(end($requests)[0] === 'Extend' && end($requests)[1]['NumYears'] === $years, 'Extend NumYears '.$years);
 }
 // Registry details travel as name=value parameters on Purchase and TP_CreateOrder, after the ordinary parameters.
-$api->register('demo.com', ['registrant' => $contact], [], 2, ['us_nexus' => 'C31', 'global_cc_us' => 'GB', 'us_purpose' => 'P1']);
+$api->register('example.com', ['registrant' => $contact], [], 2, ['us_nexus' => 'C31', 'global_cc_us' => 'GB', 'us_purpose' => 'P1']);
 $purchase = end($requests)[1];
 check($purchase['us_nexus'] === 'C31' && $purchase['global_cc_us'] === 'GB' && $purchase['us_purpose'] === 'P1' && $purchase['NumYears'] === 2
     && array_slice(array_keys($purchase), -3) === ['us_nexus', 'global_cc_us', 'us_purpose'], 'Purchase registry fields not sent as name=value');
-$api->transfer('demo.com', ['registrant' => $contact], 'PRIVATE-EPP', ['us_nexus' => 'C11', 'us_purpose' => 'P3']);
+$api->transfer('example.com', ['registrant' => $contact], 'PRIVATE-EPP', ['us_nexus' => 'C11', 'us_purpose' => 'P3']);
 check(end($requests)[0] === 'TP_CreateOrder' && end($requests)[1]['us_nexus'] === 'C11' && end($requests)[1]['us_purpose'] === 'P3' && end($requests)[1]['AuthInfo1'] === 'PRIVATE-EPP', 'TP_CreateOrder registry fields not sent');
-$api->register('demo.com', ['registrant' => $contact]);
+$api->register('example.com', ['registrant' => $contact]);
 check(!array_filter(array_keys(end($requests)[1]), fn ($key) => str_starts_with($key, 'us_')), 'Registry fields leaked into a request without them');
 foreach ([['Bad Name' => 'x'], ['us_nexus' => ''], ['us_nexus' => str_repeat('a', 256)], ['us_nexus' => "C11\n"], ['us_nexus' => ['C11']], [0 => 'C11'], ['us_nexus' => 11]] as $registry) {
     $before = count($requests);
-    rejects(fn () => $api->register('demo.com', ['registrant' => $contact], [], 1, $registry), 'invalid registry field rejected');
-    rejects(fn () => $api->transfer('demo.com', ['registrant' => $contact], 'PRIVATE-EPP', $registry), 'invalid transfer registry field rejected');
+    rejects(fn () => $api->register('example.com', ['registrant' => $contact], [], 1, $registry), 'invalid registry field rejected');
+    rejects(fn () => $api->transfer('example.com', ['registrant' => $contact], 'PRIVATE-EPP', $registry), 'invalid transfer registry field rejected');
     check(count($requests) === $before, 'invalid registry field makes no transport call');
 }
 // Glue commands: canonical host, validated IP, documented parameter names.
-$api->registerHost('NS1.Demo.com.', enomPublicIpv4(1));
-check(end($requests) === ['RegisterNameServer', ['Add' => 'true', 'NSName' => 'ns1.demo.com', 'IP' => enomPublicIpv4(1)]], 'RegisterNameServer parameters');
-$api->updateHost('ns1.demo.com', enomPublicIpv4(1), enomPublicIpv6(1));
-check(end($requests) === ['UpdateNameServer', ['NS' => 'ns1.demo.com', 'OldIP' => enomPublicIpv4(1), 'NewIP' => enomPublicIpv6(1)]], 'UpdateNameServer parameters');
-$api->deleteHost('ns1.demo.com');
-check(end($requests) === ['DeleteNameServer', ['NS' => 'ns1.demo.com']], 'DeleteNameServer parameters');
-$api->hostStatus('ns1.demo.com');
-check(end($requests) === ['CheckNSStatus', ['CheckNSName' => 'ns1.demo.com']], 'CheckNSStatus parameters');
-foreach ([fn () => $api->registerHost('demo.com', enomPublicIpv4(1)), fn () => $api->registerHost('ns1.demo.com', 'not-an-ip'), fn () => $api->registerHost('ns1..demo.com', enomPublicIpv4(1)),
-    fn () => $api->registerHost('-ns.demo.com', enomPublicIpv4(1)), fn () => $api->updateHost('ns1.demo.com', '', enomPublicIpv4(1)), fn () => $api->deleteHost(str_repeat('a', 63).'.'.str_repeat('b', 63).'.'.str_repeat('c', 63).'.'.str_repeat('d', 63).'.com')] as $invalid) {
+$api->registerHost('NS1.Example.com.', enomPublicIpv4(1));
+check(end($requests) === ['RegisterNameServer', ['Add' => 'true', 'NSName' => 'ns1.example.com', 'IP' => enomPublicIpv4(1)]], 'RegisterNameServer parameters');
+$api->updateHost('ns1.example.com', enomPublicIpv4(1), enomPublicIpv6(1));
+check(end($requests) === ['UpdateNameServer', ['NS' => 'ns1.example.com', 'OldIP' => enomPublicIpv4(1), 'NewIP' => enomPublicIpv6(1)]], 'UpdateNameServer parameters');
+$api->deleteHost('ns1.example.com');
+check(end($requests) === ['DeleteNameServer', ['NS' => 'ns1.example.com']], 'DeleteNameServer parameters');
+$api->hostStatus('ns1.example.com');
+check(end($requests) === ['CheckNSStatus', ['CheckNSName' => 'ns1.example.com']], 'CheckNSStatus parameters');
+foreach ([fn () => $api->registerHost('example.com', enomPublicIpv4(1)), fn () => $api->registerHost('ns1.example.com', 'not-an-ip'), fn () => $api->registerHost('ns1..example.com', enomPublicIpv4(1)),
+    fn () => $api->registerHost('-ns.example.com', enomPublicIpv4(1)), fn () => $api->updateHost('ns1.example.com', '', enomPublicIpv4(1)), fn () => $api->deleteHost(str_repeat('a', 63).'.'.str_repeat('b', 63).'.'.str_repeat('c', 63).'.'.str_repeat('d', 63).'.com')] as $invalid) {
     $before = count($requests); rejects($invalid, 'invalid glue request'); check(count($requests) === $before, 'invalid glue request makes no transport call');
 }
 // Read-only clients never send glue writes.
 $readOnlyGlue = []; $readOnlyApi = new EnomApi(new RegistrarClient('uid', 'token', function ($command) use (&$readOnlyGlue) { $readOnlyGlue[] = $command; return xml($command); }, null, true));
-check($readOnlyApi->registerHost('ns1.demo.com', enomPublicIpv4(1))->code === 'read_only' && $readOnlyApi->deleteHost('ns1.demo.com')->code === 'read_only' && $readOnlyGlue === [], 'read-only client sent a glue write');
-check($readOnlyApi->hostStatus('ns1.demo.com')->status === 'success' && $readOnlyGlue === ['CheckNSStatus'], 'CheckNSStatus is not a read');
+check($readOnlyApi->registerHost('ns1.example.com', enomPublicIpv4(1))->code === 'read_only' && $readOnlyApi->deleteHost('ns1.example.com')->code === 'read_only' && $readOnlyGlue === [], 'read-only client sent a glue write');
+check($readOnlyApi->hostStatus('ns1.example.com')->status === 'success' && $readOnlyGlue === ['CheckNSStatus'], 'CheckNSStatus is not a read');
 // Order normalizer reports multi-year terms from Quantity.
 check(EnomApi::normalize('order', response('GetOrderDetail', xml('GetOrderDetail', str_replace('<Quantity>1</Quantity>', '<Quantity>3</Quantity>', $orderXml))))['term'] === 3, 'order term from quantity');
 
@@ -235,14 +235,14 @@ foreach (['default', 'DeFaUlT', 'ours', 'OuRs', 'custom'] as $useDns) {
 $dnsWithAttributes = response('GetDNS', xml('GetDNS', '<dns>ns1.example.com</dns><UseDNS source="provider">default</UseDNS>'));
 check(is_array($dnsWithAttributes->data['usedns']), 'UseDNS with attributes retains its array shape');
 check(EnomApi::normalize('nameservers', $dnsWithAttributes)['uses_enom_dns'] === null, 'array-shaped UseDNS remains unknown');
-$contacts = response('GetContacts', xml('GetContacts', '<GetContacts><Registrant><FirstName>Demo</FirstName><LastName>Owner</LastName></Registrant><Tech><FirstName>Other</FirstName></Tech></GetContacts>'));
+$contacts = response('GetContacts', xml('GetContacts', '<GetContacts><Registrant><FirstName>Example</FirstName><LastName>Owner</LastName></Registrant><Tech><FirstName>Other</FirstName></Tech></GetContacts>'));
 check(EnomApi::normalize('contacts', $contacts)['contacts']['tech']['first_name'] === 'Other', 'untouched contacts roundtrip');
-$contactStatusApi = new EnomApi(new RegistrarClient('uid', 'token', fn ($command) => xml($command, '<GetContacts><Registrant><FirstName>Demo</FirstName></Registrant><PendingVerification>True</PendingVerification><TransferLock>True</TransferLock></GetContacts>')));
-$contactStatusSnapshot = $contactStatusApi->snapshot('demo.com', ['contacts']);
+$contactStatusApi = new EnomApi(new RegistrarClient('uid', 'token', fn ($command) => xml($command, '<GetContacts><Registrant><FirstName>Example</FirstName></Registrant><PendingVerification>True</PendingVerification><TransferLock>True</TransferLock></GetContacts>')));
+$contactStatusSnapshot = $contactStatusApi->snapshot('example.com', ['contacts']);
 check($contactStatusSnapshot['contact_status'] === ['pending_verification' => true, 'transfer_locked' => true], 'pending verification and transfer lock retained in flat snapshot');
-check($contactStatusSnapshot['contacts']['registrant']['first_name'] === 'Demo', 'contact values and pending status retained independently');
-$missingStatusApi = new EnomApi(new RegistrarClient('uid', 'token', fn ($command) => xml($command, '<GetContacts><Registrant><FirstName>Demo</FirstName></Registrant></GetContacts>')));
-check($missingStatusApi->snapshot('demo.com', ['contacts'])['contact_status'] === ['pending_verification' => null, 'transfer_locked' => null], 'absent provider status does not imply verified or unlocked');
+check($contactStatusSnapshot['contacts']['registrant']['first_name'] === 'Example', 'contact values and pending status retained independently');
+$missingStatusApi = new EnomApi(new RegistrarClient('uid', 'token', fn ($command) => xml($command, '<GetContacts><Registrant><FirstName>Example</FirstName></Registrant></GetContacts>')));
+check($missingStatusApi->snapshot('example.com', ['contacts'])['contact_status'] === ['pending_verification' => null, 'transfer_locked' => null], 'absent provider status does not imply verified or unlocked');
 // Contact containers accept role-prefixed fields.
 $prefixedContactsBody = '<GetContacts>';
 $expectedContacts = [];
@@ -282,10 +282,10 @@ check((EnomApi::normalize('contacts', $attributedContactField)['contacts']['regi
 $repeatedContactRole = response('GetContacts', xml('GetContacts', '<GetContacts><Registrant><RegistrantFirstName>One</RegistrantFirstName></Registrant><Registrant><RegistrantFirstName>Two</RegistrantFirstName></Registrant></GetContacts>'));
 check(EnomApi::normalize('contacts', $repeatedContactRole) === ['status' => 'unknown'], 'repeated contact role cannot turn into an empty partial form');
 $prefixedSnapshotApi = new EnomApi(new RegistrarClient('uid', 'token', fn ($command) => xml($command, $prefixedContactsBody)));
-check($prefixedSnapshotApi->snapshot('demo.com', ['contacts'])['contacts']['admin']['address1'] === 'synthetic-admin-address1', 'prefixed contacts reach actual flat snapshot consumed by management forms');
+check($prefixedSnapshotApi->snapshot('example.com', ['contacts'])['contacts']['admin']['address1'] === 'synthetic-admin-address1', 'prefixed contacts reach actual flat snapshot consumed by management forms');
 $srv = response('GetDomainSRVHosts', xml('GetDomainSRVHosts', '<srv-records><srv><HostID>1</HostID><HostName>_sip</HostName><Protocol>_TCP</Protocol><Address>sip.example.com.</Address><Priority>1</Priority><Weight>10</Weight><Port>5060</Port></srv></srv-records>'));
 check(EnomApi::normalize('srv', $srv)['srv'][0]['service'] === 'sip', 'documented SRV container and service prefix');
-$info = response('GetDomainInfo', xml('GetDomainInfo', '<GetDomainInfo><domainname domainnameid="123">demo.com</domainname><status><belongs-to party-id="private">reseller</belongs-to><expiration>2027-10-12</expiration></status></GetDomainInfo>'));
+$info = response('GetDomainInfo', xml('GetDomainInfo', '<GetDomainInfo><domainname domainnameid="123">example.com</domainname><status><belongs-to party-id="private">reseller</belongs-to><expiration>2027-10-12</expiration></status></GetDomainInfo>'));
 check(EnomApi::normalize('info', $info)['belongs_to'] === 'reseller', 'attributes retain identity text without losing it');
 check($info->summary() === ['status' => 'success', 'code' => null], 'summary excludes private payload');
 check(json_encode($info) === '{"status":"success","code":null}', 'JSON serialization excludes provider identity payload');
@@ -300,7 +300,7 @@ check(response('AddDnsSec', xml('AddDnsSec', '<ResponseCode>555</ResponseCode>')
 check(EnomApi::normalize('dnssec', response('GetDnsSec', xml('GetDnsSec')))['status'] === 'unknown', 'unknown DNSSEC shape cannot prove absence');
 $subsetCalls = [];
 $subsetApi = new EnomApi(new RegistrarClient('uid', 'token', function ($command) use (&$subsetCalls) { $subsetCalls[] = $command; return xml($command, '<reg-lock>1</reg-lock>'); }));
-$snapshot = $subsetApi->snapshot('demo.com', ['lock']);
+$snapshot = $subsetApi->snapshot('example.com', ['lock']);
 check($subsetCalls === ['GetRegLock'] && $snapshot['locked'] === true && $snapshot['read_status'] === ['lock' => 'success'], 'partial snapshot bounds command count and keeps flat fields');
 $detailCalls = [];
 $detailFailure = false;
@@ -309,21 +309,21 @@ $detailApi = new EnomApi(new RegistrarClient('uid', 'token', function ($command)
     if ($detailFailure) { throw new RuntimeException('Synthetic transport failure'); }
     return xml($command, $command === 'GetDNS' ? '<dns>dns1.name-services.com</dns><dns>dns2.name-services.com</dns><UseDNS>default</UseDNS>' : '<reg-lock>1</reg-lock>');
 }));
-$details = $detailApi->snapshot('demo.com', ['nameservers', 'lock']);
+$details = $detailApi->snapshot('example.com', ['nameservers', 'lock']);
 check($detailCalls === ['GetDNS', 'GetRegLock'] && $details['locked'] === true && $details['registrar_dns'] === true
     && $details['nameservers'] === ['dns1.name-services.com', 'dns2.name-services.com'], 'refresh snapshot retains lock, nameservers and registrar DNS together');
 $detailFailure = true; $detailCalls = [];
-$details = $detailApi->snapshot('demo.com', ['nameservers', 'lock']);
+$details = $detailApi->snapshot('example.com', ['nameservers', 'lock']);
 check($detailCalls === ['GetDNS', 'GetRegLock'] && $details['locked'] === null && $details['nameservers'] === []
     && !isset($details['registrar_dns']) && $details['read_status'] === ['nameservers' => 'unknown', 'lock' => 'unknown'], 'failed snapshot records unknown facts without retries');
-$transfer = response('TP_GetOrder', xml('TP_GetOrder', '<transferorder><transferorderid>123</transferorderid><statusid>3</statusid><transferorderdetail><sld>demo</sld><tld>com</tld><statusid>5</statusid></transferorderdetail></transferorder>'));
+$transfer = response('TP_GetOrder', xml('TP_GetOrder', '<transferorder><transferorderid>123</transferorderid><statusid>3</statusid><transferorderdetail><sld>example</sld><tld>com</tld><statusid>5</statusid></transferorderdetail></transferorder>'));
 check(EnomApi::normalize('transfer', $transfer)['completed'] && EnomApi::normalize('transfer', $transfer)['provider_order_id'] === '123', 'single transfer header and detail prove same domain operation');
 // Getter response contracts use synthetic domain and order identifiers.
 // The actual order has a numeric header state and a Closed detail, so the existing contract applies.
-$observedOrder = response('GetOrderDetail', xml('GETORDERDETAIL', '<Order><OrderID>12345</OrderID><Result>True</Result><OrderStatus>6</OrderStatus><StatusDesc>Successful</StatusDesc><OrderDetail><Description>demo.com</Description><Status>Successful</Status><Quantity>1</Quantity><OrderStatus>Closed</OrderStatus><ExpiryDatetime>10/12/2027 11:00:00 PM</ExpiryDatetime></OrderDetail></Order>'));
+$observedOrder = response('GetOrderDetail', xml('GETORDERDETAIL', '<Order><OrderID>12345</OrderID><Result>True</Result><OrderStatus>6</OrderStatus><StatusDesc>Successful</StatusDesc><OrderDetail><Description>example.com</Description><Status>Successful</Status><Quantity>1</Quantity><OrderStatus>Closed</OrderStatus><ExpiryDatetime>10/12/2027 11:00:00 PM</ExpiryDatetime></OrderDetail></Order>'));
 $observedOrderNormalized = EnomApi::normalize('order', $observedOrder);
 check($observedOrder->status === 'success' && $observedOrderNormalized['completed'] === true
-    && $observedOrderNormalized['provider_order_id'] === '12345' && $observedOrderNormalized['domain'] === 'demo.com'
+    && $observedOrderNormalized['provider_order_id'] === '12345' && $observedOrderNormalized['domain'] === 'example.com'
     && $observedOrderNormalized['term'] === 1, 'actual numeric order header preserves Closed successful detail identity');
 $observedRenewal = response('GetRenew', xml('GETRENEW', '<auto-renew>0</auto-renew><IDProtectRenew>0</IDProtectRenew>'));
 check($observedRenewal->status === 'success' && EnomApi::normalize('renewal', $observedRenewal)['auto_renew'] === false, 'actual auto-renew zero confirms provider renewal disabled');

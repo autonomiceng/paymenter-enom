@@ -46,6 +46,7 @@ function registrationReader($operation, array $overrides = []): array {
     return [new DomainOperations(new EnomApi($client), fn () => ['uid' => 'offline', 'token' => 'offline']), $commands];
 }
 // An unpaid invoice or a paid label without a successful transaction cannot authorize recovery.
+// Native remaining counts only succeeded payments, so the balance guard refuses both cases first.
 foreach (['pending', 'paid'] as $invoiceStatus) {
     [$unfundedDomain, $unfunded] = fundedRegistration();
     Illuminate\Database\Eloquent\Model::withoutEvents(function () use ($unfunded, $invoiceStatus) {
@@ -54,6 +55,7 @@ foreach (['pending', 'paid'] as $invoiceStatus) {
         $invoice->update(['status' => $invoiceStatus]);
     });
     [$unfundedReader, $unfundedCommands] = registrationReader($unfunded);
+    verify((float) App\Models\Invoice::findOrFail($unfunded->invoice_id)->remaining > 0, 'Unfunded fixture lost its outstanding balance.');
     verify($unfunded->funding_basis === 'paid_invoice' && !$unfundedReader->funded($unfunded), 'Unfunded registration fixture has spend authority.');
     $beforeUnfunded = finances();
     $result = $unfundedReader->reconcile($unfunded->id);
